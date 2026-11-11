@@ -6,7 +6,7 @@
 
 ## 请求与上下文
 
-- `utils/llmEndpoint.ts` 将配置规范为 `/v1beta/models`（或用户指定的 `/v1/models`）。这个地址同时表达后台加密三字段凭据的协议，无需新增凭据字段。
+- `utils/llmEndpoint.ts` 将 Gemini 基地址规范为 `/v1beta`；模型列表请求再补 `/models`，聊天请求则由 Gemini 转换层生成 `/models/<model>:generateContent`。旧配置中的 `/v1beta/models` 与完整生成地址会归一到同一基地址，避免模型列表路径重复出现 `/models/models`。自定义 `/v1/models` 仍保留可识别的 `/models` 标记。
 - `utils/anthropicApi.ts` 的共享 `fetchLlm` 将 Gemini 请求交给 `utils/geminiApi.ts`，覆盖 safeApi、OSContext、连接测试、模型列表和 Worker SDK 内部出口。按请求选择协议，不注册全局凭据。
 - 发送 `POST /models/<model>:generateContent`，流式使用 `:streamGenerateContent?alt=sse`。所选认证方式只在对应的一个请求位置传 Key；模型列表、普通生成和流式生成共用同一策略。不会发送 OAI 的 prompt_cache_key、stream_options 或 Anthropic cache_control。
 - 模型列表按 nextPageToken 拉取；明确提供能力列表时只保留支持 generateContent 的模型，中转未提供能力列表时保留有名称的模型（具体能否生成由中转决定）。模型 ID 可以带 models/ 前缀，发送时去掉一层。

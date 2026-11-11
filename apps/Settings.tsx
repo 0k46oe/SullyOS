@@ -1472,7 +1472,8 @@ const Settings: React.FC = () => {
           modelHeaders.set('x-sully-gemini-auth-mode', localGeminiAuthMode);
           modelHeaders.set('x-sully-gemini-api-key', apiKey || 'sk-none');
         } else modelHeaders.set('Authorization', `Bearer ${apiKey || 'sk-none'}`);
-        const response = await fetchLlm(`${baseUrl}/models`, {
+        const modelsEndpoint = baseUrl.endsWith('/models') ? baseUrl : `${baseUrl}/models`;
+        const response = await fetchLlm(modelsEndpoint, {
             method: 'GET',
             headers: modelHeaders,
         });

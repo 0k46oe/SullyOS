@@ -24,21 +24,24 @@ afterEach(() => { globalThis.fetch = originalFetch; vi.restoreAllMocks(); });
 
 describe('Gemini native transport', () => {
     it('normalizes official and proxy endpoints, persists protocol across presets, roles and credentials', () => {
-        for (const input of ['https://generativelanguage.googleapis.com', 'https://generativelanguage.googleapis.com/v1beta/', base, `${base}/gemini-test:generateContent`, 'https://generativelanguage.googleapis.com/v1beta/openai']) expect(normalizeLlmBaseUrl(input, 'gemini')).toBe(base);
-        expect(normalizeLlmBaseUrl('https://proxy.test/prefix', 'gemini')).toBe('https://proxy.test/prefix/v1beta/models');
+        const geminiBase = 'https://generativelanguage.googleapis.com/v1beta';
+        for (const input of ['https://generativelanguage.googleapis.com', 'https://generativelanguage.googleapis.com/v1beta/', base, `${base}/gemini-test:generateContent`, 'https://generativelanguage.googleapis.com/v1beta/openai']) expect(normalizeLlmBaseUrl(input, 'gemini')).toBe(geminiBase);
+        expect(normalizeLlmBaseUrl('https://proxy.test/prefix', 'gemini')).toBe('https://proxy.test/prefix/v1beta');
         expect(normalizeLlmBaseUrl('https://proxy.test/prefix/v1', 'gemini')).toBe('https://proxy.test/prefix/v1/models');
+        expect(normalizeLlmBaseUrl('https://api.test', 'openai')).toBe('https://api.test/v1');
+        expect(normalizeLlmBaseUrl('https://api.test/v1/chat/completions', 'openai')).toBe('https://api.test/v1');
         expect(normalizeLlmBaseUrl(base, 'openai')).toBe('https://generativelanguage.googleapis.com/v1');
         expect(llmApiType({ baseUrl: 'https://generativelanguage.googleapis.com' })).toBe('openai');
         expect(isGeminiEndpoint(`${base}/chat/completions`)).toBe(true);
         const api = normalizeApiConfig({ baseUrl: 'https://generativelanguage.googleapis.com', apiKey: ' key ', model: 'gemini-test', apiType: 'gemini' });
-        expect(configFromPreset({ id: 'g', name: 'G', config: api })).toMatchObject({ baseUrl: base, apiType: 'gemini' });
-        expect(pickDialogueApi(api)).toMatchObject({ apiType: 'gemini', baseUrl: base });
+        expect(configFromPreset({ id: 'g', name: 'G', config: api })).toMatchObject({ baseUrl: 'https://generativelanguage.googleapis.com/v1beta', apiType: 'gemini' });
+        expect(pickDialogueApi(api)).toMatchObject({ apiType: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta' });
         expect(normalizeApiConfig({ ...api, geminiAuthMode: 'query' }).geminiAuthMode).toBe('query');
         expect(configFromPreset({ id: 'g', name: 'G', config: { ...api, geminiAuthMode: 'bearer' } })).toMatchObject({ geminiAuthMode: 'bearer' });
         expect(pickDialogueApi({ ...api, geminiAuthMode: 'auto' })).toMatchObject({ geminiAuthMode: 'auto' });
         expect(resolveDialogueApi(api, { dialogueApi: { ...api, geminiAuthMode: 'query' } }).geminiAuthMode).toBe('query');
         expect(resolveDialogueApi(api, { dialogueApi: { baseUrl: 'https://oai.test/v1', apiKey: 'other', model: 'm' } }).apiType).toBe('openai');
-        expect(buildCharChatCredRow({ id: 'c' } as any, undefined, api)!.value).toMatchObject({ apiUrl: base, apiKey: 'key', primaryModel: 'gemini-test' });
+        expect(buildCharChatCredRow({ id: 'c' } as any, undefined, api)!.value).toMatchObject({ apiUrl: `${base}`, apiKey: 'key', primaryModel: 'gemini-test' });
         expect(normalizeChatApiUrl(base)).toBe(base);
     });
     it('keeps volatile system positions, converts images/tools/JSON, strips foreign cache markers', () => {

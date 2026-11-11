@@ -56,7 +56,9 @@ export const supportsLlmCredentials = (features: string[] | null | undefined): b
  */
 export const normalizeChatApiUrl = (baseUrl: string, apiType?: LlmApiType): string => {
   const normalized = normalizeLlmBaseUrl(baseUrl, apiType);
-  return isAnthropicEndpoint(normalized) || isGeminiEndpoint(normalized) ? normalized : `${normalized}/chat/completions`;
+  if (isAnthropicEndpoint(normalized)) return normalized;
+  if (apiType === 'gemini' || isGeminiEndpoint(normalized)) return normalized.endsWith('/models') ? normalized : `${normalized}/models`;
+  return `${normalized}/chat/completions`;
 };
 
 /**

@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Gemini API 连通性检查</title>
+  <style>
+    :root { color-scheme: light; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #202a2a; background: #f3f6f3; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { background: #173b34; color: #f4faf7; padding: 24px max(20px, calc((100vw - 960px) / 2)); }
+    header p { color: #c7ded5; margin: 5px 0 0; }
+    main { max-width: 960px; margin: 24px auto; padding: 0 18px 48px; }
+    h1 { font-size: 22px; margin: 0; font-weight: 650; }
+    h2 { font-size: 16px; margin: 0 0 14px; }
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, .9fr); gap: 16px; align-items: start; }
+    section { background: white; border: 1px solid #dce5df; border-radius: 8px; padding: 18px; margin-bottom: 16px; }
+    label { display: block; font-size: 12px; font-weight: 650; color: #465653; margin: 12px 0 5px; }
+    input, select, textarea { width: 100%; border: 1px solid #cbd7d1; border-radius: 6px; background: #fff; color: #1d2926; font: inherit; padding: 9px 10px; }
+    textarea { min-height: 76px; resize: vertical; }
+    input:focus, select:focus, textarea:focus { outline: 2px solid #5b9b83; outline-offset: 1px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 15px; }
+    button { border: 0; border-radius: 6px; padding: 10px 13px; font: inherit; font-weight: 650; cursor: pointer; color: white; background: #176b54; }
+    button.secondary { color: #245146; background: #e6f1eb; }
+    button:disabled { opacity: .55; cursor: wait; }
+    .hint { color: #64736e; font-size: 12px; margin: 8px 0 0; }
+    .origin { font: 12px ui-monospace, monospace; overflow-wrap: anywhere; background: #edf4ef; padding: 8px; border-radius: 5px; }
+    .warning { border-left: 3px solid #d3953f; padding-left: 10px; color: #5f5140; }
+    .checks { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-top: 12px; }
+    .checks input { width: auto; }
+    #results { display: grid; gap: 10px; }
+    .result { border-top: 1px solid #e6ece8; padding-top: 10px; }
+    .result:first-child { border-top: 0; padding-top: 0; }
+    .result strong { display: block; font-size: 13px; }
+    .result pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; margin: 7px 0 0; padding: 9px; background: #f2f5f3; border-radius: 5px; font: 11px/1.5 ui-monospace, monospace; }
+    .good { color: #176b54; } .bad { color: #a43e32; } .neutral { color: #735720; }
+    .curl { width: 100%; min-height: 115px; font: 11px/1.45 ui-monospace, monospace; }
+    @media (max-width: 720px) { .layout { grid-template-columns: 1fr; } header { padding: 20px; } main { margin-top: 14px; } .row { grid-template-columns: 1fr; gap: 0; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Gemini 原生 API 连通性检查</h1>
+    <p>对照模型列表、生成请求和浏览器跨域行为，Key 只保留在当前页面内存。</p>
+  </header>
+  <main>
+    <div class="layout">
+      <div>
+        <section>
+          <h2>请求设置</h2>
+          <div class="origin">当前页面 Origin：<span id="origin"></span></div>
+          <p class="hint warning">要复现 SullyOS 的浏览器 CORS 行为，请从 GitHub Pages 测试页打开本页。file:// 或 localhost 的 Origin 与生产站不同。</p>
+          <label for="endpoint">模型列表 endpoint</label>
+          <input id="endpoint" spellcheck="false" value="https://star.taikoapi.com/v1beta/models">
+          <div class="row">
+            <div>
+              <label for="key">API Key</label>
+              <input id="key" type="password" autocomplete="off" placeholder="粘贴 Key；不会保存">
+            </div>
+            <div>
+              <label for="mode">认证方式</label>
+              <select id="mode">
+                <option value="header">x-goog-api-key</option>
+                <option value="bearer">Bearer Token</option>
+                <option value="query">URL Key</option>
+                <option value="auto">自动（仅 401/403 切换）</option>
+              </select>
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label for="model">模型 ID</label>
+              <input id="model" spellcheck="false" placeholder="例如：gemini-2.5-flash">
+            </div>
+            <div>
+              <label for="prompt">测试提示词</label>
+              <input id="prompt" value="请只回复 OK">
+            </div>
+          </div>
+          <label class="checks"><input id="stream" type="checkbox"> 使用流式生成请求</label>
+          <div class="buttons">
+            <button id="modelsBtn">测试模型列表 GET</button>
+            <button id="generateBtn">测试生成 POST</button>
+            <button class="secondary" id="reachBtn">仅测域名可达</button>
+            <button class="secondary" id="clearBtn">清除结果</button>
+          </div>
+          <p class="hint">模型列表路径可以手动改成日志里的 <code>/v1beta/models/models</code>，用来对比路由差异。生成请求沿用该路径并追加模型与方法。</p>
+        </section>
+        <section>
+          <h2>预检对照命令</h2>
+          <p class="hint">POST JSON 通常会触发 OPTIONS 预检。命令不含 Key；可对照响应中的 Access-Control-Allow-* 标头。</p>
+          <textarea id="curl" class="curl" readonly></textarea>
+          <div class="buttons"><button class="secondary" id="copyBtn">复制命令</button></div>
+        </section>
+      </div>
+      <section>
+        <h2>测试结果</h2>
+        <div id="results"><p class="hint">尚未发送请求。</p></div>
+      </section>
+    </div>
+  </main>
+  <script>
+    (() => {
+      const $ = id => document.getElementById(id);
+      const resultBox = $('results');
+      $('origin').textContent = location.origin;
+      const safeText = value => {
+        const key = $('key').value;
+        let text = String(value ?? '');
+        if (key) {
+          text = text.split(key).join('[Key 已隐藏]');
+          try { text = text.split(encodeURIComponent(key)).join('[Key 已隐藏]'); } catch {}
+        }
+        return text;
+      };
+      function addResult(title, kind, details) {
+        const empty = resultBox.querySelector('.hint');
+        if (empty) resultBox.replaceChildren();
+        const row = document.createElement('div'); row.className = 'result';
+        const heading = document.createElement('strong'); heading.className = kind;
+        heading.textContent = `${new Date().toLocaleTimeString()} · ${title}`;
+        const pre = document.createElement('pre'); pre.textContent = safeText(details);
+        row.append(heading, pre); resultBox.prepend(row);
+      }
+      function modelsUrl() {
+        const url = new URL($('endpoint').value.trim());
+        url.hash = '';
+          url.pathname = url.pathname.replace(/\/+$/, '');
+          if (url.pathname.endsWith('/v1beta')) url.pathname += '/models';
+          else if (!url.pathname.endsWith('/models')) url.pathname += '/v1beta/models';
+        url.searchParams.delete('key');
+        return url;
+      }
+      function redactedUrl(url) { const safe = new URL(url.href); if (safe.searchParams.has('key')) safe.searchParams.set('key', '[hidden]'); return safe.href; }
+      function modes() { return $('mode').value === 'auto' ? ['header', 'bearer', 'query'] : [$('mode').value]; }
+      async function request(url, method, body) {
+        const key = $('key').value.trim();
+        if (!key) throw new Error('请先填写 API Key。');
+        let response;
+        for (const mode of modes()) {
+          const target = new URL(url.href); target.searchParams.delete('key');
+          const headers = new Headers();
+          if (body !== undefined) headers.set('Content-Type', 'application/json');
+          if (mode === 'header') headers.set('x-goog-api-key', key);
+          else if (mode === 'bearer') headers.set('Authorization', `Bearer ${key}`);
+          else target.searchParams.set('key', key);
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 20000);
+          try {
+            response = await fetch(target.href, { method, headers, ...(body !== undefined ? { body: JSON.stringify(body) } : {}), signal: controller.signal });
+          } catch (error) {
+            const reason = error?.name === 'AbortError' ? '请求超时（20 秒）。' : '浏览器没有向页面提供可读取的响应。可能是 CORS/OPTIONS 预检、DNS/TLS、网络代理或扩展拦截；查看 DevTools Network 中的 OPTIONS 和 Console。自动模式不会因网络错误切换认证。';
+            addResult(`${method} ${mode} · 无 HTTP 响应`, 'bad', `${reason}\n请求：${method} ${redactedUrl(target)}\n错误：${error?.name || 'Error'}: ${error?.message || error}`);
+            throw error;
+          } finally { clearTimeout(timer); }
+          const requestInfo = `请求：${method} ${redactedUrl(target)}\nOrigin：${location.origin}\n认证：${mode}`;
+          if ((response.status === 401 || response.status === 403) && $('mode').value === 'auto' && mode !== 'query') {
+            addResult(`${method} ${mode} · HTTP ${response.status}，尝试下一种认证`, 'neutral', requestInfo);
+            try { await response.body?.cancel(); } catch {}
+            continue;
+          }
+          if (response.status === 401 || response.status === 403) {
+            if ($('mode').value === 'auto' && mode === 'query') addResult(`${method} 自动认证 · 三种方式均收到认证失败`, 'bad', `${requestInfo}\n最终状态：HTTP ${response.status}\n${safeText(await response.text())}`);
+            else addResult(`${method} ${mode} · HTTP ${response.status}`, 'bad', `${requestInfo}\n${safeText(await response.text())}`);
+            return response;
+          }
+          if (!response.ok) {
+            addResult(`${method} ${mode} · HTTP ${response.status}（不切换认证）`, 'bad', `${requestInfo}\n${safeText(await response.text())}`);
+            return response;
+          }
+          return response;
+        }
+        return response;
+      }
+      function busy(value) { for (const id of ['modelsBtn', 'generateBtn', 'reachBtn']) $(id).disabled = value; }
+      async function testModels() {
+        busy(true);
+        try {
+          const endpoint = modelsUrl(), models = [], seen = new Set();
+          for (;;) {
+            const response = await request(endpoint, 'GET');
+            if (!response?.ok) return;
+            const data = await response.json();
+            if (!Array.isArray(data.models)) throw new Error('返回不是 Gemini 原生模型列表（缺少 models 数组）。');
+            models.push(...data.models);
+            if (!data.nextPageToken || seen.has(data.nextPageToken)) break;
+            seen.add(data.nextPageToken); endpoint.searchParams.set('pageToken', data.nextPageToken);
+          }
+          const selectable = models.map(m => String(m.name || '').replace(/^models\//, '')).filter(Boolean);
+          if (!$('model').value && selectable.length) $('model').value = selectable[0];
+          addResult('模型列表 · 成功', 'good', `共返回 ${models.length} 个模型。\n${selectable.slice(0, 50).join('\n') || '列表为空。'}${selectable.length > 50 ? '\n…已省略' : ''}`);
+        } catch (error) { if (error?.name !== 'TypeError' && error?.name !== 'AbortError') addResult('模型列表 · 检查失败', 'bad', error?.message || error); }
+        finally { busy(false); }
+      }
+      function parseStream(text) {
+        const chunks = [];
+        for (const line of text.split(/\r?\n/)) {
+          if (!line.startsWith('data:')) continue;
+          const raw = line.slice(5).trim(); if (!raw || raw === '[DONE]') continue;
+          try { const data = JSON.parse(raw); for (const part of data.candidates?.[0]?.content?.parts || []) if (typeof part.text === 'string') chunks.push(part.text); }
+          catch { /* Keep parsing independent of malformed gateway event lines. */ }
+        }
+        return chunks.join('');
+      }
+      async function testGenerate() {
+        const model = $('model').value.trim();
+        if (!model) { addResult('生成 · 缺少模型 ID', 'neutral', '先填写模型 ID，或先测试模型列表。'); return; }
+        busy(true);
+        try {
+          const endpoint = modelsUrl();
+          endpoint.pathname = `${endpoint.pathname.replace(/\/$/, '')}/${encodeURIComponent(model.replace(/^models\//, ''))}:${$('stream').checked ? 'streamGenerateContent' : 'generateContent'}`;
+          if ($('stream').checked) endpoint.searchParams.set('alt', 'sse');
+          else endpoint.searchParams.delete('alt');
+          const body = { contents: [{ role: 'user', parts: [{ text: $('prompt').value || '请只回复 OK' }] }] };
+          const response = await request(endpoint, 'POST', body);
+          if (!response?.ok) return;
+          const raw = await response.text();
+          let output;
+          if (response.headers.get('content-type')?.includes('text/event-stream')) output = parseStream(raw);
+          else { const data = JSON.parse(raw); output = (data.candidates?.[0]?.content?.parts || []).map(p => p.text || '').join(''); }
+          addResult(`生成 · HTTP ${response.status}`, 'good', `模型：${model}\n响应：${output || '请求成功，但未解析到文本内容。'}\n响应头 Access-Control-Allow-Origin：${response.headers.get('access-control-allow-origin') || '(浏览器未暴露或未返回)'}`);
+        } catch (error) { if (error?.name !== 'TypeError' && error?.name !== 'AbortError') addResult('生成 · 解析失败', 'bad', error?.message || error); }
+        finally { busy(false); }
+      }
+      async function testReachability() {
+        busy(true);
+        try {
+          const endpoint = modelsUrl();
+          const response = await fetch(endpoint.origin, { mode: 'no-cors', cache: 'no-store' });
+          addResult('域名可达性 · opaque response', 'neutral', `浏览器完成了 no-cors 请求，但状态和响应体不可读取。\n这只能说明到 ${endpoint.origin} 的基础连接可达，不代表模型 API、Key 或 CORS 正常。`);
+        } catch (error) { addResult('域名可达性 · 连接失败', 'bad', `${error?.name}: ${error?.message}\n可能是 DNS、TLS、网络代理、扩展或连接被拒。`); }
+        finally { busy(false); }
+      }
+      function updateCurl() {
+        try {
+          const endpoint = modelsUrl();
+          const requested = $('mode').value === 'bearer' ? 'content-type,authorization' : $('mode').value === 'query' ? 'content-type' : 'content-type,x-goog-api-key';
+          const model = encodeURIComponent(($('model').value.trim() || 'model-for-preflight').replace(/^models\//, ''));
+          const action = $('stream').checked ? 'streamGenerateContent' : 'generateContent';
+          const path = `${endpoint.origin}${endpoint.pathname.replace(/\/$/, '')}/${model}:${action}`;
+          $('curl').value = `curl.exe -i -X OPTIONS "${path}" -H "Origin: ${location.origin}" -H "Access-Control-Request-Method: POST" -H "Access-Control-Request-Headers: ${requested}"`;
+        } catch { $('curl').value = '请先填写合法的模型列表 endpoint。'; }
+      }
+      $('modelsBtn').addEventListener('click', testModels);
+      $('generateBtn').addEventListener('click', testGenerate);
+      $('reachBtn').addEventListener('click', testReachability);
+      $('clearBtn').addEventListener('click', () => resultBox.innerHTML = '<p class="hint">尚未发送请求。</p>');
+      $('copyBtn').addEventListener('click', async () => { await navigator.clipboard.writeText($('curl').value); $('copyBtn').textContent = '已复制'; setTimeout(() => $('copyBtn').textContent = '复制命令', 1200); });
+      $('endpoint').addEventListener('input', updateCurl);
+      $('mode').addEventListener('change', updateCurl);
+      updateCurl();
+    })();
+  </script>
+</body>
+</html>

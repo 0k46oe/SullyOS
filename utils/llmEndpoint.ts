@@ -8,7 +8,8 @@ export function isAnthropicEndpoint(value: string): boolean {
 
 /** Canonical native base also survives the three-field background credential format. */
 export function isGeminiEndpoint(value: string): boolean {
-    try { return /\/v1(?:beta)?\/models(?:\/(?:chat\/completions|models|[^/]+:(?:streamGenerateContent|generateContent)))?\/?$/.test(new URL(value).pathname); }
+    try { return /\/v1beta(?:\/(?:chat\/completions|models(?:\/(?:chat\/completions|models|[^/]+:(?:streamGenerateContent|generateContent)))?))?\/?$/.test(new URL(value).pathname)
+        || /\/v1\/models(?:\/(?:chat\/completions|models|[^/]+:(?:streamGenerateContent|generateContent)))?\/?$/.test(new URL(value).pathname); }
     catch { return false; }
 }
 
@@ -20,17 +21,26 @@ export function normalizeLlmBaseUrl(value: string, type?: LlmApiType): string {
         const url = new URL(base);
         if (type === 'gemini') {
             url.pathname = url.pathname.replace(/\/models\/[^/]+:(?:streamGenerateContent|generateContent)\/?$/, '/models')
-                .replace(/\/(?:chat\/completions|messages(?:\/chat\/completions)?)\/?$/, '').replace(/\/+$/, '');
+                .replace(/\/(?:models\/)?(?:chat\/completions|messages(?:\/chat\/completions)?)\/?$/, '')
+                .replace(/\/models(?:\/models)?\/?$/, '').replace(/\/+$/, '');
             if (url.pathname.endsWith('/openai')) url.pathname = url.pathname.slice(0, -7);
             if (!url.pathname || url.pathname === '/') url.pathname = '/v1beta';
-            if (!/\/v1(?:beta)?(?:\/models)?$/.test(url.pathname)) url.pathname += '/v1beta';
-            if (!url.pathname.endsWith('/models')) url.pathname += '/models';
+            if (/\/v1beta$/.test(url.pathname)) return url.href.replace(/\/$/, '');
+            if (/\/v1\/models$/.test(url.pathname)) return url.href.replace(/\/$/, '');
+            if (/\/v1$/.test(url.pathname)) { url.pathname += '/models'; return url.href.replace(/\/$/, ''); }
+            if (!/\/v1(?:beta)?$/.test(url.pathname)) url.pathname += '/v1beta';
         } else if (type === 'anthropic') {
             url.pathname = url.pathname.replace(/\/(?:messages(?:\/chat\/completions)?|chat\/completions|models)\/?$/, '').replace(/\/+$/, '');
             if (!url.pathname || url.pathname === '/') url.pathname = '/v1';
             url.pathname += '/messages';
         } else {
-            url.pathname = url.pathname.replace(/\/messages(?:\/chat\/completions)?\/?$/, '').replace(/\/v1(?:beta)?\/models\/?$/, '/v1');
+            url.pathname = url.pathname
+                .replace(/\/v1(?:beta)?\/models\/?$/, '/v1')
+                .replace(/\/(?:chat\/completions|completions|models)\/?$/, '')
+                .replace(/\/messages(?:\/chat\/completions)?\/?$/, '')
+                .replace(/\/+$/, '');
+            if (!url.pathname || url.pathname === '/') url.pathname = '/v1';
+            else if (!/\/v\d+(?:alpha\d*|beta\d*)?$/.test(url.pathname)) url.pathname += '/v1';
         }
         return url.href.replace(/\/$/, '');
     } catch { return base; }
