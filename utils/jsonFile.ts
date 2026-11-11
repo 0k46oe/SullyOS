@@ -66,6 +66,26 @@ export const requiresLocalJsonFiles = (messages: Message[]): boolean => {
   return /json/i.test(latestUser?.content || '');
 };
 
+/** Keep JSON handling guidance out of unrelated character turns. */
+export const isJsonFilePromptRelevant = (messages: Message[]): boolean => {
+  let latestUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index].role === 'user') { latestUserIndex = index; break; }
+  }
+  if (latestUserIndex < 0) return false;
+  const latestUser = messages[latestUserIndex];
+  if (/\bjson\b|\.json\b/i.test(latestUser.content || '')) return true;
+
+  let previousAssistantIndex = -1;
+  for (let index = latestUserIndex - 1; index >= 0; index--) {
+    if (messages[index].role === 'assistant') { previousAssistantIndex = index; break; }
+  }
+  return messages.slice(previousAssistantIndex + 1, latestUserIndex + 1).some(message =>
+    message.role === 'user' && message.type === 'collaboration_file'
+      && (message.metadata?.format === 'json' || /\.json$/i.test(String(message.metadata?.fileName || ''))),
+  );
+};
+
 export const parseJsonArtifactBlocks = (response: string): { visibleText: string; artifacts: JsonArtifactRequest[] } => {
   const parsed = parseArtifactFileBlocks(response, { formats: new Set(['json']), defaultTitle: '聊天导出的 JSON', validateJson: true, reportTruncation: true });
   return { visibleText: parsed.visibleText, artifacts: parsed.artifacts.map(({ title, content }) => ({

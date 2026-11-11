@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyJsonValue, isJsonFile, MAX_JSON_CONTEXT_CHARS, MAX_JSON_FILE_BYTES, parseJsonArtifactBlocks, parseJsonFile, requiresLocalJsonFiles } from './jsonFile';
+import { classifyJsonValue, isJsonFile, isJsonFilePromptRelevant, MAX_JSON_CONTEXT_CHARS, MAX_JSON_FILE_BYTES, parseJsonArtifactBlocks, parseJsonFile, requiresLocalJsonFiles } from './jsonFile';
 import type { Message } from '../types';
 
 const file = (text: string, name = 'preset.json', type = 'application/json') => new File([text], name, { type });
@@ -91,5 +91,17 @@ describe('JSON file output', () => {
     expect(requiresLocalJsonFiles([row])).toBe(false);
     expect(requiresLocalJsonFiles([{ ...row, content: '请导出 JSON 文件' }])).toBe(true);
     expect(requiresLocalJsonFiles([{ ...row, type: 'collaboration_file', metadata: { fileName: 'preset.json' } }, row])).toBe(true);
+  });
+
+  it('injects JSON guidance only for an active JSON request or pending JSON upload', () => {
+    const hello = { role: 'user', type: 'text', content: '你好' } as Message;
+    const jsonRequest = { ...hello, content: '帮我导出一个 JSON 文件' } as Message;
+    const upload = { role: 'user', type: 'collaboration_file', content: '[文件]', metadata: { fileName: 'preset.json' } } as Message;
+    const oldUpload = [upload, { role: 'assistant', type: 'text', content: '已处理' } as Message, hello];
+
+    expect(isJsonFilePromptRelevant([hello])).toBe(false);
+    expect(isJsonFilePromptRelevant([jsonRequest])).toBe(true);
+    expect(isJsonFilePromptRelevant([upload, hello])).toBe(true);
+    expect(isJsonFilePromptRelevant(oldUpload)).toBe(false);
   });
 });

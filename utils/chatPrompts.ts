@@ -36,7 +36,7 @@ import { getDailyScheduleForChar } from './dailySchedule';
 import { formatRelativeAge } from './groupChat/relativeTime';
 import { isBlobRef } from './blobRef';
 import { voiceLanguagePromptLabel } from './voiceLanguage';
-import { clampJsonText, JSON_FILE_OUTPUT_PROMPT } from './jsonFile';
+import { clampJsonText, isJsonFilePromptRelevant, JSON_FILE_OUTPUT_PROMPT } from './jsonFile';
 import { formatStoryDateTime, getActiveTavernStoryTime } from './tavernStoryTime';
 
 // 语音格式指导按当前 TTS 服务商二选一：用 MiniMax 才注入 MiniMax 那套（含 <#秒#> 停顿标记），
@@ -991,7 +991,7 @@ ${xhsEnabled ? `${[notionEnabled, feishuEnabled, notionNotesEnabled].filter(Bool
             baseSystemPrompt += `
 
 ### 协同功能
-你在普通聊天，可以直接读取和导出 JSON。其它格式需要制作时，可引导${userProfile.name}从 ChatApp 加号页进入“协同工作”；不要在这里假装制作其它格式的文件。系统另给已有文件标题，可按规则发送。
+其它格式需要制作时，可引导${userProfile.name}从 ChatApp 加号页进入“协同工作”；不要在这里假装制作其它格式的文件。系统另给已有文件标题，可按规则发送。
 `;
         }
 
@@ -1081,7 +1081,9 @@ ${voiceActingGuide()}`;
             baseSystemPrompt += `\n\n[系统提示: 语音消息功能当前未开启。严禁使用 <语音>...</语音> 和 <字幕>...</字幕> 标签。所有回复必须是纯文字消息。]`;
         }
 
-        baseSystemPrompt += '\n\n' + JSON_FILE_OUTPUT_PROMPT;
+        if (!forFirePack && isJsonFilePromptRelevant(currentMsgs)) {
+            baseSystemPrompt += '\n\n' + JSON_FILE_OUTPUT_PROMPT;
+        }
         if (char.chatActionDescriptionEnabled) baseSystemPrompt += CHAT_ACTION_PROMPT;
         baseSystemPrompt += buildChatImagePrompt(char);
 
