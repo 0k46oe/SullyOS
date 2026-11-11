@@ -1361,6 +1361,14 @@ export async function injectMemoryPalace(
     // （群聊/通话/事件/学习等）召回的房间名都统一显示「{用户名}的房间」，
     // 而不是回退成「用户房间」。
     let resolvedUserName = userName;
+    // 门牌标题优先使用当前角色的独立用户档案名；不改动上游整理提示词和已存门牌内容。
+    try {
+        const character = await DB.getCharacter(charId);
+        const privateName = character?.characterUserProfile?.enabled
+            ? character.characterUserProfile.name.trim()
+            : '';
+        if (privateName) resolvedUserName = privateName;
+    } catch {}
     if (!resolvedUserName) {
         try { resolvedUserName = (await DB.getUserProfile())?.name || undefined; } catch {}
     }
