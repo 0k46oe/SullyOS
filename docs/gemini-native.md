@@ -2,13 +2,13 @@
 
 设置 → API 接口、角色独立 API、API 预设的接口类型均可选择「Gemini 原生」。填官方根地址 `https://generativelanguage.googleapis.com`、`/v1beta`、`/v1beta/models` 或完整 `.../models/<model>:generateContent` 地址，以及 Key 和实际模型 ID。支持 `/v1` 与自定义路径前缀；中转必须提供 Gemini 原生协议和浏览器 CORS。不会根据官方域名自动切换协议，也不预填未经验证的模型别名。
 
-当前仅支持 **Gemini Developer API 的 API Key 鉴权**（x-goog-api-key）。不读取 service account 文件，不签发或刷新 OAuth token，不直接支持 Vertex AI；如需连接 Vertex AI，请使用能完成上游鉴权并提供 Gemini 原生协议的已认证代理。
+支持 **Gemini Developer API 的 API Key 鉴权**，可按站点选择 `x-goog-api-key`、Bearer、URL `?key=` 或自动尝试。自动模式只在 HTTP 401/403 时依次尝试，每种方式最多一次。旧配置和缺少认证字段的预设默认使用 `x-goog-api-key`。不读取 service account 文件，不签发或刷新 OAuth token，不直接支持 Vertex AI；如需连接 Vertex AI，请使用能完成上游鉴权并提供 Gemini 原生协议的已认证代理。
 
 ## 请求与上下文
 
 - `utils/llmEndpoint.ts` 将配置规范为 `/v1beta/models`（或用户指定的 `/v1/models`）。这个地址同时表达后台加密三字段凭据的协议，无需新增凭据字段。
 - `utils/anthropicApi.ts` 的共享 `fetchLlm` 将 Gemini 请求交给 `utils/geminiApi.ts`，覆盖 safeApi、OSContext、连接测试、模型列表和 Worker SDK 内部出口。按请求选择协议，不注册全局凭据。
-- 发送 `POST /models/<model>:generateContent`，流式使用 `:streamGenerateContent?alt=sse`。Key 放入 `x-goog-api-key`，不放进 URL。不会发送 OAI 的 prompt_cache_key、stream_options 或 Anthropic cache_control。
+- 发送 `POST /models/<model>:generateContent`，流式使用 `:streamGenerateContent?alt=sse`。所选认证方式只在对应的一个请求位置传 Key；模型列表、普通生成和流式生成共用同一策略。不会发送 OAI 的 prompt_cache_key、stream_options 或 Anthropic cache_control。
 - 模型列表按 nextPageToken 拉取；明确提供能力列表时只保留支持 generateContent 的模型，中转未提供能力列表时保留有名称的模型（具体能否生成由中转决定）。模型 ID 可以带 models/ 前缀，发送时去掉一层。
 - 开头连续的 system/developer 按原文、原顺序放入首条 user Content 的 parts，不添加或改写稳定提示词；历史中途和尾部动态提醒保持原位置，以 system-reminder 上下文块表达。当前未能从可访问的官方资料确认 systemInstruction 的隐式缓存语义，因此不使用该字段，也不据此保证命中率。此映射让稳定设定处于 user 内容中，而非独立 systemInstruction。
 - 支持文本、base64 图片及带 MIME 类型的 Gemini 可用文件 URI、函数工具、工具结果、JSON 输出意图和 JSON schema。文件 URI 是否可读取由上游决定；不在客户端下载外部图片。未知内容块明确报错。

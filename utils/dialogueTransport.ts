@@ -44,7 +44,13 @@ export function createDialogueFetch(api: DialogueApiConfig): typeof safeFetchJso
     try {
       options.signal?.throwIfAborted();
       const headers = new Headers(options.headers);
-      if (native || gemini) headers.set('Authorization', 'Bearer ' + normalizeApiCredential(api.apiKey));
+      if (native) headers.set('Authorization', 'Bearer ' + normalizeApiCredential(api.apiKey));
+      if (gemini) {
+        headers.set('x-sully-gemini-auth-mode', api.geminiAuthMode || 'header');
+        headers.set('x-sully-gemini-api-key', normalizeApiCredential(api.apiKey));
+        headers.delete('Authorization');
+        headers.delete('x-goog-api-key');
+      }
       const endpoint = normalizeLlmBaseUrl(api.baseUrl, llmApiType(api)) + '/chat/completions';
       const result = await safeFetchJson(native || gemini ? endpoint : url, { ...options, headers, ...((native || gemini) && body && !options.method ? { method: 'POST' } : {}), ...(body ? { body: JSON.stringify(body) } : {}), ...(observer ? { __sullyAnthropicObserver: observer } : {}) } as RequestInit, retries, timeout, requestMeta, hooks);
       options.signal?.throwIfAborted();

@@ -23,7 +23,7 @@ import { normalizeLlmBaseUrl, llmApiType } from './llmEndpoint';
  * 把用户手调过的温度、流式开关顺手重置掉。
  */
 export type PresetSwitchPatch =
-  Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'> & Partial<Pick<APIConfig, 'apiType' | 'maxTokens' | 'anthropicPromptCacheTtl' | 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'openaiPromptCache'>>;
+  Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'> & Partial<Pick<APIConfig, 'apiType' | 'geminiAuthMode' | 'maxTokens' | 'anthropicPromptCacheTtl' | 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'openaiPromptCache'>>;
 
 export function configFromPreset(preset: ApiPreset): PresetSwitchPatch {
   const patch: PresetSwitchPatch = {
@@ -33,6 +33,7 @@ export function configFromPreset(preset: ApiPreset): PresetSwitchPatch {
     model: normalizeApiModel(preset.config.model),
   };
   if (typeof preset.config.stream === 'boolean') patch.stream = preset.config.stream;
+  if (patch.apiType === 'gemini') patch.geminiAuthMode = preset.config.geminiAuthMode ?? 'header';
   if (typeof preset.config.temperature === 'number') patch.temperature = preset.config.temperature;
   if (typeof preset.config.anthropicCustomTemperature === 'boolean' || patch.apiType === 'anthropic') {
     patch.anthropicCustomTemperature = preset.config.anthropicCustomTemperature === true;
@@ -47,12 +48,13 @@ export function configFromPreset(preset: ApiPreset): PresetSwitchPatch {
 /** 接口类型及三件套一致才算同一预设；归一化后比较，避免末尾斜杠或空格造成假不一致。 */
 export function presetMatchesConfig(
   preset: ApiPreset,
-  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'apiType'>,
+  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'apiType'> & Partial<Pick<APIConfig, 'geminiAuthMode'>>,
 ): boolean {
   return llmApiType(preset.config) === llmApiType(config)
     && normalizeLlmBaseUrl(normalizeApiBaseUrl(preset.config.baseUrl), llmApiType(preset.config)) === normalizeLlmBaseUrl(normalizeApiBaseUrl(config.baseUrl), llmApiType(config))
     && normalizeApiCredential(preset.config.apiKey) === normalizeApiCredential(config.apiKey)
-    && normalizeApiModel(preset.config.model) === normalizeApiModel(config.model);
+    && normalizeApiModel(preset.config.model) === normalizeApiModel(config.model)
+    && (llmApiType(config) !== 'gemini' || (preset.config.geminiAuthMode ?? 'header') === (config.geminiAuthMode ?? 'header'));
 }
 
 /**
@@ -63,7 +65,7 @@ export function presetMatchesConfig(
  */
 export function presetDiffersFromConfig(
   preset: ApiPreset,
-  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'apiType'> & Partial<Pick<APIConfig, 'maxTokens' | 'anthropicPromptCacheTtl' | 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'openaiPromptCache'>>,
+  config: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'apiType'> & Partial<Pick<APIConfig, 'geminiAuthMode' | 'maxTokens' | 'anthropicPromptCacheTtl' | 'stream' | 'temperature' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'openaiPromptCache'>>,
 ): boolean {
   if (!presetMatchesConfig(preset, config)) return true;
   if ((preset.config.maxTokens ?? 8000) !== (config.maxTokens ?? 8000)) return true;

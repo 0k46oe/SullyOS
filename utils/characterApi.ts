@@ -36,6 +36,7 @@ export function pickDialogueApi(api: DialogueApiConfig): DialogueApiConfig {
     apiType: llmApiType(api),
     apiKey: normalizeApiCredential(api.apiKey),
     model: normalizeApiModel(api.model),
+    ...(api.geminiAuthMode ? { geminiAuthMode: api.geminiAuthMode } : {}),
     ...(typeof api.stream === 'boolean' ? { stream: api.stream } : {}),
     ...(typeof api.temperature === 'number' ? { temperature: api.temperature } : {}),
     ...(api.anthropicPromptCacheTtl ? { anthropicPromptCacheTtl: api.anthropicPromptCacheTtl } : {}),

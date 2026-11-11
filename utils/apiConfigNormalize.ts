@@ -28,6 +28,8 @@ export function normalizeApiConfig(config: APIConfig): APIConfig {
     baseUrl: normalizeLlmBaseUrl(normalizeApiBaseUrl(config.baseUrl), llmApiType(config)),
     apiKey: normalizeApiCredential(config.apiKey),
     model: normalizeApiModel(config.model),
+    ...(config.geminiAuthMode === 'auto' || config.geminiAuthMode === 'bearer' || config.geminiAuthMode === 'query' || config.geminiAuthMode === 'header'
+      ? { geminiAuthMode: config.geminiAuthMode } : {}),
     ...(config.protocol !== undefined ? { protocol: normalizeApiProtocol(config.protocol) } : {}),
     ...(config.anthropicPromptCache !== undefined ? { anthropicPromptCache: config.anthropicPromptCache !== false } : {}),
     ...(config.anthropicPromptCacheTtl === '1h' ? { anthropicPromptCacheTtl: '1h' as const } : config.anthropicPromptCacheTtl === '5m' ? { anthropicPromptCacheTtl: '5m' as const } : {}),

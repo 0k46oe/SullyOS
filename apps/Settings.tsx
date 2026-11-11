@@ -514,6 +514,7 @@ const Settings: React.FC = () => {
   const [localOpenaiPromptCache, setLocalOpenaiPromptCache] = useState(apiConfig.openaiPromptCache !== false);
   const [localUrl, setLocalUrl] = useState(apiConfig.baseUrl);
   const [localApiType, setLocalApiType] = useState<LlmApiType>(llmApiType(apiConfig));
+  const [localGeminiAuthMode, setLocalGeminiAuthMode] = useState<NonNullable<APIConfig['geminiAuthMode']>>(apiConfig.geminiAuthMode || 'header');
   const [localModel, setLocalModel] = useState(String(apiConfig.model || ''));
   const [localStream, setLocalStream] = useState<boolean>(apiConfig.stream === true);
   const [localMaxTokens, setLocalMaxTokens] = useState(apiConfig.maxTokens ?? 8000);
@@ -571,6 +572,7 @@ const Settings: React.FC = () => {
   const [editPresetName, setEditPresetName] = useState('');
   const [editPresetUrl, setEditPresetUrl] = useState('');
   const [editPresetApiType, setEditPresetApiType] = useState<LlmApiType>('openai');
+  const [editPresetGeminiAuthMode, setEditPresetGeminiAuthMode] = useState<NonNullable<APIConfig['geminiAuthMode']>>('header');
   const [editPresetKey, setEditPresetKey] = useState('');
   const [editPresetModel, setEditPresetModel] = useState('');
   const [editPresetStream, setEditPresetStream] = useState(false);
@@ -1006,6 +1008,7 @@ const Settings: React.FC = () => {
   useEffect(() => {
       setLocalUrl(apiConfig.baseUrl);
       setLocalApiType(llmApiType(apiConfig));
+      setLocalGeminiAuthMode(apiConfig.geminiAuthMode || 'header');
       setLocalKey(apiConfig.apiKey);
       setLocalModel(String(apiConfig.model || ''));
       setLocalStream(apiConfig.stream === true);
@@ -1015,7 +1018,7 @@ const Settings: React.FC = () => {
       setLocalAnthropicPromptCache(apiConfig.anthropicPromptCache !== false);
       setLocalAnthropicPromptCacheTtl(apiConfig.anthropicPromptCacheTtl === '1h' ? '1h' : '5m');
       setLocalOpenaiPromptCache(apiConfig.openaiPromptCache !== false);
-  }, [apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.stream, apiConfig.temperature, apiConfig.maxTokens, apiConfig.apiType, apiConfig.protocol, apiConfig.anthropicCustomTemperature, apiConfig.anthropicPromptCache, apiConfig.anthropicPromptCacheTtl, apiConfig.openaiPromptCache]);
+  }, [apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.stream, apiConfig.temperature, apiConfig.maxTokens, apiConfig.apiType, apiConfig.protocol, apiConfig.geminiAuthMode, apiConfig.anthropicCustomTemperature, apiConfig.anthropicPromptCache, apiConfig.anthropicPromptCacheTtl, apiConfig.openaiPromptCache]);
 
   useEffect(() => {
       setLocalVisionEnabled(apiConfig.visionApi?.enabled === true);
@@ -1063,7 +1066,7 @@ const Settings: React.FC = () => {
   // 这样刷新、手改 URL、导入备份之后，界面上的「使用中」永远等于请求真的会发去哪。
   const activePresetId = useMemo(
       () => findActivePresetId(apiPresets, apiConfig),
-      [apiPresets, apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.apiType, apiConfig.protocol],
+      [apiPresets, apiConfig.baseUrl, apiConfig.apiKey, apiConfig.model, apiConfig.apiType, apiConfig.protocol, apiConfig.geminiAuthMode],
   );
 
   /**
@@ -1096,6 +1099,7 @@ const Settings: React.FC = () => {
       setEditPresetGroup(preset.group || '');
       setEditPresetUrl(preset.config.baseUrl || '');
       setEditPresetApiType(llmApiType(preset.config));
+      setEditPresetGeminiAuthMode(preset.config.geminiAuthMode || 'header');
       setEditPresetKey(preset.config.apiKey || '');
       setEditPresetModel(preset.config.model || '');
       setEditPresetPromptCache(isActive ? localAnthropicPromptCache : preset.config.anthropicPromptCache !== false);
@@ -1124,6 +1128,7 @@ const Settings: React.FC = () => {
           ...preset.config,
           baseUrl: normalizeLlmBaseUrl(normalizeApiBaseUrl(editPresetUrl), editPresetApiType),
           apiType: editPresetApiType,
+          geminiAuthMode: editPresetGeminiAuthMode,
           apiKey: normalizeApiCredential(editPresetKey),
           model: normalizeApiModel(editPresetModel),
           stream: editPresetStream,
@@ -1195,6 +1200,7 @@ const Settings: React.FC = () => {
       addApiPreset(newPresetName, {
         baseUrl: normalizeLlmBaseUrl(normalizeApiBaseUrl(localUrl), localApiType),
         apiType: localApiType,
+        geminiAuthMode: localGeminiAuthMode,
         apiKey: normalizeApiCredential(localKey),
         model: normalizeApiModel(localModel),
         stream: localStream,
@@ -1221,6 +1227,7 @@ const Settings: React.FC = () => {
       apiKey: normalizeApiCredential(localKey),
       baseUrl: normalizeLlmBaseUrl(normalizeApiBaseUrl(localUrl), localApiType),
       apiType: localApiType,
+      geminiAuthMode: localGeminiAuthMode,
       model: normalizeApiModel(modelOverride ?? localModel),
       stream: localStream,
       temperature: localTemperature,
@@ -1460,9 +1467,14 @@ const Settings: React.FC = () => {
     setIsLoadingModels(true);
     setStatusMsg('正在连接...');
     try {
+        const modelHeaders = new Headers();
+        if (localApiType === 'gemini') {
+          modelHeaders.set('x-sully-gemini-auth-mode', localGeminiAuthMode);
+          modelHeaders.set('x-sully-gemini-api-key', apiKey || 'sk-none');
+        } else modelHeaders.set('Authorization', `Bearer ${apiKey || 'sk-none'}`);
         const response = await fetchLlm(`${baseUrl}/models`, {
             method: 'GET',
-            headers: { Authorization: `Bearer ${apiKey || 'sk-none'}` }
+            headers: modelHeaders,
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await safeResponseJson(response);
@@ -2687,9 +2699,10 @@ const Settings: React.FC = () => {
 
             <div className="space-y-4">
                 <DialogueApiFields
-                    value={{ baseUrl: localUrl, apiKey: localKey, model: localModel, stream: localStream, temperature: localTemperature, maxTokens: localMaxTokens, apiType: localApiType, anthropicPromptCache: localAnthropicPromptCache, anthropicPromptCacheTtl: localAnthropicPromptCacheTtl, anthropicCustomTemperature: localAnthropicCustomTemperature, openaiPromptCache: localOpenaiPromptCache }}
+                    value={{ baseUrl: localUrl, apiKey: localKey, model: localModel, stream: localStream, temperature: localTemperature, maxTokens: localMaxTokens, apiType: localApiType, geminiAuthMode: localGeminiAuthMode, anthropicPromptCache: localAnthropicPromptCache, anthropicPromptCacheTtl: localAnthropicPromptCacheTtl, anthropicCustomTemperature: localAnthropicCustomTemperature, openaiPromptCache: localOpenaiPromptCache }}
                     onChange={patch => {
                         if (patch.apiType !== undefined) setLocalApiType(patch.apiType);
+                        if (patch.geminiAuthMode !== undefined) setLocalGeminiAuthMode(patch.geminiAuthMode);
                         if (patch.baseUrl !== undefined) setLocalUrl(patch.baseUrl);
                         if (patch.apiKey !== undefined) setLocalKey(patch.apiKey);
                         if (patch.stream !== undefined) setLocalStream(patch.stream);
@@ -2723,6 +2736,7 @@ const Settings: React.FC = () => {
                         try {
                             const reply = await testDialogueConnection({
                                 baseUrl: localUrl, apiKey: localKey, model: localModel, apiType: localApiType,
+                                geminiAuthMode: localGeminiAuthMode,
                                 stream: localStream, temperature: localTemperature, maxTokens: localMaxTokens,
                                 anthropicPromptCache: localAnthropicPromptCache, anthropicPromptCacheTtl: localAnthropicPromptCacheTtl,
                                 anthropicCustomTemperature: localAnthropicCustomTemperature, openaiPromptCache: localOpenaiPromptCache,
@@ -4206,6 +4220,7 @@ const Settings: React.FC = () => {
               <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">URL</label>
                   <select aria-label="预设接口类型" value={editPresetApiType} onChange={e => setEditPresetApiType(e.target.value as LlmApiType)} className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic 原生 Messages</option><option value="gemini">Gemini 原生</option></select>
+                  {editPresetApiType === 'gemini' && <label className="block text-xs text-slate-500">Gemini 认证方式<select aria-label="预设 Gemini 认证方式" value={editPresetGeminiAuthMode} onChange={e => setEditPresetGeminiAuthMode(e.target.value as NonNullable<APIConfig['geminiAuthMode']>)} className="mt-1 w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5"><option value="auto">自动</option><option value="header">x-goog-api-key</option><option value="bearer">Bearer Token</option><option value="query">URL Key</option></select></label>}
                   {editPresetApiType === 'gemini' && <p className="mt-1 text-[10px] text-slate-400">使用 Gemini Developer API 的 API Key；不支持 Vertex AI service account / OAuth，需经已认证代理接入。</p>}
                   <input value={editPresetUrl} onChange={e => setEditPresetUrl(e.target.value)} placeholder="https://..." className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm font-mono focus:outline-primary" />
               </div>
@@ -4282,6 +4297,7 @@ const Settings: React.FC = () => {
                   onClick={() => {
                       setEditPresetUrl(localUrl);
                       setEditPresetApiType(localApiType);
+                      setEditPresetGeminiAuthMode(localGeminiAuthMode);
                       setEditPresetKey(localKey);
                       setEditPresetModel(localModel);
                       setEditPresetStream(localStream);
@@ -4303,6 +4319,7 @@ const Settings: React.FC = () => {
                       try {
                           const reply = await testDialogueConnection({
                               baseUrl: editPresetUrl, apiKey: editPresetKey, model: editPresetModel, apiType: editPresetApiType,
+                              geminiAuthMode: editPresetGeminiAuthMode,
                               stream: editPresetStream, temperature: editPresetTemperature, maxTokens: editPresetMaxTokens,
                               anthropicPromptCache: editPresetPromptCache, anthropicPromptCacheTtl: editPresetPromptCacheTtl,
                               anthropicCustomTemperature: editPresetCustomTemperature, openaiPromptCache: editPresetOpenaiPromptCache,

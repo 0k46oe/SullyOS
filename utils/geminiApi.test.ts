@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { fetchLlm, anthropicContinuation, installAnthropicFetch } from './anthropicApi';
-import { fromGeminiResponse, geminiUsage, toGeminiRequest } from './geminiApi';
+import { fetchGemini, fromGeminiResponse, geminiUsage, toGeminiRequest } from './geminiApi';
 import { isGeminiEndpoint, llmApiType, normalizeLlmBaseUrl } from './llmEndpoint';
 import { normalizeApiConfig } from './apiConfigNormalize';
 import { configFromPreset } from './apiPresetSwitch';
@@ -33,6 +33,10 @@ describe('Gemini native transport', () => {
         const api = normalizeApiConfig({ baseUrl: 'https://generativelanguage.googleapis.com', apiKey: ' key ', model: 'gemini-test', apiType: 'gemini' });
         expect(configFromPreset({ id: 'g', name: 'G', config: api })).toMatchObject({ baseUrl: base, apiType: 'gemini' });
         expect(pickDialogueApi(api)).toMatchObject({ apiType: 'gemini', baseUrl: base });
+        expect(normalizeApiConfig({ ...api, geminiAuthMode: 'query' }).geminiAuthMode).toBe('query');
+        expect(configFromPreset({ id: 'g', name: 'G', config: { ...api, geminiAuthMode: 'bearer' } })).toMatchObject({ geminiAuthMode: 'bearer' });
+        expect(pickDialogueApi({ ...api, geminiAuthMode: 'auto' })).toMatchObject({ geminiAuthMode: 'auto' });
+        expect(resolveDialogueApi(api, { dialogueApi: { ...api, geminiAuthMode: 'query' } }).geminiAuthMode).toBe('query');
         expect(resolveDialogueApi(api, { dialogueApi: { baseUrl: 'https://oai.test/v1', apiKey: 'other', model: 'm' } }).apiType).toBe('openai');
         expect(buildCharChatCredRow({ id: 'c' } as any, undefined, api)!.value).toMatchObject({ apiUrl: base, apiKey: 'key', primaryModel: 'gemini-test' });
         expect(normalizeChatApiUrl(base)).toBe(base);
@@ -56,6 +60,72 @@ describe('Gemini native transport', () => {
         expect(url).toBe(`${base}/gemini-test:generateContent`); expect(init.headers.get('x-goog-api-key')).toBe('key'); expect(init.headers.has('authorization')).toBe(false);
         expect(extractApiTokenUsage(response)).toEqual({ prompt: 100, completion: 15, total: 115, cacheRead: 64 });
         expect(geminiUsage({ promptTokenCount: 100, candidatesTokenCount: 10 }).prompt_tokens_details).toBeUndefined();
+    });
+    it.each([
+        ['header', 'x-goog-api-key'], ['bearer', 'authorization'], ['query', 'query'],
+    ] as const)('sends manual %s auth only in its selected location', async (mode, location) => {
+        const network = vi.fn(async () => Response.json(result()));
+        globalThis.fetch = network;
+        await createDialogueFetch({ baseUrl: 'https://generativelanguage.googleapis.com', apiKey: 'secret key', model: 'gemini-test', apiType: 'gemini', geminiAuthMode: mode })('ignored', { method: 'POST', body: JSON.stringify(body) }, 0);
+        const [rawUrl, init] = network.mock.calls[0] as any;
+        const url = new URL(rawUrl), headers = new Headers(init.headers);
+        expect(location === 'query' ? url.searchParams.get('key') : headers.get('x-goog-api-key') || headers.get('authorization')).toBe(location === 'query' ? 'secret key' : location === 'x-goog-api-key' ? 'secret key' : 'Bearer secret key');
+        expect(headers.has('x-goog-api-key')).toBe(location === 'x-goog-api-key');
+        expect(headers.has('authorization')).toBe(location === 'authorization');
+        expect(location === 'query' ? url.searchParams.get('key') : null).toBe(location === 'query' ? 'secret key' : null);
+        expect(headers.has('x-sully-gemini-api-key')).toBe(false);
+    });
+    it.each(['header', 'bearer', 'query'] as const)('uses %s auth for stream generation', async mode => {
+        const network = vi.fn(async () => sse([{ candidates: [{ content: { parts: [{ text: '流式回复' }] }, finishReason: 'STOP' }] }]));
+        globalThis.fetch = network;
+        const response = await createDialogueFetch({ baseUrl: 'https://generativelanguage.googleapis.com', apiKey: 'stream-key', model: 'gemini-test', apiType: 'gemini', geminiAuthMode: mode })('ignored', { method: 'POST', body: JSON.stringify({ ...body, stream: true }) }, 0);
+        expect(response.choices[0].message.content).toBe('流式回复');
+        const [rawUrl, init] = network.mock.calls[0] as any;
+        const url = new URL(rawUrl), headers = new Headers(init.headers);
+        expect(headers.has('x-goog-api-key')).toBe(mode === 'header');
+        expect(headers.has('authorization')).toBe(mode === 'bearer');
+        expect(url.searchParams.get('key')).toBe(mode === 'query' ? 'stream-key' : null);
+    });
+    it.each(['header', 'bearer', 'query'] as const)('uses %s auth for model list GET', async mode => {
+        const network = vi.fn(async () => Response.json({ models: [{ name: 'models/gemini-test' }] }));
+        const response = await fetchGemini(`${base}/models`, { headers: { 'x-sully-gemini-auth-mode': mode, 'x-sully-gemini-api-key': 'list-key' } }, network);
+        expect((await response.json()).data[0].id).toBe('gemini-test');
+        const [rawUrl, init] = network.mock.calls[0] as any;
+        const url = new URL(rawUrl), headers = new Headers(init.headers);
+        expect(headers.has('x-goog-api-key')).toBe(mode === 'header');
+        expect(headers.has('authorization')).toBe(mode === 'bearer');
+        expect(url.searchParams.get('key')).toBe(mode === 'query' ? 'list-key' : null);
+    });
+    it('retries auto auth only for 401/403 and applies the same behavior to model GET', async () => {
+        const network = vi.fn(async () => network.mock.calls.length < 3 ? new Response('denied', { status: network.mock.calls.length === 1 ? 401 : 403 }) : Response.json(result()));
+        globalThis.fetch = network;
+        const response = await createDialogueFetch({ baseUrl: 'https://generativelanguage.googleapis.com', apiKey: 'key', model: 'gemini-test', apiType: 'gemini', geminiAuthMode: 'auto' })('ignored', { method: 'POST', body: JSON.stringify(body) }, 0);
+        expect(response.choices[0].message.content).toBe('你好🙂');
+        expect(network).toHaveBeenCalledTimes(3);
+        const attempts = network.mock.calls.map(([url, init]: any) => ({ url: new URL(url), headers: new Headers(init.headers) }));
+        expect(attempts[0].headers.get('x-goog-api-key')).toBe('key');
+        expect(attempts[1].headers.get('authorization')).toBe('Bearer key');
+        expect(attempts[2].url.searchParams.get('key')).toBe('key');
+
+        for (const status of [429, 500]) {
+            const rejected = vi.fn(async () => new Response('no', { status }));
+            const endpoint = `${base}/models`;
+            await expect(fetchLlm(endpoint, { headers: { 'x-sully-gemini-auth-mode': 'auto', 'x-sully-gemini-api-key': 'key' } }, rejected)).resolves.toBeInstanceOf(Response);
+            expect(rejected).toHaveBeenCalledTimes(1);
+        }
+        const get = vi.fn(async () => get.mock.calls.length === 1 ? new Response('denied', { status: 401 }) : Response.json({ models: [{ name: 'models/gemini-test' }] }));
+        const listed = await fetchGemini(`${base}/models`, { headers: { 'x-sully-gemini-auth-mode': 'auto', 'x-sully-gemini-api-key': 'key' } }, get);
+        expect((await listed.json()).data[0].id).toBe('gemini-test');
+        expect(get).toHaveBeenCalledTimes(2);
+        expect(new Headers((get.mock.calls[1] as any)[1].headers).get('authorization')).toBe('Bearer key');
+    });
+    it('preserves existing URL parameters and removes key from non-query modes', async () => {
+        const calls: any[] = [];
+        const transport = vi.fn(async (url: any, init: any) => { calls.push([url, init]); return Response.json({ models: [] }); });
+        await fetchGemini(`${base}/models?pageToken=abc&key=old`, { headers: { 'x-sully-gemini-auth-mode': 'header', 'x-sully-gemini-api-key': 'new' } }, transport);
+        expect(new URL(calls[0][0]).searchParams.get('pageToken')).toBe('abc');
+        expect(new URL(calls[0][0]).searchParams.has('key')).toBe(false);
+        expect(new Headers(calls[0][1].headers).get('x-goog-api-key')).toBe('new');
     });
     it('preserves signed parts and parallel function results through a local continuation', () => {
         const parts = [{ text: '先查一下', thought: true, thoughtSignature: 'signed-thought' }, { functionCall: { name: 'lookup', args: { q: '城市' }, id: 'native-id' }, thoughtSignature: 'signed-call' }, { functionCall: { name: 'lookup', args: { q: '天气' } } }];

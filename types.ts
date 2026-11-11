@@ -280,8 +280,9 @@ export interface VisionApiConfig {
 
 /** A complete dialogue endpoint, separate from TTS/vision configuration. */
 export type ApiProtocol = 'openai' | 'anthropic' | 'gemini';
+export type GeminiAuthMode = 'auto' | 'header' | 'bearer' | 'query';
 export type AnthropicPromptCacheTtl = '5m' | '1h';
-export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'stream' | 'temperature' | 'maxTokens' | 'apiType' | 'protocol' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'anthropicPromptCacheTtl' | 'openaiPromptCache'>;
+export type DialogueApiConfig = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model' | 'stream' | 'temperature' | 'maxTokens' | 'apiType' | 'protocol' | 'anthropicCustomTemperature' | 'anthropicPromptCache' | 'anthropicPromptCacheTtl' | 'openaiPromptCache' | 'geminiAuthMode'>;
 
 export type ImageGenerationProvider = 'oai' | 'nai';
 export interface ImagePromptPreset { id: string; name: string; content?: string; positivePrompt?: string; negativePrompt?: string }
@@ -327,6 +328,7 @@ export interface APIConfig {
   /** Legacy fork format; read for migration. New settings use apiType. */
   protocol?: ApiProtocol;
   apiType?: 'openai' | 'anthropic' | 'gemini';
+  geminiAuthMode?: GeminiAuthMode;
   /** 私聊单次生成上限；未设置沿用 8000，不改变历史范围。 */
   maxTokens?: number;
   baseUrl: string;

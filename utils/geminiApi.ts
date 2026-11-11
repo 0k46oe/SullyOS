@@ -202,17 +202,35 @@ export async function fetchGemini(resource: RequestInfo | URL, init: RequestInit
     const url = new URL(input), method = (init?.method || request?.method || 'GET').toUpperCase();
     const inherited: RequestInit = request ? { credentials: request.credentials, cache: request.cache, mode: request.mode, redirect: request.redirect, signal: request.signal } : {};
     const headers = new Headers(init?.headers || request?.headers);
-    const key = headers.get('x-goog-api-key') || headers.get('authorization')?.replace(/^Bearer\s+/i, '') || '';
-    headers.delete('authorization'); headers.delete('x-api-key'); headers.delete('anthropic-version'); headers.delete('anthropic-dangerous-direct-browser-access');
-    headers.set('x-goog-api-key', key);
+    const key = headers.get('x-sully-gemini-api-key') || headers.get('x-goog-api-key') || headers.get('authorization')?.replace(/^Bearer\s+/i, '') || '';
+    const configuredMode = headers.get('x-sully-gemini-auth-mode');
+    const authMode = configuredMode === 'auto' || configuredMode === 'bearer' || configuredMode === 'query' ? configuredMode : 'header';
+    headers.delete('x-sully-gemini-auth-mode'); headers.delete('x-sully-gemini-api-key');
+    headers.delete('authorization'); headers.delete('x-goog-api-key'); headers.delete('x-api-key'); headers.delete('anthropic-version'); headers.delete('anthropic-dangerous-direct-browser-access');
     const options: RequestInit = { ...inherited, ...init, method, headers };
+    const sendWithAuth = async (target: URL): Promise<Response> => {
+        const modes = authMode === 'auto' ? ['header', 'bearer', 'query'] as const : [authMode] as const;
+        let response: Response | undefined;
+        for (const mode of modes) {
+            const attemptUrl = new URL(target.href);
+            attemptUrl.searchParams.delete('key');
+            const attemptHeaders = new Headers(headers);
+            attemptHeaders.delete('authorization'); attemptHeaders.delete('x-goog-api-key');
+            if (mode === 'header') attemptHeaders.set('x-goog-api-key', key);
+            else if (mode === 'bearer') attemptHeaders.set('Authorization', `Bearer ${key}`);
+            else attemptUrl.searchParams.set('key', key);
+            response = await transport(attemptUrl.href, { ...options, headers: attemptHeaders });
+            if (response.status !== 401 && response.status !== 403) return response;
+        }
+        return response!;
+    };
     // Strip only synthetic application suffixes; never build endpoints by string concatenation after a query.
     url.pathname = url.pathname.replace(/\/models\/[^/]+:(?:streamGenerateContent|generateContent)\/?$/, '/models').replace(/\/(?:chat\/completions|models)\/?$/, '');
     if (!url.pathname.endsWith('/models')) url.pathname += '/models';
-    if (method === 'GET' && /\/models\/models\/?$/.test(new URL(input).pathname)) {
+    if (method === 'GET' && /\/models(?:\/models)?\/?$/.test(new URL(input).pathname)) {
         const models: any[] = [], pages = new Set<string>();
         for (;;) {
-            const response = await transport(url.href, options);
+            const response = await sendWithAuth(url);
             if (!response.ok) return response;
             const data = await response.json();
             if (!Array.isArray(data.models)) throw Error('Gemini 返回了无效模型列表');
@@ -237,7 +255,7 @@ export async function fetchGemini(resource: RequestInfo | URL, init: RequestInit
     if (body.stream) url.searchParams.set('alt', 'sse'); else url.searchParams.delete('alt');
     headers.set('content-type', 'application/json'); headers.delete('content-length');
     options.body = JSON.stringify(toGeminiRequest(body));
-    const response = await transport(url.href, options);
+    const response = await sendWithAuth(url);
     if (!response.ok) return response;
     if (response.headers.get('content-type')?.includes('text/event-stream')) return convertGeminiStream(response, options.signal);
     return new Response(JSON.stringify(fromGeminiResponse(await response.json())), { status: response.status, statusText: response.statusText, headers: { 'content-type': 'application/json' } });
