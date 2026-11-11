@@ -1179,7 +1179,7 @@ function getEmbeddingConfig(charEmbeddingConfig?: any): EmbeddingConfig | null {
 }
 
 export async function injectMemoryPalace(
-    char: { memoryPalaceEnabled?: boolean; embeddingConfig?: any; activeBuffs?: any[]; personalityStyle?: string; ruminationTendency?: number; interactionAccommodation?: CharacterAccommodationPolicy; characterUserProfile?: { enabled?: boolean; name?: string }; id: string; name?: string; memoryPalaceInjection?: string; roomPlatesInjection?: string },
+    char: { memoryPalaceEnabled?: boolean; embeddingConfig?: any; activeBuffs?: any[]; personalityStyle?: string; ruminationTendency?: number; interactionAccommodation?: CharacterAccommodationPolicy; id: string; name?: string; memoryPalaceInjection?: string; roomPlatesInjection?: string },
     recentMessages?: Message[],
     queryHint?: string,
     userName?: string,
@@ -1357,21 +1357,10 @@ export async function injectMemoryPalace(
         trace.stages.push({ name: 'finalize', durationMs: 0, outcome: 'skipped' });
         return finishRecallTrace(trace, 'skipped_palace_disabled');
     }
-    // 门牌标题必须以 IndexedDB 中当前角色实际保存的专属档案为准；
-    // 聊天请求携带的 char 可能是旧快照，不能只依赖它或全局 userName。
-    let privateName = '';
-    try {
-        const storedCharacter = await DB.getCharacter(char.id);
-        if (storedCharacter?.characterUserProfile?.enabled) {
-            privateName = storedCharacter.characterUserProfile.name?.trim() || '';
-        }
-    } catch {}
-    // DB 读取失败时再用本轮角色快照兜底。
-    if (!privateName && char.characterUserProfile?.enabled) {
-        privateName = char.characterUserProfile.name?.trim() || '';
-    }
-    let resolvedUserName = privateName || userName;
-    // 只有当前角色没有专属姓名时，才回退到全局用户档案。
+    // 调用方没显式传 userName 时，兜底从全局用户档案取，保证各入口
+    // （群聊/通话/事件/学习等）召回的房间名都统一显示「{用户名}的房间」，
+    // 而不是回退成「用户房间」。
+    let resolvedUserName = userName;
     if (!resolvedUserName) {
         try { resolvedUserName = (await DB.getUserProfile())?.name || undefined; } catch {}
     }
