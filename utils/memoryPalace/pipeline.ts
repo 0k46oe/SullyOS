@@ -1179,7 +1179,7 @@ function getEmbeddingConfig(charEmbeddingConfig?: any): EmbeddingConfig | null {
 }
 
 export async function injectMemoryPalace(
-    char: { memoryPalaceEnabled?: boolean; embeddingConfig?: any; activeBuffs?: any[]; personalityStyle?: string; ruminationTendency?: number; interactionAccommodation?: CharacterAccommodationPolicy; id: string; name?: string; memoryPalaceInjection?: string; roomPlatesInjection?: string },
+    char: { memoryPalaceEnabled?: boolean; embeddingConfig?: any; activeBuffs?: any[]; personalityStyle?: string; ruminationTendency?: number; interactionAccommodation?: CharacterAccommodationPolicy; characterUserProfile?: { enabled?: boolean; name?: string }; id: string; name?: string; memoryPalaceInjection?: string; roomPlatesInjection?: string },
     recentMessages?: Message[],
     queryHint?: string,
     userName?: string,
@@ -1357,18 +1357,13 @@ export async function injectMemoryPalace(
         trace.stages.push({ name: 'finalize', durationMs: 0, outcome: 'skipped' });
         return finishRecallTrace(trace, 'skipped_palace_disabled');
     }
-    // 调用方没显式传 userName 时，兜底从全局用户档案取，保证各入口
-    // （群聊/通话/事件/学习等）召回的房间名都统一显示「{用户名}的房间」，
-    // 而不是回退成「用户房间」。
-    let resolvedUserName = userName;
-    // 门牌标题优先使用当前角色的独立用户档案名；不改动上游整理提示词和已存门牌内容。
-    try {
-        const character = await DB.getCharacter(charId);
-        const privateName = character?.characterUserProfile?.enabled
-            ? character.characterUserProfile.name.trim()
-            : '';
-        if (privateName) resolvedUserName = privateName;
-    } catch {}
+    // 聊天调用方传入的 userName 已由 resolveCharacterUserProfile 按当前角色解析。
+    // 优先使用本轮携带的角色快照，避免重新读取 IndexedDB 时拿到旧档案名覆盖当前专属姓名。
+    const privateName = char.characterUserProfile?.enabled
+        ? char.characterUserProfile.name?.trim()
+        : '';
+    let resolvedUserName = privateName || userName;
+    // 其他未传用户名的入口才回退到全局用户档案。
     if (!resolvedUserName) {
         try { resolvedUserName = (await DB.getUserProfile())?.name || undefined; } catch {}
     }
