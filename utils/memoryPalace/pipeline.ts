@@ -1361,7 +1361,7 @@ export async function injectMemoryPalace(
     // 聊天请求携带的 char 可能是旧快照，不能只依赖它或全局 userName。
     let privateName = '';
     try {
-        const storedCharacter = await DB.getCharacter(charId);
+        const storedCharacter = await DB.getCharacter(char.id);
         if (storedCharacter?.characterUserProfile?.enabled) {
             privateName = storedCharacter.characterUserProfile.name?.trim() || '';
         }
