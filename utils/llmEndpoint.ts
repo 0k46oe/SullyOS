@@ -9,7 +9,7 @@ export function isAnthropicEndpoint(value: string): boolean {
 /** Canonical native base also survives the three-field background credential format. */
 export function isGeminiEndpoint(value: string): boolean {
     try { return /\/v1beta(?:\/(?:chat\/completions|models(?:\/(?:chat\/completions|models|[^/]+:(?:streamGenerateContent|generateContent)))?))?\/?$/.test(new URL(value).pathname)
-        || /\/v1\/models(?:\/(?:chat\/completions|models|[^/]+:(?:streamGenerateContent|generateContent)))?\/?$/.test(new URL(value).pathname); }
+        || /\/v1\/models\/(?:chat\/completions|models|[^/]+:(?:streamGenerateContent|generateContent))\/?$/.test(new URL(value).pathname); }
     catch { return false; }
 }
 

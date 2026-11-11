@@ -198,10 +198,12 @@ function convertGeminiStream(response: Response, signal?: AbortSignal | null): R
 export async function fetchGemini(resource: RequestInfo | URL, init: RequestInit | undefined, transport: typeof fetch): Promise<Response> {
     const request = resource instanceof Request ? resource : undefined;
     const input = typeof resource === 'string' ? resource : resource instanceof URL ? resource.href : resource.url;
-    if (!isGeminiEndpoint(input)) return transport(resource, init);
+    const requestHeaders = new Headers(init?.headers || request?.headers);
+    const explicitlyGemini = requestHeaders.has('x-sully-gemini-auth-mode') || requestHeaders.has('x-sully-gemini-api-key');
+    if (!explicitlyGemini && !isGeminiEndpoint(input)) return transport(resource, init);
     const url = new URL(input), method = (init?.method || request?.method || 'GET').toUpperCase();
     const inherited: RequestInit = request ? { credentials: request.credentials, cache: request.cache, mode: request.mode, redirect: request.redirect, signal: request.signal } : {};
-    const headers = new Headers(init?.headers || request?.headers);
+    const headers = requestHeaders;
     const key = headers.get('x-sully-gemini-api-key') || headers.get('x-goog-api-key') || headers.get('authorization')?.replace(/^Bearer\s+/i, '') || '';
     const configuredMode = headers.get('x-sully-gemini-auth-mode');
     const authMode = configuredMode === 'auto' || configuredMode === 'bearer' || configuredMode === 'query' ? configuredMode : 'header';

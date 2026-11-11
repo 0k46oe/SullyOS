@@ -32,6 +32,8 @@ describe('Gemini native transport', () => {
         expect(normalizeLlmBaseUrl('https://api.test/v1/chat/completions', 'openai')).toBe('https://api.test/v1');
         expect(normalizeLlmBaseUrl(base, 'openai')).toBe('https://generativelanguage.googleapis.com/v1');
         expect(llmApiType({ baseUrl: 'https://generativelanguage.googleapis.com' })).toBe('openai');
+        expect(isGeminiEndpoint('https://oai.test/v1/models')).toBe(false);
+        expect(llmApiType({ baseUrl: 'https://oai.test/v1/models' })).toBe('openai');
         expect(isGeminiEndpoint(`${base}/chat/completions`)).toBe(true);
         const api = normalizeApiConfig({ baseUrl: 'https://generativelanguage.googleapis.com', apiKey: ' key ', model: 'gemini-test', apiType: 'gemini' });
         expect(configFromPreset({ id: 'g', name: 'G', config: api })).toMatchObject({ baseUrl: 'https://generativelanguage.googleapis.com/v1beta', apiType: 'gemini' });
@@ -43,6 +45,20 @@ describe('Gemini native transport', () => {
         expect(resolveDialogueApi(api, { dialogueApi: { baseUrl: 'https://oai.test/v1', apiKey: 'other', model: 'm' } }).apiType).toBe('openai');
         expect(buildCharChatCredRow({ id: 'c' } as any, undefined, api)!.value).toMatchObject({ apiUrl: `${base}`, apiKey: 'key', primaryModel: 'gemini-test' });
         expect(normalizeChatApiUrl(base)).toBe(base);
+    });
+    it('keeps the OpenAI-compatible GET /v1/models route out of the Gemini parser', async () => {
+        const network = vi.fn(async () => Response.json({ data: [{ id: 'gpt-test', object: 'model' }] }));
+        const response = await fetchLlm('https://oai.test/v1/models', { method: 'GET', headers: { Authorization: 'Bearer key' } }, network);
+        expect(network).toHaveBeenCalledTimes(1);
+        expect(network).toHaveBeenCalledWith('https://oai.test/v1/models', expect.objectContaining({ method: 'GET' }));
+        expect(await response.json()).toEqual({ data: [{ id: 'gpt-test', object: 'model' }] });
+    });
+    it('routes a custom Gemini /v1/models base when the request carries its explicit marker', async () => {
+        const network = vi.fn(async () => Response.json({ models: [{ name: 'models/gemini-test' }] }));
+        const response = await fetchLlm('https://gemini-proxy.test/v1/models', { method: 'GET', headers: { 'x-sully-gemini-auth-mode': 'header', 'x-sully-gemini-api-key': 'key' } }, network);
+        expect((await response.json()).data[0].id).toBe('gemini-test');
+        expect(network).toHaveBeenCalledTimes(1);
+        expect(network.mock.calls[0][0]).toBe('https://gemini-proxy.test/v1/models');
     });
     it('keeps volatile system positions, converts images/tools/JSON, strips foreign cache markers', () => {
         const output = toGeminiRequest({ ...body, messages: [...body.messages, { role: 'user', content: [{ type: 'text', text: '看看' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,aGVsbG8=' } }] }], temperature: 0, max_tokens: 8000, tools: [tool], tool_choice: { type: 'function', function: { name: 'lookup' } }, response_format: { type: 'json_schema', json_schema: { schema: { type: 'object', properties: {} } } }, prompt_cache_key: 'ignored', __sullyAnthropicOptions: { cache: true } });

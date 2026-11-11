@@ -256,7 +256,9 @@ function convertAnthropicStream(response: Response, observer?: AnthropicObserver
 export async function fetchLlm(resource: RequestInfo | URL, init?: RequestInit, transport: typeof fetch = globalThis.fetch, browser = typeof window !== 'undefined'): Promise<Response> {
     if ((transport as FetchTransport).__sullyAnthropic) return transport(resource,init);
     const inputUrl = typeof resource === 'string' ? resource : resource instanceof URL ? resource.href : resource.url;
-    if (isGeminiEndpoint(inputUrl)) return fetchGemini(resource, init, transport);
+    const requestHeaders = new Headers(init?.headers || (resource instanceof Request ? resource.headers : undefined));
+    const explicitlyGemini = requestHeaders.has('x-sully-gemini-auth-mode') || requestHeaders.has('x-sully-gemini-api-key');
+    if (explicitlyGemini || isGeminiEndpoint(inputUrl)) return fetchGemini(resource, init, transport);
     if (!isAnthropicEndpoint(inputUrl)) return transport(resource,init);
     const request = resource instanceof Request ? resource : undefined;
     const method=(init?.method || request?.method || 'GET').toUpperCase();
