@@ -677,6 +677,9 @@ export default function MemoryPalaceApp() {
     const guideStep = useFirstUseGuideStep();
     const { activeCharacterId, characters, updateCharacter, setActiveCharacterId, closeApp, apiPresets, userProfile, memoryPalaceConfig, updateMemoryPalaceConfig, remoteVectorConfig, updateRemoteVectorConfig, addToast, apiConfig, characterGroups, groups, realtimeConfig } = useOS();
     const char = characters.find(c => c.id === activeCharacterId);
+    // 房间名称优先跟随当前角色的独立用户档案；未启用或未填写时回退全局用户名。
+    const privateUserName = char?.characterUserProfile?.enabled ? char.characterUserProfile.name?.trim() : '';
+    const roomUserName = privateUserName || userProfile?.name;
     const [selectGroupId, setSelectGroupId] = useState(GROUP_FILTER_ALL); // 选角色页的分组筛选
 
     const [view, setView] = useState<'picker' | 'palace' | 'pixelHome' | 'room' | 'memory' | 'settings' | 'globalSettings' | 'all' | 'boxes'>(() => guideStep === 1 ? 'globalSettings' : 'picker');
@@ -4356,7 +4359,7 @@ create table if not exists memory_vectors (
                                         windowsill: { label: '窗台', color: '#14b8a6' },
                                     };
                                     const meta = roomMeta[m.room] || { label: m.room, color: '#64748b' };
-                                    const roomLabel = getRoomLabel(m.room as any, userProfile?.name) || meta.label;
+                                    const roomLabel = getRoomLabel(m.room as any, roomUserName) || meta.label;
                                     return (
                                         <div key={i} style={paperStyle({
                                             padding: 12, borderRadius: 16,
@@ -5149,7 +5152,7 @@ create table if not exists memory_vectors (
                                         </div>
                                         <div style={paperStyle({ fontSize: 10, color: '#92400e', marginTop: 4, display: 'inline-flex', alignItems: 'center', gap: 4 })}>
                                             <RoomIcon room={node.room} size={12} style={paperStyle({ color: ROOM_COLORS[node.room] })} />
-                                            <span>{getRoomLabel(node.room, userProfile?.name)} · 剩余 {daysLeft} 天</span>
+                                            <span>{getRoomLabel(node.room, roomUserName)} · 剩余 {daysLeft} 天</span>
                                         </div>
                                     </div>
                                     <button
@@ -5198,7 +5201,7 @@ create table if not exists memory_vectors (
                                     <div style={paperStyle({ fontSize: 10, color: '#9ca3af', marginTop: 4, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' })}>
                                         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
                                             <RoomIcon room={node.room} size={12} style={paperStyle({ color: ROOM_COLORS[node.room] })} />
-                                            {getRoomLabel(node.room, userProfile?.name)}
+                                            {getRoomLabel(node.room, roomUserName)}
                                         </span>
                                         <span>{new Date(node.createdAt).toLocaleDateString('zh-CN')}</span>
                                         <span style={paperStyle({ color })}>{'★'.repeat(Math.min(node.importance, 5))}</span>
@@ -5241,7 +5244,7 @@ create table if not exists memory_vectors (
                                         })}
                                     >
                                         <div data-memory-room-tone="accent" style={paperStyle({ marginBottom: 6, color })}><RoomIcon room={room} size={26} /></div>
-                                        <div data-memory-room-tone="accent" style={paperStyle({ fontSize: 14, fontWeight: 600, color })}>{getRoomLabel(room, userProfile?.name)}</div>
+                                        <div data-memory-room-tone="accent" style={paperStyle({ fontSize: 14, fontWeight: 600, color })}>{getRoomLabel(room, roomUserName)}</div>
                                         <div data-memory-room-tone="muted" style={paperStyle({ fontSize: 11, color: '#9ca3af', marginTop: 2 })}>{config.description}</div>
                                         <div data-memory-room-tone="accent" style={paperStyle({ fontSize: 20, fontWeight: 700, marginTop: 8, color })}>
                                             {count}
@@ -5467,7 +5470,7 @@ create table if not exists memory_vectors (
                             <div style={paperStyle({ fontSize: 11, color: '#9ca3af', marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' })}>
                                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
                                     <RoomIcon room={node.room} size={12} style={paperStyle({ color: ROOM_COLORS[node.room] })} />
-                                    {getRoomLabel(node.room, userProfile?.name)}
+                                    {getRoomLabel(node.room, roomUserName)}
                                 </span>
                                 <span>重要性: {node.importance}</span>
                                 <span>{node.mood}</span>
@@ -5723,7 +5726,7 @@ create table if not exists memory_vectors (
                                                         </div>
                                                         <div style={paperStyle({ fontSize: 10, color: '#9ca3af', marginTop: 3, display: 'inline-flex', alignItems: 'center', gap: 4 })}>
                                                             <RoomIcon room={n.room} size={11} style={paperStyle({ color: ROOM_COLORS[n.room] })} />
-                                                            <span>{getRoomLabel(n.room, userProfile?.name)} · {new Date(n.createdAt).toLocaleDateString('zh-CN')}</span>
+                                                            <span>{getRoomLabel(n.room, roomUserName)} · {new Date(n.createdAt).toLocaleDateString('zh-CN')}</span>
                                                         </div>
                                                     </div>
                                                 ))}
@@ -5752,7 +5755,7 @@ create table if not exists memory_vectors (
                                                         </div>
                                                         <div style={paperStyle({ fontSize: 10, color: '#9ca3af', marginTop: 3, display: 'inline-flex', alignItems: 'center', gap: 4 })}>
                                                             <RoomIcon room={n.room} size={11} style={paperStyle({ color: ROOM_COLORS[n.room] })} />
-                                                            <span>{getRoomLabel(n.room, userProfile?.name)} · {new Date(n.createdAt).toLocaleDateString('zh-CN')}</span>
+                                                            <span>{getRoomLabel(n.room, roomUserName)} · {new Date(n.createdAt).toLocaleDateString('zh-CN')}</span>
                                                         </div>
                                                         <button
                                                             onClick={(e) => { e.stopPropagation(); handleReviveArchived(box, n); }}
@@ -5792,7 +5795,7 @@ create table if not exists memory_vectors (
     // ─── 房间详情视图 ────────────────────────────────
 
     if (view === 'room' && selectedRoom) {
-        const roomLabel = getRoomLabel(selectedRoom, userProfile?.name);
+        const roomLabel = getRoomLabel(selectedRoom, roomUserName);
         const roomColor = ROOM_COLORS[selectedRoom];
 
         return (
@@ -5907,7 +5910,7 @@ create table if not exists memory_vectors (
                         onClick={() => { setView(prevView); setSelectedNode(null); setEditing(false); }}
                         style={paperStyle({ fontSize: 13, color: '#6b7280', cursor: 'pointer' })}
                     >
-                        ← 返回 {prevView === 'all' ? '全部记忆' : prevView === 'boxes' ? '事件盒' : getRoomLabel(selectedRoom || selectedNode.room, userProfile?.name)}
+                        ← 返回 {prevView === 'all' ? '全部记忆' : prevView === 'boxes' ? '事件盒' : getRoomLabel(selectedRoom || selectedNode.room, roomUserName)}
                     </div>
                     {!editing && (
                         <div
@@ -5942,7 +5945,7 @@ create table if not exists memory_vectors (
                                         style={{ fontFamily: 'inherit' }}
                                     >
                                         {(Object.keys(ROOM_CONFIGS) as MemoryRoom[]).map(r => (
-                                            <option key={r} value={r}>{getRoomLabel(r, userProfile?.name)}</option>
+                                            <option key={r} value={r}>{getRoomLabel(r, roomUserName)}</option>
                                         ))}
                                     </select>
                                 </div>
@@ -6021,7 +6024,7 @@ create table if not exists memory_vectors (
                             <div style={paperStyle({ fontSize: 12, color: '#6b7280', lineHeight: 1.8 })}>
                                 <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
                                     <RoomIcon room={selectedNode.room} size={14} style={paperStyle({ color: ROOM_COLORS[selectedNode.room] })} />
-                                    <span>{getRoomLabel(selectedNode.room, userProfile?.name)}</span>
+                                    <span>{getRoomLabel(selectedNode.room, roomUserName)}</span>
                                 </div>
                                 <div>重要性: {'★'.repeat(selectedNode.importance)}{'☆'.repeat(10 - selectedNode.importance)}</div>
                                 <div>情绪: {selectedNode.mood}</div>
@@ -6107,7 +6110,7 @@ create table if not exists memory_vectors (
                                                         </div>
                                                         <div style={paperStyle({ fontSize: 10, color: '#9ca3af', marginTop: 2, display: 'inline-flex', alignItems: 'center', gap: 4 })}>
                                                             <RoomIcon room={node.room} size={11} style={paperStyle({ color: ROOM_COLORS[node.room] })} />
-                                                            <span>{getRoomLabel(node.room, userProfile?.name)} · {new Date(node.createdAt).toLocaleDateString('zh-CN')}</span>
+                                                            <span>{getRoomLabel(node.room, roomUserName)} · {new Date(node.createdAt).toLocaleDateString('zh-CN')}</span>
                                                         </div>
                                                     </div>
                                                     <button
@@ -6196,7 +6199,7 @@ create table if not exists memory_vectors (
                                                 </div>
                                                 <div style={paperStyle({ fontSize: 10, color: '#9ca3af', marginTop: 4, display: 'inline-flex', alignItems: 'center', gap: 4 })}>
                                                     <RoomIcon room={linkedNode.room} size={11} style={paperStyle({ color: ROOM_COLORS[linkedNode.room] })} />
-                                                    <span>{getRoomLabel(linkedNode.room, userProfile?.name)} · {new Date(linkedNode.createdAt).toLocaleDateString('zh-CN')}</span>
+                                                    <span>{getRoomLabel(linkedNode.room, roomUserName)} · {new Date(linkedNode.createdAt).toLocaleDateString('zh-CN')}</span>
                                                 </div>
                                             </div>
                                             <button
