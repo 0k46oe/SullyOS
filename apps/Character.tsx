@@ -1950,7 +1950,12 @@ ${isInitialGeneration ? `
                    {detailTab === 'stats' && <CharacterStatsPanel character={formData} user={userProfile} onOpenMemory={() => setDetailTab('memory')} />}
 
                    {detailTab === 'plates' && formData.id && (
-                       <RoomPlatePanel charId={formData.id} userName={userProfile.name} />
+                       <RoomPlatePanel
+                            charId={formData.id}
+                            userName={formData.characterUserProfile?.enabled
+                                ? formData.characterUserProfile.name?.trim() || userProfile.name
+                                : userProfile.name}
+                        />
                    )}
                </div>
            </div>
