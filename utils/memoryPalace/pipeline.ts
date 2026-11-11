@@ -1357,13 +1357,21 @@ export async function injectMemoryPalace(
         trace.stages.push({ name: 'finalize', durationMs: 0, outcome: 'skipped' });
         return finishRecallTrace(trace, 'skipped_palace_disabled');
     }
-    // 聊天调用方传入的 userName 已由 resolveCharacterUserProfile 按当前角色解析。
-    // 优先使用本轮携带的角色快照，避免重新读取 IndexedDB 时拿到旧档案名覆盖当前专属姓名。
-    const privateName = char.characterUserProfile?.enabled
-        ? char.characterUserProfile.name?.trim()
-        : '';
+    // 门牌标题必须以 IndexedDB 中当前角色实际保存的专属档案为准；
+    // 聊天请求携带的 char 可能是旧快照，不能只依赖它或全局 userName。
+    let privateName = '';
+    try {
+        const storedCharacter = await DB.getCharacter(charId);
+        if (storedCharacter?.characterUserProfile?.enabled) {
+            privateName = storedCharacter.characterUserProfile.name?.trim() || '';
+        }
+    } catch {}
+    // DB 读取失败时再用本轮角色快照兜底。
+    if (!privateName && char.characterUserProfile?.enabled) {
+        privateName = char.characterUserProfile.name?.trim() || '';
+    }
     let resolvedUserName = privateName || userName;
-    // 其他未传用户名的入口才回退到全局用户档案。
+    // 只有当前角色没有专属姓名时，才回退到全局用户档案。
     if (!resolvedUserName) {
         try { resolvedUserName = (await DB.getUserProfile())?.name || undefined; } catch {}
     }
