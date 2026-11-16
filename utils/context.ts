@@ -49,7 +49,7 @@ export const ContextBuilder = {
         if ((options?.surface !== 'chat' && options?.surface !== 'home') || !isScheduleFeatureOn(char) || !char.emotionConfig?.enabled) return '';
         const inner = options.innerState ?? getLastInnerState(char.id);
         return (char.buffInjection ? char.buffInjection + '\n\n' : '')
-            + (inner.trim() ? '### 当前内心想法\n' + inner.trim() + '\n（这是你的内心状态，不是台词，不必说出口；让它自然影响你的回应。）\n\n' : '');
+            + (inner.trim() ? '### 当前内心想法\n' + inner.trim() + '\n（这是我的内心状态，不是台词，不必说出口；让它自然影响我的回应。）\n\n' : '');
     },
     /** Read-only eligibility preview: never samples probability or performs recall. */
     inspectWorldbooks: (char: CharacterProfile, user: UserProfile, history: WorldbookScanMessage[]) =>
@@ -143,7 +143,7 @@ export const ContextBuilder = {
             if (memorySection) {
                 context += `### 记忆摘要 (Memory Reference)\n`;
                 context += memorySection;
-                context += `⚠️ 情绪可以被记忆触发：如果记忆中存在未解决的矛盾、反复出现的摩擦模式、或对方曾经伤害过你的事件，你可以在情绪评估中让角色"翻旧账"——即某个记忆片段突然浮上心头，引发新的buff或加剧已有buff的强度。这种情绪涌现应当自然且有迹可循，不要凭空捏造不存在的记忆。\n\n`;
+                context += `⚠️ 情绪可以被记忆触发：如果记忆中存在未解决的矛盾、反复出现的摩擦模式，或对方曾经伤害过我的事件，我可以在情绪评估中自然地想起这些事，让角色"翻旧账"——即某个记忆片段突然浮上心头，引发新的buff或加剧已有buff的强度。这种情绪涌现应当自然且有迹可循，不要凭空捏造不存在的记忆。\n\n`;
             }
         }
 
@@ -594,7 +594,7 @@ const renderCoreContext = async (
         // 像情绪底色一样影响角色的行为和感受，注入在角色设定紧下方
         if (char.selfInsights && char.selfInsights.length > 0) {
             context += `### 内在认知 (Self Insights)\n`;
-            context += `以下是你在独处反思中逐渐想明白的事，它们已经成为你的一部分：\n`;
+            context += `以下是我在独处反思中逐渐想明白的事，它们已经成为我的一部分：\n`;
             char.selfInsights.forEach(insight => {
                 context += `- ${insight}\n`;
             });
@@ -636,7 +636,7 @@ const renderCoreContext = async (
         const imp = normalizeUserImpression(char.impression);
         if (imp) {
             context += `### [私密档案: 我眼中的${user.name}] (Private Impression)\n`;
-            context += `(注意：以下内容是你内心对TA的真实看法，不要直接告诉用户，但要基于这些看法来决定你的态度。)\n`;
+            context += `(以下内容是我内心对TA的真实看法，不要直接告诉用户，但要基于这些看法来决定我的态度。)\n`;
             context += `- 核心评价: ${imp.personality_core.summary}\n`;
             context += `- 互动模式: ${imp.personality_core.interaction_style}\n`;
             context += `- 我观察到的特质: ${imp.personality_core.observed_traits.join(', ')}\n`;
