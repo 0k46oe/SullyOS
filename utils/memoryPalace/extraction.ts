@@ -484,7 +484,7 @@ export async function extractMemoriesFromBuffer(
     const sarMemoryBoundary = buildSARMemoryBoundaryInstruction(conversationText);
 
     const contextBlock = charContext
-        ? `\n## 你的人设（供参考，帮助你理解对话中的关系和角色定位）\n${charContext}\n`
+        ? `\n## 我的角色设定（帮助我理解对话中的关系和角色定位）\n${charContext}\n`
         : '';
 
     // 构建已有记忆引用块（带 O-编号，供 LLM 输出 relatedTo）
