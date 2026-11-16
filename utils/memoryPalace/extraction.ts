@@ -507,7 +507,7 @@ export async function extractMemoriesFromBuffer(
         ? `\n12. **便利贴摘除**（unpin，可选）：如果对话中明确提到某条便利贴描述的状态已结束（如"感冒好了""提前回来了""考试考完了"），在输出的 JSON 数组末尾加一条 {"unpin": "P0"} 来摘除它。只在对话明确提及时才摘除，不要猜测。`
         : '';
 
-    const systemPrompt = `你是 ${charName}。根据给定的对话内容，以你的第一人称视角（"我"）提取值得记住的记忆。${contextBlock}${relatedBlock}${pinnedBlock}
+    const systemPrompt = `我是 ${charName}。根据给定的对话内容，以我的第一人称视角（"我"）提取值得记住的记忆。${contextBlock}${relatedBlock}${pinnedBlock}
 
 ${buildRulesBlock(charName, userLabel, includeEntities, !!story)}${relatedToRule}${unpinRule}${sarMemoryBoundary ? `\n\n${sarMemoryBoundary}` : ''}${linkDates ? `
 
