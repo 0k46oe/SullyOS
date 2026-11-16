@@ -413,9 +413,9 @@ ${materialBlock}`;
     return `${identityContext ? `${identityContext}
 ---
 
-` : ''}你是 ${charName}，${userName} 是与你朝夕相处的人。下面的材料全部来自你们相处的记忆。
+` : ''}我是 ${charName}，${userName} 是与我朝夕相处的人。下面的材料全部来自我们相处的记忆。
 
-你现在在独处，安静地整理自己的"底色认知"——那些不需要刻意回忆就知道的事：关于 ${userName}、关于你自己、关于你们之间。
+我现在独处，安静地整理自己的"底色认知"——那些不需要刻意回忆就知道的事：关于 ${userName}、关于我自己、关于我们之间。
 
 【身份确认】「${userName}的事」只写 ${userName} 的事实；「我是谁」只写你（${charName}）自己；不要张冠李戴——材料里"我"是你，"TA/${userName}"是对方。
 
