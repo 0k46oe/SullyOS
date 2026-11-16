@@ -311,7 +311,7 @@ ${material.selfRoomNodes.length > 0 ? `### 自我认知 (自我房间)
 ${material.selfRoomNodes.map((n, i) => `[R${i}] (${n.tags.join(', ')}): ${n.content}`).join('\n')}
 ` : ''}
 ${material.recentEpisodes.length > 0 ? `### 最近的经历（回看）
-这些是上次静下来回想之后，你们相处的经历。回头看看它们，有些经历放在一起会让你注意到当时没注意的东西：
+这些是上次静下来回想之后，我们相处的经历。回头看看它们，有些经历放在一起会让我注意到当时没注意的东西：
 ${material.recentEpisodes.map((n, i) => `[E${i}] (${fmtDate(n.createdAt)}, ${n.mood}): ${n.content}`).join('\n')}
 ` : `### 最近发生的事
 ${material.recentContext.map(n => `- (${n.room}, ${n.mood}): ${n.content}`).join('\n')}`}
@@ -347,7 +347,7 @@ ${material.recentContext.map(n => `- (${n.room}, ${n.mood}): ${n.content}`).join
 ${material.recentEpisodes.length > 0 ? `
 对于最近的经历 [E*]：
 ⚠️ 克制规则：**绝大多数经历就只是经历**，什么都不产生（keep 或干脆不写）。整个列表合计最多 ${REFLECT_MAX_WORRIES} 条 worry、${REFLECT_MAX_ASPIRES} 条 aspire、${REFLECT_MAX_DISTILLS} 条 distill——只挑真正在我心里留下东西的。回看的价值在于：几段经历放在一起，会显出单独看时看不见的模式。
-- "worry" — 回头看这段（或这几段）经历，你产生了担忧或没想通的事。附 reflection（担忧内容，第一人称，50字以内），会成为阁楼新条目
+- "worry" — 回头看这段（或这几段）经历，我产生了担忧或没想通的事。附 reflection（担忧内容，第一人称，50字以内），会成为阁楼新条目
 - "aspire" — 从这段经历里长出了一个新期盼。附 reflection（期盼内容，30字以内），会放上窗台
 - "distill" — 我从中二次悟出了一条**跨时间稳定**的认知（不是一时的状态）。附 reflection（认知内容，50字以内）和 plate_room（归入哪块门牌：user_room=${userLabel}的**角色卡级**事实（家庭/重要他人/重大人生节点，日常状态不算） / self_room=关于我自己 / bedroom=我们之间的质地 / study=技能领域）
 - "keep" — 就只是经历（绝大多数情况）
