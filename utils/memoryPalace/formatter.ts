@@ -203,7 +203,7 @@ export async function expandAndFormat(
 
     // 4. 按房间分组渲染
     let output = `### 记忆宫殿 (Memory Palace)\n`;
-    output += `以下是你脑海中浮现的相关记忆片段，它们可能影响你此刻的感受和反应：\n\n`;
+    output += `以下是我脑海中浮现的相关记忆片段，它们可能影响我此刻的感受和反应：\n\n`;
 
     // 4a. 便利贴置顶记忆
     if (pinnedNodes.length > 0) {
@@ -212,7 +212,7 @@ export async function expandAndFormat(
         // 会退化成每段结尾都追问一遍进展、催对方快去办。同仓库里 Notion 笔记块
         // （chatPrompts 的「不要每次都提」）和用药提醒（lifeRecords 的「别反复催」）
         // 早就配了同类措辞，这里补齐。
-        output += `（这些是你这几天一直记着的事。记着不等于要一直说——话赶到那儿了顺口提一句就够了，没赶到就让它待在心里；同一件事不必每次聊天都追问进展，也不必替 ta 安排什么时候去做。）\n`;
+        output += `（这些是我这几天一直记着的事。记着不等于要一直说——话赶到那儿了顺口提一句就够了，没赶到就让它待在我心里；同一件事不必每次聊天都追问进展，也不必替 ta 安排什么时候去做。）\n`;
         for (const node of pinnedNodes) {
             const daysLeft = Math.ceil((node.pinnedUntil! - now) / (24 * 60 * 60 * 1000));
             output += `- [${dateOf(node.createdAt)}] ${contentOf(node)}（剩余 ${daysLeft} 天）\n`;
@@ -244,7 +244,7 @@ export async function expandAndFormat(
     if (activeAnticipations.length > 0) {
         output += `> **窗台期盼**:\n`;
         // 同便利贴：active/anchor 的期盼每轮全量注入，anchor 更是长期挂着。
-        output += `> （这是你心里盼着的事，不是待办清单。它影响你的心情多过你的话头，不必每次都提起来。）\n`;
+        output += `> （这是我心里盼着的事，不是待办清单。它影响我的心情多过我的话头，不必每次都提起来。）\n`;
         for (const ant of activeAnticipations) {
             const label = ant.status === 'anchor' ? '🔒 锚点' : '✨ 期盼';
             output += `> - ${label}: ${ant.content}\n`;
