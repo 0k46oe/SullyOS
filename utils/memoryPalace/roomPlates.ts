@@ -605,7 +605,7 @@ export function formatRoomPlatesSection(plates: RoomPlate[], userName?: string):
     if (sections.length === 0) return '';
 
     return `### 底色认知 (Resident Knowledge)
-以下是你早已知道的背景。它们是你认知的底色，不是话题——不要主动提起，也不要逐条复述，只在相关时让它们自然影响你的反应、措辞与温度。
+以下是我早已知道的背景。它们是我认知的底色，不是话题——不必主动提起，也不必逐条复述，只在相关时让它们自然影响我的反应、措辞与温度。
 
 ${sections.join('\n\n')}
 `;
