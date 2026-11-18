@@ -24,6 +24,41 @@ const prefersReducedMotion = () =>
   !!window.matchMedia &&
   window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+const waitForEntryAvatarDecode = (image: HTMLImageElement) => new Promise<void>(resolve => {
+  let settled = false;
+  let decoding = false;
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    window.clearTimeout(timeout);
+    observer.disconnect();
+    image.removeEventListener('load', check);
+    image.removeEventListener('error', finish);
+    resolve();
+  };
+  const check = () => {
+    if (!(image.currentSrc || image.getAttribute('src')) || !image.complete) return;
+    if (image.naturalWidth === 0 || typeof image.decode !== 'function' || decoding) {
+      if (image.naturalWidth === 0 || !decoding) finish();
+      return;
+    }
+    decoding = true;
+    void image.decode().then(finish).catch(finish);
+  };
+  const observer = new MutationObserver(check);
+  const timeout = window.setTimeout(finish, 4500);
+  image.loading = 'eager';
+  image.addEventListener('load', check);
+  image.addEventListener('error', finish);
+  observer.observe(image, { attributes: true, attributeFilter: ['src'] });
+  check();
+});
+
+const waitForEntryAvatars = (): Promise<void> | null => {
+  const images = Array.from(document.querySelectorAll<HTMLImageElement>('img[data-chat-entry-avatar="true"]'));
+  return images.length ? Promise.all(images.map(waitForEntryAvatarDecode)).then(() => {}) : null;
+};
+
 const CharacterEntryTransition: React.FC<Props> = ({ name, avatar, ready = true, onDone }) => {
   const reduced = useMemo(prefersReducedMotion, []);
   // 头像约 650ms 对焦清晰、名字约 780ms 到位 → 停留到 REVEAL_AT 让人看清，再退场。
@@ -41,8 +76,15 @@ const CharacterEntryTransition: React.FC<Props> = ({ name, avatar, ready = true,
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
+    let beginPending = false;
     let timeout: number | undefined;
-    const begin = () => { if (!cancelled) setStarted(true); };
+    const begin = () => {
+      if (cancelled || beginPending) return;
+      beginPending = true;
+      const waiting = waitForEntryAvatars();
+      if (waiting) void waiting.then(() => { if (!cancelled) setStarted(true); });
+      else setStarted(true);
+    };
 
     if (!avatar) {
       begin();

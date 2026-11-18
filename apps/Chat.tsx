@@ -4112,6 +4112,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                     const breaksWithPrevious = startsNewMessageGroup(prevMessage, m);
                     const breaksWithNext = !nextMessage || startsNewMessageGroup(m, nextMessage);
                     const suppressEntranceAnimation = streamPreviewHandoverIdsRef.current.has(m.id);
+                    const entryAvatarPriority = i >= Math.max(0, renderedMessages.length - 8);
                     // 这一轮在云端跑过哪些工具（即时对话才有，worker 挂在最后一条推送上）。
                     // 一条推送拆出的每条气泡都继承了同一份（metadata 是整份往下铺的，见
                     // activeMsgRuntime 的 mcdInheritMeta），所以只在这条推送的最后一条底下画，
@@ -4144,6 +4145,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                             charAvatar={char.avatar}
                             charName={char.name}
                             userAvatar={userProfile.perCharAvatars?.[char.id] || userProfile.avatar}
+                            entryAvatarPriority={entryAvatarPriority}
                             isLatestMessage={!nextMessage}
                             onMediaLoad={handleMessageMediaLoad}
                             moduleAlign={mergedFineTune.chatModuleAlign || 'center'}
@@ -4873,6 +4875,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                     const showElapsed = char.chatShowElapsedTime && elapsed >= (char.chatElapsedThresholdHours ?? 0.5) * 3600000;
                     const meetingBefore = char.chatShowMeetingHistory ? meetingGroups.get(m.id) : undefined;
                     const suppressEntranceAnimation = streamPreviewHandoverIdsRef.current.has(m.id);
+                    const entryAvatarPriority = i >= Math.max(0, renderedMessages.length - 8);
                     // 这一轮在云端跑过哪些工具（即时对话才有，worker 挂在最后一条推送上）。
                     // 一条推送拆出的每条气泡都继承了同一份（metadata 是整份往下铺的，见
                     // activeMsgRuntime 的 mcdInheritMeta），所以只在这条推送的最后一条底下画，
@@ -4907,6 +4910,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                             charAvatar={char.avatar}
                             charName={char.name}
                             userAvatar={userProfile.perCharAvatars?.[char.id] || userProfile.avatar}
+                            entryAvatarPriority={entryAvatarPriority}
                             isLatestMessage={!nextMessage}
                             onMediaLoad={handleMessageMediaLoad}
                             moduleAlign={mergedFineTune.chatModuleAlign || 'center'}

@@ -1167,6 +1167,8 @@ interface MessageItemProps {
     userAvatar: string;
     /** 当前窗口里的最后一条消息；最新图片需要立即解码，避免移动端懒加载卡在滚动容器底部。 */
     isLatestMessage?: boolean;
+    /** 首屏附近的头像优先加载，并由进入过场等待其解码。 */
+    entryAvatarPriority?: boolean;
     /** 图片完成解码并确定高度后，通知聊天列表重新校准贴底位置。 */
     onMediaLoad?: (messageId: number) => void;
     onLongPress: (m: Message) => void;
@@ -1242,6 +1244,7 @@ const MessageItem = React.memo(({
     charName,
     userAvatar,
     isLatestMessage = false,
+    entryAvatarPriority = false,
     onMediaLoad,
     onLongPress,
     onReply,
@@ -1482,10 +1485,12 @@ const formatTimestamp = (ts: number) => {
                     <>
                         <TokenImg
                             value={src}
+                            data-chat-entry-avatar={entryAvatarPriority && isImageValue(src) ? 'true' : undefined}
                             style={isAnniversaryFrame(styleConfig.avatarDecoration) ? { borderRadius: "50%" } : undefined}
                             className={`sully-chat-message-avatar-img w-full h-full ${avatarRadiusClass} object-cover shadow-sm ring-1 ring-black/5 relative z-0`}
                             alt="avatar"
-                            loading="lazy"
+                            loading={entryAvatarPriority ? 'eager' : 'lazy'}
+                            fetchPriority={entryAvatarPriority && isImageValue(src) ? 'high' : undefined}
                             decoding="async"
                         />
                         {styleConfig.avatarDecoration && (

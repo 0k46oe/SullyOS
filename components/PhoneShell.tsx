@@ -1073,16 +1073,17 @@ const PhoneShell: React.FC = () => {
       (activeApp === AppID.Chat && activeCharacter?.chromeCustomCss) ||
       (activeApp === AppID.GroupChat && groups.some(g => Boolean(g.chromeCustomCss))),
   );
+  const appLoadingPending = activeApp !== AppID.Launcher && settledApp !== activeApp;
   const shellBackdropHidden =
     activeApp !== AppID.Launcher &&
-    (settledApp !== activeApp ||
-      canHideShellBackdropWhenSettled(activeApp, {
-        hasCustomChatChromeCss,
-        iosStandalone: useIOSStandaloneLayout,
-      }));
+    !appLoadingPending &&
+    canHideShellBackdropWhenSettled(activeApp, {
+      hasCustomChatChromeCss,
+      iosStandalone: useIOSStandaloneLayout,
+    });
 
   return (
-    <div className={`sully-phone-shell relative w-full h-full overflow-hidden ${activeApp !== AppID.Launcher && settledApp !== activeApp ? 'bg-[#f4f3ee]' : 'bg-gradient-to-br from-pink-200 via-purple-200 to-indigo-200'} text-slate-900 font-sans select-none overscroll-none`}>
+    <div className={`sully-phone-shell relative w-full h-full overflow-hidden ${appLoadingPending ? 'bg-[#e8ede4]' : 'bg-gradient-to-br from-pink-200 via-purple-200 to-indigo-200'} text-slate-900 font-sans select-none overscroll-none`}>
        {/* Optimized Background Layer */}
        {/* 壁纸底层：进 App 时只柔和虚化/压暗作背景，不再做缩放「过场」——
           进 App 的过渡感统一交给 App 容器的淡入（见下方 animate-fade-in 包裹层）。
@@ -1103,11 +1104,19 @@ const PhoneShell: React.FC = () => {
          className={`sully-shell-wash absolute inset-0 transition-colors duration-500 ${
            activeApp === AppID.Launcher
              ? 'bg-transparent'
+             : appLoadingPending
+               ? 'bg-transparent'
              : reducedBlur
                ? 'bg-slate-50/95'
                : 'bg-white/55'
          }`}
-         style={shellBackdropHidden ? { visibility: 'hidden' } : undefined}
+         style={shellBackdropHidden
+           ? { visibility: 'hidden' }
+           : appLoadingPending
+             ? {
+                 background: 'linear-gradient(128deg, rgba(99,125,94,.17), rgba(223,232,216,.13) 56%, rgba(248,250,243,.2)), radial-gradient(ellipse at 16% 12%, rgba(255,255,255,.28), transparent 58%)',
+               }
+             : undefined}
        />
        
        <style>{`.sully-shell-content:has(.date-companion-visual) { bottom: 0 !important; }`}</style>
