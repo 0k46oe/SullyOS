@@ -3940,6 +3940,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
              )}
 
 
+             {/* 上游合并曾把另一套完整聊天舞台插进这里；只保留下面的本地舞台，避免消息列表和输入栏重复挂载。 */}
+             {false && <>
              {/* 记忆整理结果 — 弹窗（高级感） */}
              {memoryPalaceResult && (
                  <div
@@ -4386,7 +4388,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                     acnh={acnh}
                 />
             </div>
-            {/* .sully-chat-root 仅包裹聊天舞台；系统弹窗、迷你应用与底部面板挂载在舞台外，避免白框顶层颜色/字体规则向表单和对话框继承。 */}
+             </>}
+             {/* .sully-chat-root 仅包裹聊天舞台；系统弹窗、迷你应用与底部面板挂载在舞台外，避免白框顶层颜色/字体规则向表单和对话框继承。 */}
 
             {/* 记忆整理结果 — 弹窗（高级感） */}
             {memoryPalaceResult && (
@@ -4788,8 +4791,41 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 );
             })()}
 
+             {homePhone?<header className="home-phone-chat-header"><span className="home-phone-chat-avatar" aria-hidden="true">{char.name.slice(0,1)}</span><div><strong>{chatCharacterDisplayName(char)}</strong><small>{isTyping||instantChatPending?'正在输入…':'在家，也想给你发消息'}</small></div><button onClick={handleManualTrigger} disabled={isTyping} aria-label="让对方回复">↗</button></header>:<ChatHeader
+                selectionMode={selectionMode}
+                selectedCount={selectedMsgIds.size + Array.from(selectedThinkingMsgIds).filter(id => !selectedMsgIds.has(id)).length}
+                onCancelSelection={() => { setSelectionMode(false); setSelectedMsgIds(new Set()); setSelectedThinkingMsgIds(new Set()); }}
+                activeCharacter={char}
+                isTyping={isTyping || instantChatPending}
+                isSummarizing={isSummarizing}
+                isEmotionEvaluating={emotionStatus === 'evaluating'}
+                isMemoryPalaceProcessing={!!memoryPalaceStatus}
+                memoryPalaceStatusText={memoryPalaceStatus}
+                lastTokenUsage={lastTokenUsage}
+                tokenBreakdown={tokenBreakdown}
+                onClose={closeApp}
+                onTriggerAI={handleManualTrigger}
+                triggerIcon={isTyping || instantChatPending ? 'stop' : 'lightning'}
+                hideTrigger={inputPreferences.sendButtonGenerates}
+                onShowCharsPanel={() => setShowPanel('chars')}
+                onDeleteBuff={(buffId) => {
+                    const currentBuffs = char.activeBuffs || [];
+                    updateCharacter(char.id, { activeBuffs: currentBuffs.filter(b => b.id !== buffId), buffInjection: '' });
+                    addToast('已删除该情绪状态', 'info');
+                }}
+                headerStyle={osTheme.chatHeaderStyle}
+                avatarShape={osTheme.chatAvatarShape}
+                headerAlign={osTheme.chatHeaderAlign}
+                headerDensity={osTheme.chatHeaderDensity}
+                statusStyle={osTheme.chatStatusStyle}
+                chromeStyle={osTheme.chatChromeStyle}
+                hideBuffs={osTheme.chatHideHeaderBuffs}
+                acnh={acnh}
+             />}
+
             <StreamingVoiceBar state={streamingVoice.state} onStop={stopStreamingVoice} />
-            <div ref={scrollRef} onScroll={handleChatScroll} onClick={() => { if (inputPreferences.autoReply) setShowPanel('none'); }} className="flex-1 overflow-y-auto overflow-x-hidden pt-6 pb-6 no-scrollbar" style={{ backgroundImage: activeTheme.type === 'custom' && activeTheme.user.backgroundImage ? 'none' : undefined }}>
+             <div ref={scrollRef} onScroll={handleChatScroll} onClick={() => { if (inputPreferences.autoReply) setShowPanel('none'); }} className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain pt-6 pb-6 no-scrollbar" style={{ backgroundImage: activeTheme.type === 'custom' && activeTheme.user.backgroundImage ? 'none' : undefined }}>
+                 <ChatSubtitleLayer enabled={translationEnabled && translationExpanded && translationStyle === 'subtitle'} settings={subtitleSettings}>
                 {collapsedCount > 0 && windowedFocusMsgId === null && (
                     <div className="flex justify-center mb-6">
                         <button onClick={async () => {
@@ -5011,6 +5047,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                         </div>
                     </div>
                 )}
+                </ChatSubtitleLayer>
             </div>
 
             <div className="relative z-40">
