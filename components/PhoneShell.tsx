@@ -501,7 +501,15 @@ const AppEnterStage: React.FC<{
 const PhoneShell: React.FC = () => {
   const { theme, isLocked, unlock, activeApp, closeApp, openApp, virtualTime, isDataLoaded, toasts, unreadMessages, characters, groups, handleBack, suspendedCall, resumeCall, suspendedDate, resumeDate, activeCharacterId, errorDialog, dismissError, sysOperation } = useOS();
   const useIOSStandaloneLayout = isIOSStandaloneWebApp();
+  const reducedBlur = useReducedBlur();
   const deploymentNotice = useDeploymentNotice();
+  const [settledApp, setSettledApp] = useState<AppID>(activeApp);
+
+  useEffect(() => {
+    if (activeApp === AppID.Launcher) {
+      setSettledApp(AppID.Launcher);
+    }
+  }, [activeApp]);
 
   // 三档顶部状态栏：安全显示 / 紧凑显示 / 隐藏。旧存档仍由 hideStatusBar 兼容解析。
   // compact 把时间放进 safe-area，本体顶栏只让出 max(safe-area, 1.5rem)，避免顶部再多一整行。
