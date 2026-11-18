@@ -1,5 +1,5 @@
-import {FRIEND_FEED_OUTPUT_TOKENS, FRIEND_REPLY_OUTPUT_TOKENS} from './friendFeedLimits';
-import {parseDedicatedFriendFeedAction} from './friendFeedOutput';
+import {FRIEND_FEED_OUTPUT_TOKENS, FRIEND_REPLY_OUTPUT_TOKENS, withFriendFeedOutputBudget} from './friendFeedLimits';
+import {readDedicatedFriendFeedResponse} from './friendFeedOutput';
 import type {APIConfig, RealtimeConfig, UserProfile} from '../types';
 import {DB} from './db';
 import {createLocalId} from './localId.js';
@@ -11,7 +11,6 @@ import {syncWeibo,syncWeiboHome,readWeiboConnection,weiboSyncMessage,type WeiboS
 import {prepareFriendFeedEmotionTask, landFriendFeedEmotionAction, releaseFriendFeedEmotionTask} from './friendFeedEmotion';
 import {buildFriendFeedReplyPayload} from './friendFeedReplies';
 import {resolveFriendFeedApi} from './friendFeedApi';
-import {extractAssistantText} from './emotionApply';
 import {safeFetchJson} from './safeApi';
 
 /** Independent from model configuration and the AI generation lease. */
@@ -63,30 +62,41 @@ export async function refreshFriendFeed(user: UserProfile, globalApi: APIConfig,
         const post=commentPostId?current.posts.find(p=>p.id===commentPostId):undefined;
         if(commentPostId&&!post)throw Error('这条动态已经不存在');
         const pool=post?friendCommentPool(characters.filter(c=>friendPostsForCharacter(current,c.id).some(p=>p.id===post.id)),post,settings,current):characters;
-        const char = weightedFriendPick(pool.map(c => ({value: c, weight: settings.characterWeights[c.id] ?? 10})), random);
+        let char = weightedFriendPick(pool.map(c => ({value: c, weight: settings.characterWeights[c.id] ?? 10})), random);
         const kind = weightedFriendPick((['self', 'related', 'stranger'] as FriendRefreshKind[]).map(value => ({value,
             weight: value !== 'self' && (!settings.npcEnabled||char?.phoneState?.allowFictionalContacts===false) ? 0 : settings.contentWeights[value]})), random);
         if (!char || !kind) return {warnings, message: weibo?.message||(post?.source&&!settings.realContentEnabled?'尚未允许角色阅读真实内容，可在设置中开启':'没有可抽取的角色或内容类型，请在设置中调整权重')};
+        // A self round must not pay for a reply that landing will reject as a monologue.
+        // NPC rounds still use the original host; zero weights remain excluded.
+        if (post && kind === 'self' && post.comments.at(-1)?.authorId === char.id) {
+            const eligibleSettings = {...settings,characterWeights:{...settings.characterWeights,[char.id]:0}};
+            const alternatives = friendCommentPool(characters.filter(c =>
+                friendPostsForCharacter(current,c.id).some(p => p.id === post.id)),post,eligibleSettings,current);
+            char = weightedFriendPick(alternatives.map(c => ({value:c,weight:settings.characterWeights[c.id]??10})),random);
+            if (!char) return {warnings,message:'最后一条评论已经是这位角色发的，这次未调用 API。你可以先接一句，或在设置中让其他角色参与评论。'};
+        }
         charId = char.id;
         const api = await resolveFriendFeedApi(globalApi, char);
         if (!api?.baseUrl || !api.model) throw Error('请在哔哔的 API 设置中配置独立 API，或检查角色 / 全局 API；已有内容已保留');
         task = await prepareFriendFeedEmotionTask(charId, random, undefined, source, kind, commentPostId);
         if (!task) return {warnings, message: '已刷新，这位朋友刚刚参与过，稍后再试'};
-        const messages = (await buildFriendFeedReplyPayload(char, user, globalApi, task.prompt, realtimeConfig)).fullMessages;
+        const maxTokens = commentPostId ? FRIEND_REPLY_OUTPUT_TOKENS : FRIEND_FEED_OUTPUT_TOKENS;
+        const prompt = withFriendFeedOutputBudget(task.prompt, maxTokens);
+        const messages = (await buildFriendFeedReplyPayload(char, user, globalApi, prompt, realtimeConfig, task.npcOnly)).fullMessages;
         const data = await safeFetchJson(`${api.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
             method: 'POST', headers: {'Content-Type': 'application/json', Authorization: `Bearer ${api.apiKey || 'sk-none'}`},
-            body: JSON.stringify({model: api.model, messages, temperature: api.temperature ?? .85, max_tokens: commentPostId ? FRIEND_REPLY_OUTPUT_TOKENS : FRIEND_FEED_OUTPUT_TOKENS, stream: api.stream ?? false,
+            body: JSON.stringify({model: api.model, messages, temperature: api.temperature ?? .85, max_tokens: maxTokens, stream: api.stream ?? false,
                 ...(api.stream ? {stream_options: {include_usage: true}} : {})}),
         }, 0, 0, {appName: '哔哔', charId, charName: char.name, purpose: commentPostId?'刷新评论':'刷新动态'});
-        const result = parseDedicatedFriendFeedAction(extractAssistantText(data.choices?.[0]?.message));
+        const result = readDedicatedFriendFeedResponse(data);
         if (result === undefined) throw Error('动态生成格式不完整，请重试');
         const action = result === null ? {requestId: task.id, kind: 'none'} : result;
         if (!action || typeof action !== 'object' || (action as {requestId?: string}).requestId !== task.id)
             throw Error('动态生成任务不匹配，请重试');
-        let rejection='模型返回的动作不符合本轮要求，内容未保存';
-        if (!await landFriendFeedEmotionAction(charId, action, source,reason=>{rejection=reason;})) throw Error('内容未发布：'+rejection);
-        const row = action as {kind?: string; npcActions?: unknown[]};
-        return {warnings, message: row.kind === 'none' && !row.npcActions?.length ? '刷新完成，这次朋友们没有新回应' : commentPostId?'新评论已送达':'新动态已送达'};
+        let rejection='模型返回的动作不符合本轮要求，内容未保存', landing={selfKind:'none',npcCount:0,skipped:0};
+        if (!await landFriendFeedEmotionAction(charId, action, source,reason=>{rejection=reason;},result=>{landing=result;})) throw Error('内容未发布：'+rejection);
+        const skipped=landing.skipped?`（${landing.skipped} 条不符合本轮要求，已略过）`:'';
+        return {warnings, message: (landing.selfKind === 'none' && !landing.npcCount ? '刷新完成，这次朋友们没有新回应' : commentPostId?'新评论已送达':'新动态已送达')+skipped};
     } catch(e) {
         if(!weibo?.attempted)throw e;
         warnings.push('角色 API：'+(e instanceof Error?e.message:'生成失败'));

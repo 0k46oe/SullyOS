@@ -56,6 +56,16 @@ const musicCard = (): Message => ({
 });
 
 describe('MessageItem module layout', () => {
+    it('renders an XHS card as a real note link with a visible copy-link hint', () => {
+        const markup=renderMessage({...htmlCard(),type:'xhs_card',metadata:{xhsNote:{
+            noteId:'a'.repeat(24),title:'晚饭',xsecToken:'abc+=',xsecSource:'pc_search',
+        }}} as Message);
+        expect(markup).toContain('<a href="https://www.xiaohongshu.com/');
+        expect(markup).toContain('xsec_token=abc%2B%3D');
+        expect(markup).toContain('xsec_source=pc_search');
+        expect(markup).toContain('rel="noopener noreferrer"');
+        expect(markup).toContain('长按此处复制链接');
+    });
     const moduleModes = [
         ['center', 'grouped'],
         ['center', 'every_message'],
@@ -103,7 +113,7 @@ describe('MessageItem module layout', () => {
         expect(markup).toContain('https://example.com/char.png');
     });
 
-    it('心象卡片提供长按复制提示与独立交互入口', () => {
+    it('心象卡片提供长按操作菜单与独立交互入口', () => {
         const markup = renderMessage({
             id: 4,
             charId: 'char-1',
@@ -114,10 +124,11 @@ describe('MessageItem module layout', () => {
             metadata: { thinkingChain: '这是可以一键复制的完整心象。' },
         });
 
-        expect(markup).toContain('aria-label="心象：点击展开，长按复制全文"');
-        expect(markup).toContain('title="长按复制心象全文"');
+        expect(markup).toContain('aria-label="心象：点击展开，长按选择复制或翻译"');
+        expect(markup).toContain('title="长按选择复制或翻译"');
+        expect(markup).toContain('aria-label="心象操作"');
         expect(markup).toContain('这是可以一键复制的完整心象');
         expect(markup).toContain('user-select:text');
-        expect(markup).toContain('-webkit-touch-callout:default');
+        expect(markup).toContain('-webkit-touch-callout:none');
     });
 });

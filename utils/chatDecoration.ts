@@ -9,17 +9,18 @@ import {mergeChatFineTune} from './chatFineTuneCss';
 import {resolveActiveSound,stripWhiteboxSoundDirective,decodeSoundShare,parseWhiteboxSound,BUILTIN_SOUNDS} from './whiteboxSound';
 import {resolveRefToDataUrl,blobToDataUrl,migrateDataUrlToRef,migrateChatThemeBlobRefs} from './blobRef';
 import {extractShareFromPng,isPng,pngHasShare,SHARE_KINDS} from './pngShare';
+import {mergeAvatarFrameCss} from './avatarFrameTarget';
 import {replaceWorkshopCss,workshopBlock} from './decorationWorkshop';
 
 // Explicit allowlist: presets never carry API keys, character prompts, history or system settings.
 export const LAYOUT_DEFAULTS = {
  chatAvatarMode:'grouped',chatEmojiSize:'small',chatAvatarShape:'circle',chatAvatarSize:'medium',chatAvatarVisibility:'both',chatAvatarPlacement:'beside',chatAvatarAlign:'bottom',chatAvatarOffsetY:0,
  chatBubbleFontSize:0,chatBubbleLineHeight:0,chatBubbleIndent:0,chatSnapToEdge:false,chatModuleAlign:'center',
- chatBubbleStyle:'modern',chatMessageSpacing:'default',chatShowTimestamp:'always',chatHeaderStyle:'default',chatInputStyle:'rounded',chatChromeStyle:'soft',
+ chatBubbleStyle:'modern',chatMessageSpacing:'default',chatShowTimestamp:'always',chatTimestampPosition:'below',chatHeaderStyle:'default',chatInputStyle:'rounded',chatChromeStyle:'soft',
  chatHeaderAlign:'left',chatHeaderDensity:'default',chatStatusStyle:'subtle',chatSendButtonStyle:'circle',chatHideHeaderBuffs:false,
 } satisfies Partial<OSTheme>;
 export type DecorationLayout=Partial<Pick<OSTheme,keyof typeof LAYOUT_DEFAULTS>>;
-const choices:Record<string,string[]>={chatAvatarMode:['grouped','every_message'],chatEmojiSize:['small','medium','large'],chatAvatarShape:['circle','rounded','square'],chatAvatarSize:['small','medium','large'],chatAvatarVisibility:['both','hide_ai','hide_user','hide_both'],chatAvatarPlacement:['beside','above_group'],chatAvatarAlign:['bottom','top','center'],chatModuleAlign:['anchor','center'],chatBubbleStyle:['modern','flat','outline','shadow','wechat','ios'],chatMessageSpacing:['compact','default','spacious'],chatShowTimestamp:['always','hover','never'],chatHeaderStyle:['default','minimal','gradient','wechat','telegram','discord','pixel'],chatInputStyle:['default','rounded','flat','wechat','ios','telegram','discord','pixel'],chatChromeStyle:['soft','flat','floating','pixel'],chatHeaderAlign:['left','center'],chatHeaderDensity:['compact','default','airy'],chatStatusStyle:['subtle','pill','dot'],chatSendButtonStyle:['circle','pill','minimal']};
+const choices:Record<string,string[]>={chatAvatarMode:['grouped','every_message'],chatEmojiSize:['small','medium','large'],chatAvatarShape:['circle','rounded','square'],chatAvatarSize:['small','medium','large'],chatAvatarVisibility:['both','hide_ai','hide_user','hide_both'],chatAvatarPlacement:['beside','above_group'],chatAvatarAlign:['bottom','top','center'],chatModuleAlign:['anchor','center'],chatBubbleStyle:['modern','flat','outline','shadow','wechat','ios'],chatMessageSpacing:['compact','default','spacious'],chatShowTimestamp:['always','hover','never'],chatTimestampPosition:['below','top_center'],chatHeaderStyle:['default','minimal','gradient','wechat','telegram','discord','pixel'],chatInputStyle:['default','rounded','flat','wechat','ios','telegram','discord','pixel'],chatChromeStyle:['soft','flat','floating','pixel'],chatHeaderAlign:['left','center'],chatHeaderDensity:['compact','default','airy'],chatStatusStyle:['subtle','pill','dot'],chatSendButtonStyle:['circle','pill','minimal']};
 const record=(v:unknown):v is Record<string,any>=>!!v&&typeof v==='object'&&!Array.isArray(v);
 export function pickDecorationLayout(value:unknown):DecorationLayout{
  if(!record(value))throw Error('布局内容无效');const result:Record<string,unknown>={};
@@ -67,7 +68,7 @@ export function validateDecoration(value:unknown):DecorationPreset{
  if(p.layout!==undefined)result.parts.layout=pickDecorationLayout(p.layout);
  if(p.bubbles!==undefined)result.parts.bubbles=validateBubble(p.bubbles);
  if(p.background!==undefined){if(!record(p.background)||!['plain','grid','paper','mesh'].includes(p.background.style))throw Error('背景格式无效');result.parts.background={image:p.background.image===null?null:resource(p.background.image),style:p.background.style};}
- if(p.sound!==undefined){if(p.sound===null)result.parts.sound=null;else{if(!record(p.sound)||typeof p.sound.src!=='string')throw Error('提示音格式无效');const src=p.sound.src;if(src!=='none'&&!Object.hasOwn(BUILTIN_SOUNDS,src))resource(src);if(p.sound.volume!==undefined&&(typeof p.sound.volume!=='number'||p.sound.volume<0||p.sound.volume>1))throw Error('音量无效');result.parts.sound={src,volume:p.sound.volume??.6};}}
+ if(p.sound!==undefined){if(p.sound===null)result.parts.sound=null;else{if(!record(p.sound)||typeof p.sound.src!=='string')throw Error('提示音格式无效');const src=p.sound.src;if(src!=='none'&&!Object.prototype.hasOwnProperty.call(BUILTIN_SOUNDS,src))resource(src);if(p.sound.volume!==undefined&&(typeof p.sound.volume!=='number'||p.sound.volume<0||p.sound.volume>1))throw Error('音量无效');result.parts.sound={src,volume:p.sound.volume??.6};}}
  if(p.css!==undefined){if(typeof p.css!=='string'||p.css.length>8*1024*1024||/<\/?(?:script|html|iframe)\b/i.test(p.css))throw Error('CSS 内容无效');result.parts.css=p.css;}
  if(!Object.keys(result.parts).length)throw Error('预设中没有可用的装扮内容');
  return result;
@@ -137,9 +138,15 @@ export async function decorationPatches(preset:DecorationPreset,parts:Decoration
  if(parts.includes('background')&&p.background){const ref=p.background.image?await migrateDataUrlToRef(p.background.image):'';if(scope==='global'){theme.chatBackground=ref;theme.chatBackgroundStyle=p.background.style;}else{character.chatBackground=ref;character.chatAppearance={...(character.chatAppearance||char.chatAppearance),chatBackgroundStyle:p.background.style};}}
  if(parts.includes('css')&&p.css!==undefined){
   const blocks=[...p.css.matchAll(/\/\* sully-composer:(avatar|background) \*\/\n?([\s\S]*?)\/\* end-sully-composer:\1 \*\//g)];
-  const scopedOnly=blocks.length>0&&!p.css.replace(workshopBlock('avatar'),'').replace(workshopBlock('background'),'').trim();
+  const extraCss=p.css.replace(workshopBlock('avatar'),'').replace(workshopBlock('background'),'').trim();
+  const isFullOutfit=Boolean(p.layout||extraCss||Object.keys(p).filter(key=>key!=='css').length>1);
+  const scopedOnly=!isFullOutfit&&blocks.length>0;
   let appliedCss=p.css;
-  if(scopedOnly){appliedCss=scope==='global'?base.chatChromeCustomCss||'':char.chromeCustomCss||'';for(const block of blocks)appliedCss=replaceWorkshopCss(appliedCss,block[1] as 'avatar'|'background',block[2]);}
+  if(scopedOnly){
+   appliedCss=scope==='global'?base.chatChromeCustomCss||'':char.chromeCustomCss||'';
+   if(blocks.some(block=>block[1]==='avatar'))appliedCss=mergeAvatarFrameCss(appliedCss,p.css);
+   for(const block of blocks)if(block[1]==='background')appliedCss=replaceWorkshopCss(appliedCss,'background',block[2]);
+  }
   appliedCss=await localizeCssImages(appliedCss);
   // Importing just CSS must not silently change the current sound stored in a CSS comment.
   const keep=scope==='global'?resolveActiveSound(undefined,undefined,base.chatChromeCustomCss,base.chatSound):resolveActiveSound(char.chromeCustomCss,char.chatSound,base.chatChromeCustomCss,base.chatSound);

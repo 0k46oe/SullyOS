@@ -39,16 +39,28 @@ export interface ApiCallMeta {
  * 这一次请求是谁发出去的。
  *
  * 不填 = 浏览器自己直连模型（绝大多数记录，不占存储）。带值的这几种都是主动消息 2.0
- * 交给云端跑的：本地只把活儿交上去，真正那条 `/chat/completions` 由用户自己的
- * Cloudflare Worker 在云端发出。
+ * 交给云端跑的：本地只把活儿交上去（或由云端定时触发），真正那条 `/chat/completions`
+ * 由用户自己的 Cloudflare Worker 在云端发出。
  *   - `cloud-instant-chat`：即时对话（用户此刻正等着的那一轮）
+ *   - `cloud-emotion-eval`：云端并发情绪评估（随即时对话在 Worker 内并行发给副 API）
+ *   - `cloud-proactive`：云端定时触发的主动消息 / 离开后消息 / 见面离开提醒（含模型判定不发的轮次）
  *   - `cloud-plate-consolidate`：门牌整理（记忆宫殿的后台活儿，用的是副 API）
+ *   - `cloud-diagnostic`：主动消息 2.0 面板的云端诊断复现测试
  */
-export type ApiCallRoute = 'cloud-instant-chat' | 'cloud-plate-consolidate';
+export type ApiCallRoute =
+    | 'cloud-instant-chat'
+    | 'cloud-emotion-eval'
+    | 'cloud-proactive'
+    | 'cloud-plate-consolidate'
+    | 'cloud-diagnostic';
 
 /** 落库的一条记录。 */
 export interface ApiCallLogEntry extends ApiCallMeta {
     id: string;
+    /** 即时对话内的实际模型请求序号（从 1 开始），与任务整体成败分开。 */
+    cloudCallIndex?: number;
+    /** 旧 Worker 的整轮合计无法恢复为逐次记录。 */
+    cloudUsageAggregated?: boolean;
     /** 调用发起（实际是响应回来）时间戳 ms */
     timestamp: number;
     /** 见 ApiCallRoute。空 = 浏览器直连。 */
@@ -65,11 +77,8 @@ export interface ApiCallLogEntry extends ApiCallMeta {
      */
     superseded?: boolean;
     /**
-     * Token 数只覆盖这一轮里的**最后一次**模型调用，不是全部。
-     *
-     * 云端带工具时一轮对话会连着调好几次模型（查完东西再接着说），而回传的用量只有
-     * 最后那次——不标出来的话，用户拿这个数去对供应商账单会一直对不上，还以为是被
-     * 多扣了。只在确实跑过工具时才置位。
+     * 已知用量不完整：某次供应商未返回 usage，或旧 Worker 只回传了末次请求。
+     * 新版即时对话逐次记账，每条只代表对应请求；没有 usage 时保持未知，不估算。
      */
     tokensPartial?: boolean;
     /** 命中的预设名；匹配不到时回退成 baseUrl 的 host */
@@ -206,6 +215,36 @@ const PRESETS_STORAGE_KEY = 'os_api_presets';
  */
 let ambientMeta: ApiCallMeta = {};
 
+const FALLBACK_APP_LABELS: Record<string, string> = {
+    chat: '消息',
+    groupchat: '群聊',
+    character: '神经链接',
+    settings: '设置',
+    date: '见面',
+    call: '电话',
+    checkphone: '查手机',
+    bank: '银行',
+    browser: '浏览器',
+    gallery: '相册',
+    game: '跑团桌游',
+    guidebook: '攻略本',
+    journal: '交换日记',
+    study: '自习室',
+    songwriting: '写歌',
+    schedule: '日程表',
+    room: '2D小屋',
+    room3d: '3D家园',
+    social: 'Spark',
+    lifesim: '都市人生',
+    vrworld: '彼方',
+    worldhome: '家园',
+    memorypalace: '记忆宫殿',
+    collaboration: '协同工作',
+    dreamtheater: '潜意识剧场',
+    personasim: '人格模拟',
+    'special-moments': '特别时刻',
+};
+
 export function setApiCallAmbientContext(meta: ApiCallMeta): void {
     ambientMeta = meta || {};
 }
@@ -217,6 +256,22 @@ export function getApiCallAmbientContext(): ApiCallMeta {
 
 function hasMeta(meta?: ApiCallMeta): boolean {
     return !!meta && Object.values(meta).some((v) => v != null && v !== '');
+}
+
+/**
+ * 归一化调用元数据：
+ * - 显式传入任意字段时绝不混入前台 `ambientMeta`（防止后台任务串标到当前焦点角色）；
+ * - 若显式传了 `appId` 或 `charId` 但未填显示名，自动从内置映射与 `charNameRegistry` 补齐。
+ */
+export function resolveApiCallMeta(input?: ApiCallMeta): ApiCallMeta {
+    const base = hasMeta(input) ? { ...input! } : { ...ambientMeta };
+    if (!base.appName && base.appId) {
+        base.appName = FALLBACK_APP_LABELS[base.appId];
+    }
+    if (!base.charName && base.charId) {
+        base.charName = getCharNameById(base.charId) || undefined;
+    }
+    return base;
 }
 
 function stripTrailingSlash(s: string): string {
@@ -843,7 +898,7 @@ export function buildApiRequestCapture(input: {
 
     const baseUrl = deriveBaseUrl(input.url);
     const model = extractModel(body);
-    const meta = hasMeta(input.meta) ? { ...input.meta } : { ...ambientMeta };
+    const meta = resolveApiCallMeta(input.meta);
     const capturedAt = input.capturedAt ?? Date.now();
     return {
         version: 1,
@@ -1134,8 +1189,8 @@ export function recordApiCall(input: {
     try {
         const baseUrl = deriveBaseUrl(input.url);
         const model = extractModel(input.body);
-        // 显式 meta 优先（safeFetchJson 各调用点传的精确信息）；没有就用环境兜底（裸 fetch）。
-        const meta = hasMeta(input.meta) ? input.meta! : ambientMeta;
+        // 显式 meta 优先（各调用点传的精确信息，缺显示名时按 ID 自动补齐）；没有就用环境兜底。
+        const meta = resolveApiCallMeta(input.meta);
         // 整包 JSON 直接读；流式响应（response 为空但有原始文本）走 SSE 兜底扫描
         let responseForExtract: unknown = input.response;
         let backendModel: string | undefined =
@@ -1194,6 +1249,9 @@ export function recordApiCall(input: {
 /** 云端那一轮在本地日志里的记录 id。两笔写入靠它对上号，所以两边都从 uuid 现算。 */
 export const cloudApiCallLogId = (uuid: string): string => `cloud-${uuid}`;
 
+/** 云端即时对话附带的并发情绪评估在本地日志里的记录 id。 */
+export const cloudEmotionApiCallLogId = (uuid: string): string => `cloud-emotion-${uuid}`;
+
 /** 第一笔：云端收下了这一轮。 */
 export function recordCloudApiCall(input: {
     id: string;
@@ -1214,7 +1272,7 @@ export function recordCloudApiCall(input: {
 }): void {
     try {
         const baseUrl = stripTrailingSlash(input.baseUrl || '');
-        const meta = hasMeta(input.meta) ? input.meta! : ambientMeta;
+        const meta = resolveApiCallMeta(input.meta);
         const entry: ApiCallLogEntry = {
             id: input.id,
             timestamp: input.timestamp ?? Date.now(),
@@ -1252,10 +1310,14 @@ export function settleCloudApiCall(input: {
     ok: boolean;
     promptTokens?: number;
     completionTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+    backendModel?: string;
     /** 见 ApiCallLogEntry.tokensPartial。 */
     tokensPartial?: boolean;
     /** 见 ApiCallLogEntry.superseded。 */
     superseded?: boolean;
+    cloudUsageAggregated?: boolean;
 }): void {
     try {
         const { promptTokens, completionTokens } = input;
@@ -1264,16 +1326,78 @@ export function settleCloudApiCall(input: {
             pending: false,
             ok: input.ok,
             superseded: input.superseded || undefined,
+            ...(input.backendModel ? { backendModel: input.backendModel } : {}),
             promptTokens,
             completionTokens,
+            ...(input.cacheReadTokens !== undefined ? { cacheReadTokens: input.cacheReadTokens } : {}),
+            ...(input.cacheWriteTokens !== undefined ? { cacheWriteTokens: input.cacheWriteTokens } : {}),
             // 云端只报入和出两个数，总数这边自己加——列表顶上的合计读的是这个字段。
             totalTokens: promptTokens != null && completionTokens != null
                 ? promptTokens + completionTokens
                 : undefined,
             tokensPartial: input.tokensPartial || undefined,
+            ...(input.cloudUsageAggregated ? { cloudUsageAggregated: true } : {}),
         };
         import('./db')
             .then(({ DB }) => DB.appendApiCallLog(patch))
+            .catch(() => {});
+    } catch {
+        // 同上
+    }
+}
+
+/**
+ * 一次性写完的云端记录：用于云端定时触发的主动消息、模型判定不发的跳过轮次、云端诊断复现等。
+ *
+ * 这类请求在云端发起时页面可能根本没开，本地不存在预先落下的 pending 第一笔；
+ * 等推送或上线补收到达客户端时，直接按确定性 `id` 落一条终态记录（推送与补收双通道到达时按 `id` 幂等合并）。
+ */
+export function recordCompletedCloudApiCall(input: {
+    id: string;
+    route: ApiCallRoute;
+    baseUrl?: string;
+    model?: string;
+    backendModel?: string;
+    ok: boolean;
+    timestamp?: number;
+    promptTokens?: number;
+    completionTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+    tokensPartial?: boolean;
+    meta?: ApiCallMeta;
+}): void {
+    try {
+        const baseUrl = stripTrailingSlash(input.baseUrl || '');
+        const model = input.model || '';
+        const meta = resolveApiCallMeta(input.meta);
+        const { promptTokens, completionTokens } = input;
+        const entry: ApiCallLogEntry = {
+            id: input.id,
+            timestamp: input.timestamp ?? Date.now(),
+            route: input.route,
+            pending: false,
+            presetName: baseUrl ? resolvePresetName(baseUrl, model) : '☁️ 云端凭据',
+            baseUrl,
+            model: model || '—',
+            ...(input.backendModel ? { backendModel: input.backendModel } : {}),
+            ok: input.ok,
+            promptTokens,
+            completionTokens,
+            totalTokens: promptTokens != null && completionTokens != null
+                ? promptTokens + completionTokens
+                : undefined,
+            ...(input.cacheReadTokens !== undefined ? { cacheReadTokens: input.cacheReadTokens } : {}),
+            ...(input.cacheWriteTokens !== undefined ? { cacheWriteTokens: input.cacheWriteTokens } : {}),
+            ...(input.tokensPartial ? { tokensPartial: true } : {}),
+            appId: meta.appId,
+            appName: meta.appName,
+            charId: meta.charId,
+            charName: meta.charName,
+            purpose: meta.purpose,
+        };
+        import('./db')
+            .then(({ DB }) => DB.appendApiCallLog(entry))
             .catch(() => {});
     } catch {
         // 同上

@@ -8,6 +8,9 @@ import EmotionSettingsPanel from './EmotionSettingsPanel';
 import ChatInputSettings from './ChatInputSettings';
 import ChatSettingsSection from './ChatSettingsSection';
 import ChatWordFrequencyPanel from './ChatWordFrequencyPanel';
+import TranslationStylePicker from './TranslationStylePicker';
+import { DEFAULT_SUBTITLE_SETTINGS, type ChatTranslationStyle, type ChatTranslationMode, type ChatSubtitleSettings } from '../../utils/chatTranslationStyle';
+import SubtitleSettingsDialog from './SubtitleSettingsDialog';
 import { isDefaultAiCompanionEnabled } from '../../utils/characterInstructions';
 import { useOS } from '../../context/OSContext';
 import SecretNote from './SecretNote';
@@ -119,7 +122,11 @@ interface ChatModalsProps {
     translationEnabled?: boolean;
     onToggleTranslation?: () => void;
     translationExpanded?: boolean;
-    onToggleTranslationExpanded?: () => void;
+    onSetTranslationMode?: (mode: ChatTranslationMode) => void;
+    translationStyle?: ChatTranslationStyle;
+    subtitleSettings?: ChatSubtitleSettings;
+    appearanceFonts?: Array<{ name: string; source: string }>;
+    onSetSubtitleSettings?: (settings: ChatSubtitleSettings) => void;
     translateSourceLang?: string;
     translateTargetLang?: string;
     onSetTranslateSourceLang?: (lang: string) => void;
@@ -283,8 +290,8 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     onArchive, onCreatePrompt, onEditPrompt, onSavePrompt, onDeletePrompt,
     onSetHistoryStart, onRestoreAdaptiveContext, onEnterSelectionMode, onReplyMessage, onEditMessageStart, onSendGeneratedImage, onConfirmEditMessage, onDeleteMessage, onCopyMessage, onToggleMessageFavorite, messageFavorited, onDeleteEmoji, onDeleteCategory, onRenameCategory, onDownloadCategory,
     allCharacters = [], onSaveCategoryVisibility,
-    translationEnabled, onToggleTranslation, translationExpanded, onToggleTranslationExpanded, translateSourceLang, translateTargetLang, onSetTranslateSourceLang, onSetTranslateLang,
-    xhsEnabled, onToggleXhs,
+    translationEnabled, onToggleTranslation, translationExpanded, onSetTranslationMode, translationStyle = 'bubble', subtitleSettings = DEFAULT_SUBTITLE_SETTINGS, onSetSubtitleSettings, translateSourceLang, translateTargetLang, onSetTranslateSourceLang, onSetTranslateLang,
+    appearanceFonts, xhsEnabled, onToggleXhs,
     htmlModeEnabled, onToggleHtmlMode, htmlModeCustomPrompt, setHtmlModeCustomPrompt,
     chatVoiceEnabled, onToggleChatVoice, chatVoiceAutoPlay, onToggleChatVoiceAutoPlay, chatVoiceLang, onSetChatVoiceLang,
     onGenerateVoice, voiceAvailable, onDownloadVoice, voiceDownloadable, voiceCollectable, onToggleVoiceFavorite, voiceFavorited,
@@ -297,6 +304,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
 }) => {
     const { updateCharacter, apiConfig } = useOS();
     const [visibilitySelection, setVisibilitySelection] = useState<Set<string>>(new Set());
+    const [subtitleSettingsOpen, setSubtitleSettingsOpen] = useState(false);
     const [historyPage, setHistoryPage] = useState(0);
     const [historySearch, setHistorySearch] = useState('');
     const [imageRequirement, setImageRequirement] = useState('');
@@ -437,10 +445,10 @@ const ChatModals: React.FC<ChatModalsProps> = ({
             </div>}
             <Modal 
                 isOpen={modalType === 'transfer'} title="Credits 转账" onClose={() => setModalType('none')}
-                footer={<><button onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 rounded-2xl">取消</button><button onClick={onTransfer} className="flex-1 py-3 bg-orange-500 text-white rounded-2xl">确认</button></>}
+                footer={<><button onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 text-slate-700 rounded-2xl">取消</button><button onClick={onTransfer} className="flex-1 py-3 bg-orange-500 text-white rounded-2xl">确认</button></>}
             >
-                <input type="number" value={transferAmt} onChange={e => setTransferAmt(e.target.value)} placeholder="金额" className="w-full bg-slate-100 rounded-2xl px-5 py-4 text-lg font-bold" autoFocus />
-                <input type="text" value={transferNote} onChange={e => setTransferNote(e.target.value)} maxLength={30} placeholder="添加转账留言（选填）" className="w-full bg-slate-100 rounded-2xl px-5 py-3 text-sm mt-3" />
+                <input type="number" value={transferAmt} onChange={e => setTransferAmt(e.target.value)} placeholder="金额" className="w-full bg-slate-100 text-slate-800 placeholder:text-slate-400 rounded-2xl px-5 py-4 text-lg font-bold" autoFocus />
+                <input type="text" value={transferNote} onChange={e => setTransferNote(e.target.value)} maxLength={30} placeholder="添加转账留言（选填）" className="w-full bg-slate-100 text-slate-800 placeholder:text-slate-400 rounded-2xl px-5 py-3 text-sm mt-3" />
             </Modal>
 
             {/* New Category Modal */}
@@ -463,7 +471,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
             >
                 <div className="space-y-3">
                     <p className="text-xs text-slate-400">表情将导入到你当前选中的分类。</p>
-                    <textarea value={emojiImportText} onChange={e => setEmojiImportText(e.target.value)} placeholder="Name--URL (每行一个)" className="w-full h-40 bg-slate-100 rounded-2xl p-4 resize-none" />
+                    <textarea value={emojiImportText} onChange={e => setEmojiImportText(e.target.value)} placeholder="Name--URL (每行一个)" className="w-full h-40 bg-slate-100 text-slate-800 placeholder:text-slate-400 rounded-2xl p-4 resize-none" />
                 </div>
             </Modal>
 
@@ -471,6 +479,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                 isOpen={modalType === 'chat-settings'} title="聊天设置" onClose={() => setModalType('none')}
                 footer={<button onClick={onSaveSettings} className="w-full py-3 bg-primary text-white font-bold rounded-2xl">保存设置</button>}
             >
+                {subtitleSettingsOpen && <SubtitleSettingsDialog key={activeCharacter.id} value={subtitleSettings} appearanceFonts={appearanceFonts} onChange={settings => onSetSubtitleSettings?.(settings)} onClose={() => setSubtitleSettingsOpen(false)} />}
                 <div className="space-y-3">
                     <ChatSettingsSection title="输入与发送" summary="表情联想、回车与自动回复">
                         <ChatInputSettings value={settingsInputPreferences} onChange={setSettingsInputPreferences} />
@@ -686,19 +695,11 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                                         inputPlaceholder="自定义，如 中文（繁體）"
                                         onSelect={onSetTranslateLang}
                                     />
-                                    <button
-                                        type="button"
-                                        onClick={onToggleTranslationExpanded}
-                                        className="w-full flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-left active:bg-slate-50"
-                                    >
-                                        <span>
-                                            <span className="block text-[11px] font-bold text-slate-600">原文与译文同时展开</span>
-                                            <span className="block mt-0.5 text-[9px] leading-relaxed text-slate-400">开启后不再逐条点击切换，双语气泡会直接上下显示两种语言。</span>
-                                        </span>
-                                        <span className={`shrink-0 w-10 h-6 rounded-full p-1 transition-colors flex items-center ${translationExpanded ? 'bg-primary' : 'bg-slate-200'}`}>
-                                            <span className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${translationExpanded ? 'translate-x-4' : ''}`} />
-                                        </span>
-                                    </button>
+                                    <TranslationStylePicker value={translationExpanded ? translationStyle : 'collapsed'} onChange={onSetTranslationMode} />
+                                    {translationExpanded && translationStyle === 'subtitle' && <button type="button" onClick={() => setSubtitleSettingsOpen(true)}
+                                        className="flex min-h-11 w-full items-center justify-between border-t border-slate-100 py-2 text-left text-[11px] text-primary">
+                                        <span>字幕设置与预览<span className="mt-0.5 block text-[10px] text-slate-400">字号、颜色与字体</span></span><span aria-hidden="true">›</span>
+                                    </button>}
                                     {/* Preview */}
                                     <div className="text-[11px] text-center text-slate-500 bg-slate-50 rounded-lg py-2">
                                         选<span className="font-bold text-slate-700">{translateSourceLang || '?'}</span> 译<span className="font-bold text-primary">{translateTargetLang || '?'}</span>
@@ -780,7 +781,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                                         value={htmlModeCustomPrompt || ''}
                                         onChange={e => setHtmlModeCustomPrompt?.(e.target.value)}
                                         placeholder="比如：偏好暖色调 / 默认风格走 minimal 杂志感 / 票据类必须含二维码占位…"
-                                        className="w-full h-28 bg-slate-50 rounded-2xl p-3 text-[12px] resize-none border border-slate-200 focus:outline-none focus:border-fuchsia-300"
+                                        className="w-full h-28 bg-slate-50 text-slate-800 placeholder:text-slate-400 rounded-2xl p-3 text-[12px] resize-none border border-slate-200 focus:outline-none focus:border-fuchsia-300"
                                     />
                                     <p className="text-[10px] text-slate-400 mt-1">留空则只使用内置提示词。</p>
                                 </div>
@@ -944,7 +945,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                     <textarea 
                         value={editingPrompt?.content || ''} 
                         onChange={e => setEditingPrompt((prev: any) => prev ? {...prev, content: e.target.value} : null)}
-                        className="w-full h-64 bg-slate-100 rounded-xl p-3 text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-primary/20 leading-relaxed"
+                        className="w-full h-64 bg-slate-100 text-slate-800 placeholder:text-slate-400 rounded-xl p-3 text-xs font-mono resize-none focus:outline-none focus:ring-2 focus:ring-primary/20 leading-relaxed"
                         placeholder="输入提示词内容..."
                     />
                 </div>
@@ -978,7 +979,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                                 value={historySearch}
                                 onChange={(e) => { setHistorySearch(e.target.value); setHistoryPage(0); }}
                                 placeholder="模糊搜索历史消息（关键词 / 字符顺序匹配）"
-                                className="w-full pl-8 pr-8 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-primary focus:bg-white transition-colors"
+                                className="w-full pl-8 pr-8 py-2 text-xs text-slate-800 placeholder:text-slate-400 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:border-primary focus:bg-white transition-colors"
                             />
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
                                 <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
@@ -1120,7 +1121,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
             
              <Modal
                 isOpen={modalType === 'delete-emoji'} title="删除表情包" onClose={() => setModalType('none')}
-                footer={<><button onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 rounded-2xl">取消</button><button onClick={onDeleteEmoji} className="flex-1 py-3 bg-red-500 text-white font-bold rounded-2xl">删除</button></>}
+                footer={<><button onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 text-slate-700 rounded-2xl">取消</button><button onClick={onDeleteEmoji} className="flex-1 py-3 bg-red-500 text-white font-bold rounded-2xl">删除</button></>}
             >
                 <div className="flex flex-col items-center gap-4 py-2">
                     {Array.isArray(selectedEmoji) ? (
@@ -1186,7 +1187,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
             {/* Rename Emoji Modal */}
             <Modal
                 isOpen={modalType === 'rename-emoji'} title="修改表情包名称" onClose={() => setModalType('none')}
-                footer={<><button onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 rounded-2xl">取消</button><button onClick={onRenameEmoji} className="flex-1 py-3 bg-primary text-white font-bold rounded-2xl">保存</button></>}
+                footer={<><button onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 text-slate-700 rounded-2xl">取消</button><button onClick={onRenameEmoji} className="flex-1 py-3 bg-primary text-white font-bold rounded-2xl">保存</button></>}
             >
                 <input
                     value={newEmojiName}
@@ -1200,7 +1201,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
             {/* Delete Category Modal */}
             <Modal
                 isOpen={modalType === 'delete-category'} title="删除分类" onClose={() => setModalType('none')}
-                footer={<><button onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 rounded-2xl">取消</button><button onClick={onDeleteCategory} className="flex-1 py-3 bg-red-500 text-white font-bold rounded-2xl">删除</button></>}
+                footer={<><button onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 text-slate-700 rounded-2xl">取消</button><button onClick={onDeleteCategory} className="flex-1 py-3 bg-red-500 text-white font-bold rounded-2xl">删除</button></>}
             >
                 <div className="py-4 text-center">
                     <p className="text-sm text-slate-600">确定要删除分类 <br/><span className="font-bold">"{selectedCategory?.name}"</span> 吗？</p>
@@ -1210,7 +1211,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
 
             <Modal isOpen={modalType === 'rename-category'} title="重命名分类" onClose={() => setModalType('none')}
                 footer={<button onClick={onRenameCategory} className="w-full py-3 bg-primary text-white rounded-2xl">保存</button>}>
-                <input value={newCategoryName} onChange={e => setNewCategoryName(e.target.value)} placeholder="输入分类名称" autoFocus className="w-full p-3 bg-slate-50 rounded-xl" />
+                <input value={newCategoryName} onChange={e => setNewCategoryName(e.target.value)} placeholder="输入分类名称" autoFocus className="w-full p-3 bg-slate-50 text-slate-800 placeholder:text-slate-400 rounded-xl" />
             </Modal>
             {/* Category Options Modal (shown on long-press) */}
             <Modal isOpen={modalType === 'category-options'} title="分类操作" onClose={() => setModalType('none')}>
@@ -1272,12 +1273,12 @@ const ChatModals: React.FC<ChatModalsProps> = ({
 
             <Modal
                 isOpen={modalType === 'edit-message'} title="编辑内容" onClose={() => setModalType('none')}
-                footer={<><button onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 rounded-2xl">取消</button><button onClick={onConfirmEditMessage} className="flex-1 py-3 bg-primary text-white font-bold rounded-2xl">保存</button></>}
+                footer={<><button onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 text-slate-700 rounded-2xl">取消</button><button onClick={onConfirmEditMessage} className="flex-1 py-3 bg-primary text-white font-bold rounded-2xl">保存</button></>}
             >
                 <textarea
                     value={editContent}
                     onChange={e => setEditContent(e.target.value)}
-                    className="w-full h-32 bg-slate-100 rounded-2xl p-4 resize-none focus:ring-1 focus:ring-primary/20 transition-all text-sm leading-relaxed"
+                    className="w-full h-32 bg-slate-100 text-slate-800 rounded-2xl p-4 resize-none focus:ring-1 focus:ring-primary/20 transition-all text-sm leading-relaxed"
                 />
             </Modal>
 

@@ -17,6 +17,7 @@ import { CharacterProfile } from '../types';
  *  4) 运行时状态：buff、宫殿注入、见面/小屋存档、查手机数据等发卡人当下状态残留。
  */
 export const CARD_STRIPPED_FIELDS = [
+  'userPersona',
   // 1) 凭据（含 apiKey，灾难级泄漏）
   'dialogueApi',
   'characterUserProfile',
@@ -27,8 +28,10 @@ export const CARD_STRIPPED_FIELDS = [
   'chatActionDescriptionEnabled',
   'emotionConfig',
   'embeddingConfig',
-  'proactiveConfig',
+  'proactiveConfig',         // 已下线的主动消息 1.0，旧数据里可能还带着副 API 凭据
   'activeMsg2Config',
+  'awayMessage',             // 离开后消息：发卡人本机的提醒偏好
+  'dateLeaveReminder',       // 见面离开提醒：同上
 
   // 2) 美化
   'embeddedTheme',           // CharacterExportData 上的内嵌主题（导入侧一并剥离）
@@ -57,6 +60,7 @@ export const CARD_STRIPPED_FIELDS = [
   'dateExtraPresets',        // 用户私有补充预设随系统备份保存，不随角色卡分享
   'memoryPalaceWaterline', // 发卡人的使用节奏；接收方按自己的聊天习惯选择
   'hideMonthlyRecallPrompt', // ChatApp 的旧版记忆调阅提示偏好由接收方自己决定
+  'monthlyRecallEnabled', // 自主月度查阅与 API 消耗偏好由接收方决定
 
   // 4) 运行时状态残留
   'activeBuffs',

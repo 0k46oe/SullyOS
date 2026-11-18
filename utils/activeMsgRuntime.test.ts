@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect, vi } from 'vitest';
+import { subscribePageForeground } from './pageForeground';
 import {
   AMSG2_TASKS_ADOPTED_EVENT,
   INBOX_FRESH_DELIVERY_WINDOW_MS,
@@ -29,6 +30,14 @@ import {
   handleInstantErrorPushMessage,
   startLateEmotionPoll,
   sweepLocalInbox,
+  sweepThirdPartyOutbox,
+  THIRD_PARTY_FOREGROUND_DEBOUNCE_MS,
+  THIRD_PARTY_DUE_DRAIN_INTERVAL_MS,
+  THIRD_PARTY_DUE_LEAD_MS,
+  THIRD_PARTY_DUE_TAIL_MS,
+  THIRD_PARTY_PENDING_DRAIN_INTERVAL_MS,
+  THIRD_PARTY_SLOW_DRAIN_INTERVAL_MS,
+  isNearScheduledSend,
   shouldRenderInstantly,
   isOutboxBackfill,
 } from './activeMsgRuntime';
@@ -49,6 +58,7 @@ import { ActiveMsgStore } from './activeMsgStore';
 import { amsgStateNamespace } from './amsgFirePack';
 import { CHAT_GEN_EVENTS } from './chatGenEvents';
 import { DB } from './db';
+import type { ActiveMsg2TaskRecord } from '../types';
 import { readAllInstantTraces } from './instantTraceLog';
 import {
   createSARModuleEventMeta,
@@ -365,6 +375,15 @@ describe('shouldRenderInstantly（这条要不要跳过打字慢放）', () => {
  * 要看的东西全顶出缓冲区。
  */
 describe('本地收件箱守望', () => {
+  it('多用户时为其他空间保留本地收件，不误认领', async () => {
+    await ActiveMsgStore.consumeInboxMessages();
+    localStorage.setItem('sully_user_spaces_v1', JSON.stringify([{ id: 'default', name: '甲' }, { id: 'u_other', name: '乙' }]));
+    try {
+      await ActiveMsgStore.saveInboxMessage({ messageId: 'other-space-inbox', charId: 'only-in-other-space', charName: '乙的角色', body: '保留给乙', messageType: 'text', receivedAt: Date.now(), sentAt: Date.now() } as any);
+      await sweepLocalInbox();
+      expect((await ActiveMsgStore.consumeInboxMessages()).map(row => row.messageId)).toEqual(['other-space-inbox']);
+    } finally { localStorage.removeItem('sully_user_spaces_v1'); await ActiveMsgStore.consumeInboxMessages(); }
+  });
   it('库里没货：不动收件箱，也不留下冲刷记录', async () => {
     await ActiveMsgStore.consumeInboxMessages();  // 先清干净
     const before = readAllInstantTraces().length;
@@ -1902,6 +1921,31 @@ describe('即时对话的待收记录（走真库）', () => {
     },
   }];
 
+  it('刷新后没有 pending 仍能逐次记账，气泡已落库的重复推送也能补回用量', async () => {
+    const charId = 'char-instant-call-log';
+    const uuid = 'uuid-instant-call-log';
+    await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
+    const message = { messageId: 'msg-instant-call-log', charId, charName: '即时角色', body: '查到了',
+      messageType: 'instant', taskUuid: uuid, receivedAt: Date.now(), sentAt: Date.now(),
+      metadata: { charId, amsgInstantChat: true, amsgModelCalls: [
+        { index: 1, completedAt: Date.now(), causes: [], ok: true, promptTokens: 1000, completionTokens: 30 },
+        { index: 2, completedAt: Date.now() + 1, causes: ['recall'], ok: true, promptTokens: 1100, completionTokens: 50 },
+      ] } } as any;
+    expect(getInstantChatPending(charId)).toBeNull();
+    await ActiveMsgStore.saveInboxMessage(message);
+    await flushInboxToChat('SW通知');
+    const rows = () => DB.getApiCallLog().then(entries => entries.filter(entry => entry.id.startsWith(`cloud-${uuid}`)));
+    expect(await rows()).toHaveLength(2);
+    // Simulate an older frontend having persisted the bubble without the new usage records.
+    await DB.updateApiCallLog(entries => entries.filter(entry => !entry.id.startsWith(`cloud-${uuid}`)));
+    await ActiveMsgStore.saveInboxMessage(message);
+    await flushInboxToChat('SW通知');
+    expect(await rows()).toHaveLength(2);
+    expect((await rows()).find(row => row.cloudCallIndex === 2)).toMatchObject({ purpose: '查记忆后回复', promptTokens: 1100 });
+    const messages = await DB.getMessagesByCharId(charId);
+    expect(messages.filter(row => row.role === 'assistant')).toHaveLength(1);
+  }, 20000);
+
   it('欠着的那一轮回复到了 → 待收记录销账（灯灭）', async () => {
     const charId = 'char-instant-clear';
     await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
@@ -2705,7 +2749,7 @@ describe('上线补收不看有没有在等回复（走真库）', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
-    await ActiveMsgStore.saveGlobalConfig({ workerUrl: '' });
+    await ActiveMsgStore.saveGlobalConfig({ workerUrl: '', pushMode: 'web-push' });
   });
 
   /** 账本上的一条定时主动消息（`push` 就是推送信封本身，跟 SW 收到的那份逐字一致）。 */
@@ -2750,6 +2794,27 @@ describe('上线补收不看有没有在等回复（走真库）', () => {
     expect(list).toHaveBeenCalledTimes(1);
   }, 20000);
 
+  it('only focus/resume arrives: recovers the cloud reply without remounting and never inserts it twice', async () => {
+    const previousWindow = globalThis.window, previousDocument = globalThis.document;
+    Object.assign(globalThis, { window: new EventTarget(), document: Object.assign(new EventTarget(), { visibilityState: 'visible' }) });
+    const release = subscribePageForeground(handlePageBecameVisible);
+    const charId = 'char-resume-cloud', messageId = 'resume-cloud-reply';
+    try {
+      await DB.saveCharacter({ id: charId, name: '恢复测试' } as any);
+      await ActiveMsgStore.saveGlobalConfig({ workerUrl: WORKER_URL, pushMode: 'third-party' });
+      const entry = scheduledEntry(charId, messageId);
+      entry.push.messageType = 'instant';
+      vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue([entry] as any);
+      window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('resume'));
+      await vi.waitFor(async () => expect((await DB.getRecentMessagesByCharId(charId, 10)).filter(m => String(m.content).includes('到点啦'))).toHaveLength(1), { timeout: 8000 });
+      window.dispatchEvent(new Event('pageshow'));
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect((await DB.getRecentMessagesByCharId(charId, 10)).filter(m => String(m.content).includes('到点啦'))).toHaveLength(1);
+    } finally {
+      release(); Object.assign(globalThis, { window: previousWindow, document: previousDocument });
+    }
+  }, 20000);
+
   it('推送丢掉的那条定时主动消息，从账本补回聊天流', async () => {
     const charId = 'char-catchup-scheduled';
     const messageId = 'msg_task_67@1786434120000_hook_0';
@@ -2792,6 +2857,100 @@ describe('上线补收不看有没有在等回复（走真库）', () => {
     vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockRejectedValue(new Error('worker 500'));
 
     await expect(catchUpMissedPushes('startup')).resolves.toBe('failed');
+  }, 20000);
+
+  // 第三方推送叫不醒页面：通知弹了，页面只能自己去账本拉。下面几条钉住「拉得够勤」，
+  // 也钉住网页推送模式不跟着多打请求。
+  it('网页推送模式下前台巡查不去拉账本', async () => {
+    const list = vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue([]);
+
+    await expect(sweepThirdPartyOutbox()).resolves.toBe(false);
+    expect(list).not.toHaveBeenCalled();
+  }, 20000);
+
+  /** 一条本机定时任务记录，`due` 是它的下次发送时刻。 */
+  const localTask = (due: number, extra: Partial<ActiveMsg2TaskRecord> = {}): ActiveMsg2TaskRecord => ({
+    taskUuid: 'uuid-local-task',
+    clientTaskId: 'client-local-task',
+    mode: 'auto',
+    firstSendTime: new Date(due).toISOString(),
+    nextSendAt: new Date(due).toISOString(),
+    recurrenceType: 'none',
+    expirePolicy: 'force',
+    source: 'user',
+    status: 'scheduled',
+    createdAt: due - 60_000,
+    ...extra,
+  } as ActiveMsg2TaskRecord);
+  const withTasks = (tasks: ActiveMsg2TaskRecord[]) =>
+    vi.spyOn(DB, 'getAllCharacters').mockResolvedValue([{ id: 'char-local-task', activeMsg2Config: { enabled: true, tasks } }] as any);
+
+  it('第三方推送模式：欠着即时回复时 3 秒一拉', async () => {
+    await ActiveMsgStore.saveGlobalConfig({ workerUrl: WORKER_URL, pushMode: 'third-party' });
+    const list = vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue([]);
+    withTasks([]);
+    const t0 = Date.now();
+
+    await expect(sweepThirdPartyOutbox(t0)).resolves.toBe(true);
+    setInstantChatPending('char-third-party-poll', 'uuid-third-party-poll', Date.now());
+    await expect(sweepThirdPartyOutbox(t0 + THIRD_PARTY_PENDING_DRAIN_INTERVAL_MS + 100)).resolves.toBe(true);
+    expect(list).toHaveBeenCalledTimes(2);
+  }, 20000);
+
+  it('第三方推送模式：没有快到点的任务时 60 秒一拉，不是一直 6 秒', async () => {
+    await ActiveMsgStore.saveGlobalConfig({ workerUrl: WORKER_URL, pushMode: 'third-party' });
+    const list = vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue([]);
+    const t0 = Date.now();
+    // 一天后才发的那条不该让今天一直勤拉。
+    withTasks([localTask(t0 + 24 * 60 * 60_000)]);
+
+    await expect(sweepThirdPartyOutbox(t0)).resolves.toBe(true);
+    await expect(sweepThirdPartyOutbox(t0 + THIRD_PARTY_DUE_DRAIN_INTERVAL_MS + 100)).resolves.toBe(false);
+    await expect(sweepThirdPartyOutbox(t0 + THIRD_PARTY_SLOW_DRAIN_INTERVAL_MS + 100)).resolves.toBe(true);
+    expect(list).toHaveBeenCalledTimes(2);
+  }, 20000);
+
+  it('第三方推送模式：定时任务快到点时 6 秒一拉', async () => {
+    await ActiveMsgStore.saveGlobalConfig({ workerUrl: WORKER_URL, pushMode: 'third-party' });
+    const list = vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue([]);
+    const t0 = Date.now();
+    withTasks([localTask(t0 + 30_000)]);
+
+    await expect(sweepThirdPartyOutbox(t0)).resolves.toBe(true);
+    await expect(sweepThirdPartyOutbox(t0 + THIRD_PARTY_DUE_DRAIN_INTERVAL_MS + 100)).resolves.toBe(true);
+    expect(list).toHaveBeenCalledTimes(2);
+  }, 20000);
+
+  it('快档窗口：到点前 1 分钟起、到点后 5 分钟止，重复任务按周期推到最近一次', () => {
+    const now = Date.parse('2026-11-09T12:00:00Z');
+    const minute = 60_000;
+    const day = 24 * 60 * minute;
+
+    expect(isNearScheduledSend([localTask(now + THIRD_PARTY_DUE_LEAD_MS - 1000)], now)).toBe(true);
+    expect(isNearScheduledSend([localTask(now + 2 * minute)], now)).toBe(false);
+    expect(isNearScheduledSend([localTask(now - THIRD_PARTY_DUE_TAIL_MS + 1000)], now)).toBe(true);
+    expect(isNearScheduledSend([localTask(now - THIRD_PARTY_DUE_TAIL_MS - 1000)], now)).toBe(false);
+    expect(isNearScheduledSend([localTask(now + 30_000, { status: 'cancelled' })], now)).toBe(false);
+    // 本机记录还停在三天前：每天一次的按周期推到今天这一次。
+    expect(isNearScheduledSend([localTask(now - 3 * day + 30_000, { recurrenceType: 'daily' })], now)).toBe(true);
+    expect(isNearScheduledSend([localTask(now - 3 * day + 2 * 60 * minute, { recurrenceType: 'daily' })], now)).toBe(false);
+    expect(isNearScheduledSend([localTask(now - 14 * day + 30_000, { recurrenceType: 'weekly' })], now)).toBe(true);
+    expect(isNearScheduledSend([localTask(now - 3 * day + 30_000, { recurrenceType: 'weekly' })], now)).toBe(false);
+    // 不重复的任务过了点就是过了，不往后推。
+    expect(isNearScheduledSend([localTask(now - day + 30_000)], now)).toBe(false);
+  });
+
+  it('第三方推送模式：回到前台只防抖，不套 60 秒节流', async () => {
+    await ActiveMsgStore.saveGlobalConfig({ workerUrl: WORKER_URL, pushMode: 'third-party' });
+    const list = vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue([]);
+    const realNow = Date.now.bind(Date);
+
+    await expect(catchUpMissedPushes('startup')).resolves.toBe('drained');
+    // 几十毫秒内连跳的可见性事件合成一次。
+    await expect(catchUpMissedPushes('foreground')).resolves.toBe('throttled');
+    vi.spyOn(Date, 'now').mockImplementation(() => realNow() + THIRD_PARTY_FOREGROUND_DEBOUNCE_MS + 100);
+    await expect(catchUpMissedPushes('foreground')).resolves.toBe('drained');
+    expect(list).toHaveBeenCalledTimes(2);
   }, 20000);
 });
 
@@ -3124,5 +3283,27 @@ describe('停止的instant回程', () => {
     await flushInboxToChat('轮询补收');
     expect(await DB.getRecentMessagesByCharId(charId, 20)).toEqual([]);
     expect((await ActiveMsgStore.consumeInboxMessages()).filter(m => m.taskUuid === 'stopped-inbox-task')).toEqual([]);
+  });
+});
+
+describe('诊断消息隔离（真收件箱）', () => {
+  it('补收带来的诊断消息不写聊天、不触发角色事件，成功保存后可销账', async () => {
+    const { saveDiagnosticRun, listDiagnosticRuns } = await import('./amsgReproductionStore');
+    const runId = '44444444-4444-4444-8444-444444444444';
+    await saveDiagnosticRun({ runId, createdAt: Date.now(), dueAt: Date.now(), api: { host: 'test', model: 'cheap' }, status: 'scheduled' });
+    const save = vi.spyOn(DB, 'saveMessage');
+    const events: Event[] = [];
+    const oldWindow = globalThis.window;
+    (globalThis as any).window = { dispatchEvent: (event: Event) => { events.push(event); return true; } };
+    const ack = vi.spyOn(ActiveMsgClient, 'ackOutboxMessages').mockResolvedValue(undefined as any);
+    try {
+      await ActiveMsgStore.consumeInboxMessages();
+      await ActiveMsgStore.saveInboxMessage({ messageId: 'diagnostic-m1', charId: 'amsg-diagnostic', charName: '复现', body: '测试消息 [[ACTION:POKE]]', receivedAt: Date.now(), metadata: { amsgDiagnosticRunId: runId, amsgOutboxBackfill: true, amsgEmotionUpdate: '不应执行' } });
+      expect(await flushInboxToChat('上线补收')).toEqual([]);
+      expect(save).not.toHaveBeenCalled();
+      expect(events.some(e => e.type === 'active-msg-received')).toBe(false);
+      expect((await listDiagnosticRuns()).find(r => r.runId === runId)?.messages?.[0].text).toContain('测试消息');
+      expect(ack).toHaveBeenCalledWith(['diagnostic-m1']);
+    } finally { (globalThis as any).window = oldWindow; save.mockRestore(); ack.mockRestore(); }
   });
 });

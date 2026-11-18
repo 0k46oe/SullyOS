@@ -1,3 +1,6 @@
+import { mergePhoneGeneration, PHONE_GENERATION_COMMITTED, type PhoneGeneration } from '../utils/phoneGeneration';
+import { applyPhoneEvidenceChatLink, PHONE_EVIDENCE_SYNCED, type PhoneEvidenceChatLink } from '../utils/phoneEvidence';
+import { SESSION_SPACE_ID, DEFAULT_SPACE_ID, listUserSpaces, selectUserSpace } from '../utils/userSpaces';
 import { handleLocalBack } from '../utils/localBackHandlers';
 import { applyPaperUiStyle } from '../utils/paperUiStyle';
 import {isHomeAssetDisposal} from '../utils/homeAssetCancellation';
@@ -6,10 +9,9 @@ import { homeSharedRecipients } from '../utils/homeSharedEvents';
 import { homeRecords } from '../utils/homeRecords';
 import { readFriendFeed } from '../utils/friendFeed';
 import { collectFriendFeedMedia, exportActivityTextAsset, isActivityTextAsset } from '../utils/activityBackup';
-import { prepareFriendFeedMainTask, consumeFriendFeedMainReply } from '../utils/friendFeedMain';
-import { releaseFriendFeedEmotionTask } from '../utils/friendFeedEmotion';
 import { retireCloudCharacter } from '../utils/amsgCloudRetirement';
-import { resolveDialogueApi } from '../utils/characterApi';
+import { AMSG_OWNER_CHECK_AFTER_IMPORT_LS_KEY } from '../utils/amsgOwnerReconcile';
+import { isAmsg2GloballyEnabled, isAmsg2WorkerActive } from '../utils/amsgGlobalGate';
 import {isBuiltinAppearance, readBuiltinAppearance} from '../utils/builtinAppearance';
 import { sameSullyIconSnapshot, SULLY_BIBI_UPGRADE_KEY, upgradeBuiltinSullyBibiIcon } from '../utils/builtinAppearanceUpgrade';
 import { browserHolidayCache, deviceTimeZone, getUserHolidayReminder } from '../utils/userHolidays';
@@ -23,7 +25,7 @@ import { startBeautyUsage, stopBeautyUsage, stopBeautyForThemeChange } from '../
 import { FEEDBACK_INVITATION_KEY, hasPriorFeedbackInstallEvidence, initializeFeedbackInvitation, suppressFeedbackInvitation } from '../utils/feedbackInvitation';
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
 import type { VRSARActivity } from '../types';
-import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, CharacterGroup, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, CloudBackupConfig, CloudBackupFile, MemoryPalaceFeatureFlags } from '../types';
+import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, CharacterGroup, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, CloudBackupConfig, CloudBackupFile, MemoryPalaceFeatureFlags, SuspendedDate } from '../types';
 import { DB } from '../utils/db';
 import type { BackupVolumeOutput } from '../utils/backupVolumes';
 import { validateVolumeFiles } from '../utils/backupVolumes';
@@ -36,6 +38,8 @@ import { buildMalformedImageDiagnostics, extractImagesInPlace, deepCloneForExpor
 import { isBlobRef, getBlobForRef, restoreBlobRef, migrateDataUrlToRef, migrateAppearancePresetBlobRefs, migrateChatThemeBlobRefs, resolveBlobRefsDeep, resolveRefToDataUrl, BLOBREF_PREFIX, deleteBlobRefIfUnreferenced } from '../utils/blobRef';
 import { resolveBlobRefsInRequestBody } from '../utils/apiBlobRefs';
 import { collectBlobRefs, writeBlobsToZip, readBlobsIndex, restoreBlobsFromZip } from '../utils/backupBlobs';
+import { missingBackupAssetsSummary, writeMissingBackupAssets, type BackupExportOptions, type BackupMissingAsset } from '../utils/backupMissingAssets';
+import { readBackupPreferences } from '../utils/backupPreferences';
 import { initPwaIcon, clearPwaIcon } from '../utils/appIcon';
 import { LEGACY_DEFAULT_WALLPAPER, isLegacyDefaultWallpaper, shouldPreserveLegacyDefaultWallpaper } from '../utils/wallpaperCompat';
 import { migrateSharkpanAssets } from '../utils/sharkpanAssetMigration';
@@ -49,7 +53,6 @@ import { collectCharacterCompanionVoiceAssetIds } from '../utils/companionPreset
 import { encodeVectorsForBackupChunked } from '../utils/memoryPalace/db';
 import { createBackupArchive } from '../utils/backupArchive';
 import { streamBackupArrayStore } from '../utils/backupStoreStreaming';
-import { ProactiveChat } from '../utils/proactiveChat';
 import { VRScheduler, type VRSessionOutcome } from '../utils/vrWorld/scheduler';
 import { runVRSession } from '../utils/vrWorld/runSession';
 import { allowsAutomaticVR } from '../utils/vrWorld/participation';
@@ -58,10 +61,10 @@ import { VR_DEFAULT_INTERVAL_MIN } from '../utils/vrWorld/constants';
 import { WorldScheduler, toTickEntries } from '../utils/worldHome/scheduler';
 import { runWorldEpisode, rerollWorldCharBeat } from '../utils/worldHome/engine';
 import { migrateWorldDaySegs } from '../utils/worldHome/prompts';
-import { ChatParser } from '../utils/chatParser';
 import { safeFetchJson } from '../utils/safeApi';
 import { captureApiRequestOnce, getApiCallAmbientContext, recordApiCall, setApiCallAmbientContext, updateApiRequestCaptureUsage } from '../utils/apiCallLog';
 import { isUserLocationLookupUrl } from '../utils/userLocationPrivacy';
+import { exportUserLocationSettings } from '../utils/userLocationBackup';
 import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedResponse } from '../utils/streamUpgrade';
 import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
 import { buildFetchFailureDetail, classifyFetchFailure, describeReachabilityProbe, parseTargetUrl, probeOriginReachability, shouldProbeReachability, summarizeFetchRequestBody } from '../utils/networkFailureDiagnosis';
@@ -74,21 +77,19 @@ import { fetchLlm } from '../utils/anthropicApi';
 import { getCheckPhoneApi, setCheckPhoneApi } from '../utils/checkPhoneApi';
 import { markBackupDone } from '../utils/backupReminder';
 import { collectSARLocalBackup, restoreSARLocalBackup } from '../utils/vrWorld/sarBackup';
+import { recoverSignalOwnership } from '../utils/vrWorld/signalRecovery';
 import { normalizeCharacterImpression, normalizeCharacterDefaults } from '../utils/impression';
 import { normalizeModelIds } from '../utils/modelList';
 import {
   CONTEXT_RANGE_POLICY_VERSION,
   DEFAULT_MANUAL_CONTEXT_LIMIT,
-  loadCharacterContextRange,
   migrateCharacterContextRange,
 } from '../utils/chatContextRange';
 import { isScheduleFeatureOn } from '../utils/scheduleGenerator';
 import { evaluateEmotionBackground } from '../hooks/useChatAI';
 import {HOME_SECRETS_UPDATED} from '../utils/homeSecrets';
 import { CHAT_GEN_EVENTS, setChatViewSnapshot, isEmbeddedChatVisible } from '../utils/chatGenEvents';
-import { buildChatRequestPayload } from '../utils/chatRequestPayload';
-import { ChatPrompts } from '../utils/chatPrompts';
-import { extractHtmlBlocks } from '../utils/htmlPrompt';
+import { runLocalAwayMessages } from '../utils/awayMessage';
 import { mergePalaceFragmentsIntoMemories } from '../utils/memoryPalace/pipeline';
 import { applyLinkedArchiveDeletion, LINKED_ARCHIVE_DELETED, type LinkedArchiveDeletionDetail } from '../utils/memoryPalace/linkedArchiveDeletion';
 import {
@@ -99,11 +100,11 @@ import {
 import { ActiveMsgClient } from '../utils/activeMsgClient';
 import { resolveCharTimeZone } from '../utils/timezone';
 import { ActiveMsgStore, backupHasBackendConnection, exportAmsg2GlobalConfig } from '../utils/activeMsgStore';
+import { exportSubtitleSettings } from '../utils/chatTranslationStyle';
 import { charMayHaveCloudState, purgeCharCloudState, purgeCloudCharById } from '../utils/amsg2CharCleanup';
 import { parseCharCredId } from '../utils/amsgLlmCredentials';
 import { SAR_MODULE_RUNTIME_CHANGED_EVENT, type SarModuleRuntimeChangedDetail } from '../utils/sarModuleRuntimeEvents';
 import { markAmsgStateDirty, markAmsgStateDirtyForAll, resumePendingAmsgStateSync, syncAmsgLlmCredentials, syncAmsgToolConfigAndPrompts, wipeAmsgCloudDataForReset } from '../utils/amsgStateSync';
-import { loadMusicPlaybackSnapshot } from './MusicContext';
 import { setCharNameRegistry } from '../utils/charNameRegistry';
 import { setMinimaxRegion } from '../utils/minimaxEndpoint';
 import { setElevenLabsModel, setTtsProvider, setVoicePromptOverrides } from '../utils/ttsProvider';
@@ -111,7 +112,6 @@ import { DEFAULT_ELEVENLABS_MODEL } from '../utils/elevenLabsModels';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { Capacitor } from '@capacitor/core';
 import { formatBytes } from '../utils/format';
-import { isEmotionEvalSkipped } from '../utils/devDebug';
 import { isBenignApplicationConsoleMessage } from '../utils/applicationConsole';
 
 import { initLocalStorageMirror, snapshotLocalStorageMirror } from '../utils/lsMirror';
@@ -129,20 +129,6 @@ import { exportDesktopSkinLocal } from '../utils/desktopSkinBackup';
 import { assertSupportedSullyBackup } from '../utils/backupImportPolicy';
 import { createBuiltinSullyLive2DConfig, isBuiltinSullyLive2D, upgradeBuiltinSullyLive2DDefaults } from '../utils/builtinSullyLive2D';
 import { normalizeCharacterRoomAssetsInPlace } from '../utils/roomTemplateAssets';
-
-interface ProactiveQueueEntry {
-  charId: string;
-}
-
-const normalizeProactiveAiContent = (raw: string): string => {
-  let cleaned = raw;
-  cleaned = cleaned.replace(/\[(?:(?:你|User|用户|System)\s*)?发送了表情包[:：]\s*(.*?)\]/g, '[[SEND_EMOJI: $1]]');
-  cleaned = cleaned.replace(
-    /(^|\n)\s*(?:(?:你|User|用户|System)\s*)?发送了表情包[:：]\s*([^\n]+?)(?=\s*(?:\n|$))/g,
-    (_match, lineStart: string, emojiName: string) => `${lineStart}[[SEND_EMOJI: ${emojiName.trim()}]]`
-  );
-  return cleaned;
-};
 
 
 type JSZipFileLike = {
@@ -268,6 +254,7 @@ const loadJSZip = async (): Promise<JSZipCtorLike> => {
 const defaultRealtimeConfig: RealtimeConfig = {
   weatherEnabled: false,
   weatherApiKey: '',
+  weatherFreeSource: 'open-meteo',
   weatherCity: 'Beijing',
   newsEnabled: false,
   newsApiKey: '',
@@ -480,17 +467,14 @@ interface OSContextType {
   lastMsgTimestamp: number; // New: Signal for Chat to refresh
   unreadMessages: Record<string, number>; // New: Track unread counts per character
   clearUnread: (charId: string) => void; // New: Method to clear unread
-
-  // Set of charIds whose proactive AI generation is currently in flight.
-  // Chat UI subscribes to this to render a soft "正在送达消息…" indicator
-  // instead of having the message just pop in.
+  // Set of character ids whose legacy proactive message generation is in flight.
   proactiveComposingChars: Record<string, true>;
 
   // Cloud Backup
   cloudBackupConfig: CloudBackupConfig;
   updateCloudBackupConfig: (updates: Partial<CloudBackupConfig>) => void;
   cloudBackupToWebDAV: (mode: 'text_only' | 'media_only' | 'full') => Promise<void>;
-  cloudRestoreFromWebDAV: (file: CloudBackupFile) => Promise<void>;
+  cloudRestoreFromWebDAV: (file: CloudBackupFile, options?: ImportSystemOptions) => Promise<void>;
   listCloudBackups: () => Promise<CloudBackupFile[]>;
 
   // System
@@ -512,6 +496,13 @@ interface OSContextType {
   suspendCall: (info: { charId: string; charName: string; charAvatar?: string; startedAt: number; bubbles?: any[]; sessionId?: string; elapsedSeconds?: number; voiceLang?: string; pendingAvatarTouches?: AvatarTouchRecord[] }) => void;
   resumeCall: () => void;
   clearSuspendedCall: () => void;
+
+  // 见面挂起：对话中途走开时见面留在内存里，回到见面原样恢复（见 docs/date-leave-reminder.md）
+  suspendedDate: SuspendedDate | null;
+  suspendDate: (info: SuspendedDate) => void;
+  resumeDate: () => void;
+  /** DateApp 恢复时取走挂起的见面；之后的打开都是新见面。 */
+  takeSuspendedDate: () => SuspendedDate | null;
 
   // 从聊天「见面」按钮跳进见面：携带目标角色，DateApp 挂载时自动进入该角色的见面流程
   dateAutoStartCharId: string | null;
@@ -932,10 +923,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   const [virtualTime, setVirtualTime] = useState<VirtualTime>(getRealTime());
   
-  // Real-time Clock Sync
+  // Real-time Clock Sync（仅当分钟或星期变化时更新状态引用，避免每秒触发无关子树重绘）
   useEffect(() => {
       const timer = setInterval(() => {
-          setVirtualTime(getRealTime());
+          setVirtualTime(prev => updateVirtualTimeIfChanged(prev, getRealTime()));
       }, 1000);
       return () => clearInterval(timer);
   }, []);
@@ -1031,7 +1022,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   
   const [lastMsgTimestamp, setLastMsgTimestamp] = useState<number>(0);
   const [unreadMessages, setUnreadMessages] = useState<Record<string, number>>({});
-  const [proactiveComposingChars, setProactiveComposingChars] = useState<Record<string, true>>({});
+  const [proactiveComposingChars] = useState<Record<string, true>>({});
   
   // LOGS
   const [systemLogs, setSystemLogs] = useState<SystemLog[]>([]);
@@ -1056,6 +1047,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   // Call Suspend
   const [suspendedCall, setSuspendedCall] = useState<{ charId: string; charName: string; charAvatar?: string; startedAt: number; bubbles?: any[]; sessionId?: string; elapsedSeconds?: number; voiceLang?: string; pendingAvatarTouches?: AvatarTouchRecord[] } | null>(null);
+  const [suspendedDate, setSuspendedDate] = useState<SuspendedDate | null>(null);
+  const suspendedDateRef = useRef(suspendedDate);
+  suspendedDateRef.current = suspendedDate;
   // 聊天「见面」按钮 → 见面：记录目标角色，DateApp 挂载后消费一次并自动进入见面
   const [dateAutoStartCharId, setDateAutoStartCharId] = useState<string | null>(null);
 
@@ -1686,12 +1680,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         // 导致「主题回初始 / 盲盒收藏册清空 / API 配置丢失」三连。必须在 loadSettings
         // 读 localStorage 之前完成回填。见 utils/lsMirror.ts。
         const healedKeys = await initLocalStorageMirror().catch(() => [] as string[]);
+        void recoverSignalOwnership();
         const hadPriorFeedbackEvidence = hasPriorFeedbackInstallEvidence();
         if (healedKeys.length > 0) {
             console.warn('[lsMirror] localStorage 疑似被清除，已从 IndexedDB 镜像回填:', healedKeys);
-            if (healedKeys.includes('proactive_schedules')) {
-                ProactiveChat.resume();
-            }
             if (healedKeys.includes('vr_schedules')) {
                 VRScheduler.resume();
             }
@@ -1748,7 +1740,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         let finalChars = dbChars;
 
         // A failed read is not an empty installation: never overwrite the saved Sully with defaults.
-        if (charactersReadSucceeded && !finalChars.some(c => c.id === sullyV2.id)) {
+        if (SESSION_SPACE_ID === DEFAULT_SPACE_ID && charactersReadSucceeded && !finalChars.some(c => c.id === sullyV2.id)) {
             await DB.saveCharacter(sullyV2);
             finalChars = [...finalChars, sullyV2];
         } else {
@@ -1841,10 +1833,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           } else {
             setActiveCharacterId(finalChars[0].id);
           }
-        } else if (charactersReadSucceeded) {
+        } else if (charactersReadSucceeded && SESSION_SPACE_ID === DEFAULT_SPACE_ID) {
           await DB.saveCharacter(initialCharacter);
           setCharacters([initialCharacter]);
           setActiveCharacterId(initialCharacter.id);
+        } else if (charactersReadSucceeded) {
+          setCharacters([]);
+          setActiveCharacterId('');
         } else {
           addToast('角色资料读取未完成，未写入默认角色。请重新打开应用重试，无需清理数据。', 'error');
         }
@@ -2039,73 +2034,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       });
   }, []);
 
-  // Listen for proactive messages to show unread red dot
-  useEffect(() => {
-      let awayProactiveCount = 0;
-
-      const handler = (e: Event) => {
-          const { charId, charName, body } = (e as CustomEvent).detail as { charId: string; charName: string; body?: string };
-          // Only mark unread if user is NOT currently viewing this character's chat
-          // Always bump timestamp so Chat reloads messages if currently open
-          setLastMsgTimestamp(Date.now());
-
-          const isChattingWithThisChar = (activeAppRef.current === AppID.Chat && activeCharIdScheduleRef.current === charId) || isEmbeddedChatVisible(charId);
-          if (!isChattingWithThisChar) {
-              const isVisible = document.visibilityState === 'visible';
-              if (isVisible) {
-                  addToast(`${charName} 主动发来了消息`, 'success');
-              } else {
-                  awayProactiveCount += 1;
-              }
-              setUnreadMessages(prev => ({ ...prev, [charId]: (prev[charId] || 0) + 1 }));
-              const preview = (body || `${charName} sent a proactive message`).replace(/\s+/g, ' ').trim() || `${charName} sent a proactive message`;
-              void sendProactiveNativeNotification(charId, charName, preview);
-
-              // Web Notification —— 走 Service Worker 的 showNotification（和"测试推送"
-              // 同一条链路）。页面级 `new Notification(...)` 在标签后台 / PWA / 移动端会
-              // 静默失败，必须走 SW registration 才稳定。
-              if (!Capacitor.isNativePlatform() && 'serviceWorker' in navigator && window.Notification && Notification.permission === 'granted') {
-                  const char = characters.find(c => c.id === charId);
-                  navigator.serviceWorker.ready.then(async reg => {
-                      // 同上：令牌是个非空字符串，`char?.avatar || 默认图标` 这种写法会让默认
-                      // 图标那条兜底永远轮不到，结果一个图标都没有还不报错。所以先解析成能
-                      // 加载的地址，拿到空串才用默认图标。
-                      const icon = (await resolveRefToDataUrl(char?.avatar || '')) || './icons/icon-192.png';
-                      reg.showNotification(charName, {
-                          body: preview,
-                          icon,
-                          badge: './icons/icon-192.png',
-                          tag: `proactive-${charId}`,
-                          data: { charId, kind: 'proactive-1.0' },
-                      }).catch(() => { /* notification failed */ });
-                  }).catch(() => { /* SW not ready */ });
-              }
-          }
-      };
-
-      const onVisible = () => {
-          if (document.visibilityState !== 'visible') return;
-          if (awayProactiveCount > 0) {
-              addToast(`你离开期间收到 ${awayProactiveCount} 条消息`, 'success');
-              awayProactiveCount = 0;
-          }
-      };
-
-      window.addEventListener('proactive-message-sent', handler);
-      document.addEventListener('visibilitychange', onVisible);
-      return () => {
-          window.removeEventListener('proactive-message-sent', handler);
-          document.removeEventListener('visibilitychange', onVisible);
-      };
-  }, [characters, sendProactiveNativeNotification]);
-
   // ─── Global Proactive Message Handler ───
   // Registered at OS level so it works even when Chat is not open.
   useEffect(() => {
       let awayActiveMsgCount = 0;
 
       const handler = (e: Event) => {
-          const { charId, charName, body } = (e as CustomEvent).detail as { charId: string; charName: string; body?: string };
+          const { charId, charName, body, nativeNotificationHandled } = (e as CustomEvent).detail as { charId: string; charName: string; body?: string; nativeNotificationHandled?: boolean };
           setLastMsgTimestamp(Date.now());
 
           const isChattingWithThisChar = (activeAppRef.current === AppID.Chat && activeCharIdScheduleRef.current === charId) || isEmbeddedChatVisible(charId);
@@ -2118,17 +2053,27 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               }
               setUnreadMessages(prev => ({ ...prev, [charId]: (prev[charId] || 0) + 1 }));
               const preview = (body || `${charName} sent an active message`).replace(/\s+/g, ' ').trim() || `${charName} sent an active message`;
-              void sendProactiveNativeNotification(charId, charName, preview);
+              if (!nativeNotificationHandled) void sendProactiveNativeNotification(charId, charName, preview);
               // SW push handler 已经 fire 过系统通知（不在前台时露出真实内容、在前台时
               // silent + close 静默），这里不再补一次，避免重复弹窗。
           }
       };
 
-      const openHandler = (e: Event) => {
+      let openingNotification = false;
+      const openHandler = async (e: Event) => {
           const { charId } = (e as CustomEvent).detail as { charId?: string };
-          if (!charId) return;
-          setActiveApp(AppID.Chat);
-          setActiveCharacterId(charId);
+          if (!charId || openingNotification) return;
+          openingNotification = true;
+          try {
+              const { routeCharacterNotification } = await import('../utils/userSpaceNavigation');
+              const result = await routeCharacterNotification(charId);
+              if (result === 'current') {
+                  setActiveApp(AppID.Chat);
+                  setActiveCharacterId(charId);
+              } else if (result === 'missing') addToast('这条通知的角色已不在本机', 'info');
+          } catch (error) {
+              addToast(error instanceof Error ? error.message : '打开通知失败，请重试', 'error');
+          } finally { openingNotification = false; }
       };
 
       const onVisible = () => {
@@ -2286,6 +2231,16 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       window.addEventListener('active-msg-backfill-stale', backfillStaleHandler);
       window.addEventListener('active-msg-progress', progressHandler);
       window.addEventListener('active-msg-open', openHandler);
+      // Dynamic import keeps the native-only handoff off the regular web startup path.
+      let disposeNativeOpen: (() => void) | undefined;
+      let nativeOpenCancelled = false;
+      if (import.meta.env.VITE_AMSG_NATIVE_PUSH === 'true') {
+          void import('../utils/nativeNotificationNavigation').then(({ subscribeNativeNotificationOpen }) => {
+              if (!nativeOpenCancelled) disposeNativeOpen = subscribeNativeNotificationOpen(charId => {
+                  void openHandler(new CustomEvent('active-msg-open', { detail: { charId } }));
+              });
+          });
+      }
       const secretSyncHandler = (event: Event) => {
           const charId = (event as CustomEvent).detail?.charId;
           const char = charactersRef.current.find(c => c.id === charId);
@@ -2306,6 +2261,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           window.removeEventListener('active-msg-backfill-stale', backfillStaleHandler);
           window.removeEventListener('active-msg-progress', progressHandler);
           window.removeEventListener('active-msg-open', openHandler);
+          nativeOpenCancelled = true;
+          disposeNativeOpen?.();
           window.removeEventListener(HOME_SECRETS_UPDATED, secretSyncHandler);
           window.removeEventListener('friend-feed-history-updated', secretSyncHandler);
           window.removeEventListener('emotion-updated', buffSyncHandler);
@@ -2317,13 +2274,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       };
   }, [sendProactiveNativeNotification]);
 
-  const proactiveRunningRef = useRef(false);
-  const proactiveQueueRef = useRef<ProactiveQueueEntry[]>([]);
-  // Per-character innerState cache for proactive turns — mirrors useChatAI's
-  // evolvedNarrative state so consecutive proactive triggers carry continuity.
-  const proactiveInnerStateRef = useRef<Map<string, string>>(new Map());
-
-  // Refs to avoid stale closures in proactive callback
+  // Refs to avoid stale closures in scheduler callbacks
   const charactersRef = useRef(characters);
   charactersRef.current = characters;
 
@@ -2362,462 +2313,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
   useEffect(() => {
       if (!isDataLoaded) return;
-
-      const drainQueuedProactive = () => {
-          const next = proactiveQueueRef.current.shift();
-          if (next) {
-              void runProactive(next.charId);
-          }
-      };
-
-      const runProactive = async (charId: string) => {
-          if (proactiveRunningRef.current) {
-              const queuedIndex = proactiveQueueRef.current.findIndex(item => item.charId === charId);
-              if (queuedIndex < 0) {
-                  proactiveQueueRef.current.push({ charId });
-              }
-              return;
-          }
-
-          // Read from refs to always get latest values
-          const currentCharacters = charactersRef.current;
-          const currentApiConfig = apiConfigRef.current;
-          const currentUserProfile = userProfileRef.current;
-          const currentGroups = groupsRef.current;
-          const currentRealtimeConfig = realtimeConfigRef.current;
-
-          const char = currentCharacters.find(c => c.id === charId);
-          // 调度表里还排着队，但角色已删除或未开启主动消息（含 proactiveConfig 缺失）：
-          // 就地撤掉残留调度，避免后台一直空转或误调模型。
-          if (!char || !char.proactiveConfig?.enabled) {
-              ProactiveChat.stop?.(charId);
-              drainQueuedProactive();
-              if (char) {
-                  console.log(`🔕 [Proactive/Global] Skipped for ${char.name}: disabled (residual schedule stopped)`);
-              }
-              return;
-          }
-
-          // 用户正在 DateApp 里和这个角色见面 —— 人就在对方眼前，再发一条
-          // 线上主动消息既出戏又显得对见面毫不知情。本轮静默跳过；
-          // lastFire 已在调度层记录，下个周期会重新评估。
-          if (activeAppRef.current === AppID.Date && activeCharIdScheduleRef.current === charId) {
-              drainQueuedProactive();
-              console.log(`🔕 [Proactive/Global] Skipped for ${char.name}: 正在见面 (DateApp active)`);
-              return;
-          }
-
-          // 用户正在和这个角色通话（含通话被挂起到后台）—— 通话里再塞一条线上
-          // 主动消息，不仅出戏，主动消息的提示词还会污染上下文、把后续语音
-          // 带成线上消息格式。本轮静默跳过；下个周期会重新评估。
-          if ((activeAppRef.current === AppID.Call && activeCharIdScheduleRef.current === charId)
-              || suspendedCallRef.current?.charId === charId) {
-              drainQueuedProactive();
-              console.log(`🔕 [Proactive/Global] Skipped for ${char.name}: 正在通话 (CallApp active)`);
-              return;
-          }
-
-          // 页面内主动消息与私聊使用同一角色默认；旧主动消息副 API 不再参与取值。
-          const api = resolveDialogueApi(currentApiConfig, char);
-          if (!api.baseUrl) {
-              drainQueuedProactive();
-              return;
-          }
-
-          proactiveRunningRef.current = true;
-          setProactiveComposingChars(prev => prev[charId] ? prev : { ...prev, [charId]: true });
-          console.log(`🔔 [Proactive/Global] Trigger fired for ${char.name}`);
-
-          let friendFeedTask: Awaited<ReturnType<typeof prepareFriendFeedMainTask>>;
-          let hintMsgId: number | null = null;
-          try {
-              // 1. Calculate time gap
-              const recentMsgs = await DB.getRecentMessagesByCharId(charId, 200);
-              const lastRealUserMsg = [...recentMsgs].reverse().find(
-                  m => m.role === 'user' && !m.metadata?.proactiveHint
-              );
-
-              const now = new Date();
-              const timeStr = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-
-              let timeSinceUser = '';
-              if (lastRealUserMsg) {
-                  const gapMin = Math.floor((now.getTime() - lastRealUserMsg.timestamp) / 60000);
-                  if (gapMin < 60) timeSinceUser = `${gapMin}分钟`;
-                  else if (gapMin < 1440) timeSinceUser = `${Math.floor(gapMin / 60)}小时${gapMin % 60 > 0 ? gapMin % 60 + '分钟' : ''}`;
-                  else timeSinceUser = `${Math.floor(gapMin / 1440)}天${Math.floor((gapMin % 1440) / 60)}小时`;
-              }
-
-              // 2. Save hidden system hint
-              const userName = currentUserProfile?.name || '对方';
-
-              // 见面（DateApp）感知：见面消息可能已被记忆宫殿高水位归档，上面 hwm 过滤后的
-              // recentMsgs 会漏判，所以单独用 includeProcessed=true 读最后一条真实消息。
-              // 刚见完面还发"你好久没找我了"会显得对见面毫不知情，换成见面后的语境。
-              const lastRealMsgRaw = (await DB.getRecentMessagesByCharId(charId, 10, true))
-                  .filter(m => !m.metadata?.proactiveHint)
-                  .pop();
-              const DATE_AFTERGLOW_MS = 3 * 60 * 60 * 1000;
-              const justMetOffline = lastRealMsgRaw?.metadata?.source === 'date'
-                  && (now.getTime() - lastRealMsgRaw.timestamp) < DATE_AFTERGLOW_MS;
-
-              const hintContent = justMetOffline
-                      ? `[系统提示（非${userName}发言）: 现在是 ${timeStr}。你和${userName}刚刚在线下见过面（如果上下文里有标着 [约会] 的内容，那就是你们见面时发生的事），现在你们暂时分开了，你拿起手机想给${userName}发条消息。请基于刚才的见面来发——可以回味见面里的某个细节、补一句当时没说出口的话、关心${userName}到家了没，或者就是刚分开就有点想念。绝对不要表现得好像很久没联系，更不要对刚才的见面毫不知情。一两句话就好。]`
-                      : `[系统提示（非${userName}发言）: 现在是 ${timeStr}。${timeSinceUser ? `${userName}已经 ${timeSinceUser} 没有找你说话了。` : ''}这是系统给你的一次主动发消息机会——${userName}并没有在跟你说话，是你想主动找${userName}。像真人一样随意地发条消息吧，比如：随手拍了张照片想分享、刚看到个有趣的事想说、突然想到个冷知识、吐槽今天的天气/食物/见闻、或者就是单纯想找${userName}聊几句。不要刻意，不要像在"汇报近况"，就像你真的拿起手机随手发了条消息。一两句话就好。${timeSinceUser && parseInt(timeSinceUser) > 2 ? `（${userName}挺久没找你了，你也可以表达想念、好奇${userName}在干嘛、或者小小地抱怨一下。）` : ''}]`;
-
-              hintMsgId = await DB.saveMessage({
-                  charId,
-                  role: 'user',
-                  type: 'text',
-                  content: hintContent,
-                  metadata: { proactiveHint: true, hidden: true }
-              });
-
-              // 3. Build prompt & message history — 走和 useChatAI / emotion eval 同一个 helper，
-              //    保证三家拿到的"材料"完全一致；区别只在前面追加的"现在主动找用户"那条 hint。
-              const proactiveRange = await loadCharacterContextRange(char);
-              if (proactiveRange.userBreakpointExpired) {
-                  updateCharacter(charId, { contextUserStartMessageId: undefined });
-              }
-              const allMsgs = proactiveRange.messages;
-              // 1.0 本地主动消息不会经过 Chat.tsx 的 aiVisibleEmojis。
-              // 这里既要过滤提示词，也要过滤下方 [[SEND_EMOJI]] 的按名反查：
-              // 只修提示词仍挡不住模型复述旧上下文里的表情名；只修落库则模型仍会看到越权表情。
-              // 2.0 推送路径已在 activeMsgClient / activeMsgRuntime 做同样的双层收口。
-              const { emojis, categories } = ChatPrompts.filterVisibleEmojis(
-                  await DB.getEmojis(),
-                  await DB.getEmojiCategories(),
-                  charId,
-              );
-
-              // 主动私聊也使用共享内心状态，不用独立 ref 缓存覆盖它。
-              // 内心状态由 ContextBuilder 读取角色共享缓存。
-
-              const payload = await buildChatRequestPayload({
-                  char, userProfile: currentUserProfile!, groups: currentGroups,
-                  emojis, categories,
-                  historyMsgs: allMsgs,
-                  contextLimit: Math.max(1, allMsgs.length),
-                  recallEntryPoint: 'proactive_chat',
-                  realtimeConfig: currentRealtimeConfig,
-                  innerState: undefined,
-                  // 实时音乐播放状态 —— OSContext 在 MusicProvider 上层用不了 useMusic()，
-                  // 走 MusicContext 暴露的模块级快照（Provider mount 后会持续写入）
-                  musicSnapshot: loadMusicPlaybackSnapshot(),
-                  // translationConfig / mcdMiniSnap 是 chat-app 会话级 UI 状态，主动消息触发时
-                  // 不存在；保持 undefined 即可，与"用户当时根本没在 chat 界面"的语义一致
-                  htmlMode: { enabled: !!(char as any).htmlModeEnabled, customPrompt: (char as any).htmlModeCustomPrompt },
-                  thinkingChain: { enabled: !!(char as any).showThinkingChain, customPrompt: (char as any).thinkingChainCustomPrompt },
-                  visionApiConfig: currentApiConfig.visionApi,
-              });
-              const systemPrompt = payload.systemPrompt;
-              const apiMessages = payload.cleanedApiMessages;
-              const fullMessages = payload.fullMessages;
-              if (!payload.flags.promptBuildSkipped) {
-                  try {
-                      friendFeedTask = await prepareFriendFeedMainTask(charId);
-                      if (friendFeedTask) fullMessages.splice(Math.max(1, payload.volatileTailIndex), 0,
-                          {role: 'system', content: friendFeedTask.prompt});
-                  } catch (error) { console.warn('[Friend feed] Proactive reply preparation failed', error); }
-              }
-
-              // 3c. 情绪评估 fire-and-forget — 与主 API 并行，沿用 useChatAI 的 API 选择逻辑：
-              //     角色专属情绪 API > 主 apiConfig（与记忆宫殿副 API 完全独立）
-              if (!payload.flags.promptBuildSkipped && !isEmotionEvalSkipped() && isScheduleFeatureOn(char) && char.emotionConfig?.enabled) {
-                  const emotionApi = (char.emotionConfig.api?.baseUrl)
-                      ? char.emotionConfig.api
-                      : { baseUrl: apiConfigRef.current.baseUrl, apiKey: apiConfigRef.current.apiKey, model: apiConfigRef.current.model };
-                  if (emotionApi.baseUrl && currentUserProfile) {
-                      evaluateEmotionBackground(char, currentUserProfile, systemPrompt, apiMessages, emotionApi)
-                          .then((innerState) => {
-                              if (innerState) proactiveInnerStateRef.current.set(charId, innerState);
-                          })
-                          .catch(() => {});
-                  }
-              }
-
-              // 4. API call
-              const baseUrl = api.baseUrl.replace(/\/+$/, '');
-              const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${api.apiKey || 'sk-none'}` };
-              const reqBody: any = { model: api.model, messages: fullMessages, temperature: api.temperature ?? 0.85, stream: api.stream ?? false };
-              // 思考链开启时显式向后端请求 extended thinking — 与 useChatAI 同步,
-              // 不同代理认不同入口,全都试一遍,代理不识别的会自动忽略
-              if (payload.flags.thinkingActive) {
-                  const m: string = reqBody.model || '';
-                  if (/^claude-/i.test(m) && !/-thinking$/i.test(m)) {
-                      reqBody.model = `${m}-thinking`;
-                  }
-                  reqBody.thinking = { type: 'enabled', budget_tokens: 4000 };
-                  reqBody.reasoning_effort = 'medium';
-                  reqBody.extra_body = { ...(reqBody.extra_body || {}), thinking: { type: 'enabled', budget_tokens: 4000 } };
-                  // 开思考时不带采样参数: Claude 系在 thinking 启用时只接受 temperature=1，
-                  // 传 0.85 会被 400。删掉用服务端默认；对非 Claude 模型同样安全。
-                  delete reqBody.temperature;
-                  delete reqBody.top_p;
-              }
-              const data = await safeFetchJson(`${baseUrl}/chat/completions`, {
-                  method: 'POST', headers,
-                  body: JSON.stringify(reqBody)
-              }, 2, 0, { appName: '消息', charId, charName: char.name, purpose: '主动消息' });
-
-              // 5. Process & save response
-              let aiContent = data.choices?.[0]?.message?.content || '';
-              aiContent = await consumeFriendFeedMainReply(charId, aiContent, [], friendFeedTask?.id);
-              // 思考链抽取 — 与 useChatAI 保持一致:reasoning_content 字段 + 主 content 里的 <think>/<thinking>/<thought> 块,
-              // 拼接后挂到本回合首条 assistant 消息的 metadata.thinkingChain
-              let pendingThinkingChain: string | null = null;
-              if (payload.flags.thinkingActive) {
-                  const lastReasoning = (data?.choices?.[0]?.message?.reasoning_content || '').trim();
-                  const thinkBlocks: string[] = [];
-                  const thinkPat = /<(think|thinking|thought)>([\s\S]*?)<\/\1>/gi;
-                  let tm: RegExpExecArray | null;
-                  while ((tm = thinkPat.exec(aiContent)) !== null) {
-                      const t = tm[2].trim();
-                      if (t) thinkBlocks.push(t);
-                  }
-                  if (!/<\/(?:think|thinking|thought)>/i.test(aiContent)) {
-                      const openOnly = aiContent.match(/<(?:think|thinking|thought)>([\s\S]*$)/i);
-                      if (openOnly && openOnly[1].trim()) thinkBlocks.push(openOnly[1].trim());
-                  }
-                  const chain = [lastReasoning, ...thinkBlocks].filter(s => !!s).join('\n\n').trim();
-                  if (chain) pendingThinkingChain = chain;
-              }
-              aiContent = aiContent.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<think>[\s\S]*$/gi, '');
-              aiContent = aiContent.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\]/g, '');
-              aiContent = aiContent.replace(/^[\w一-龥]+:\s*/, '');
-              aiContent = aiContent.replace(/\s*\[(?:聊天|通话|约会)\]\s*/g, '\n').trim();
-
-              aiContent = normalizeProactiveAiContent(aiContent);
-
-              const savedPreviewChunks: string[] = [];
-              const baseTimestamp = Date.now();
-              let offset = 0;
-              // 思考链只挂到本回合首条 assistant 消息上,避免每个气泡重复
-              const consumeThinkingMeta = (): { thinkingChain: string } | undefined => {
-                  if (!pendingThinkingChain) return undefined;
-                  const meta = { thinkingChain: pendingThinkingChain };
-                  pendingThinkingChain = null;
-                  return meta;
-              };
-
-              // HTML 卡片：在 sanitize 之前抽出 [html]...[/html] 块,与 useChatAI 保持一致。
-              // 没这一步主动消息会把整段 [html] 当纯文本落库,前端只能渲染成乱码。
-              if ((char as any).htmlModeEnabled && /\[html\]/i.test(aiContent)) {
-                  const { blocks, cleanedContent } = extractHtmlBlocks(aiContent);
-                  for (const blk of blocks) {
-                      try {
-                          const meta = consumeThinkingMeta();
-                          await DB.saveMessage({
-                              charId,
-                              role: 'assistant',
-                              type: 'html_card',
-                              content: blk.textPreview ? `[HTML卡片] ${blk.textPreview}` : '[HTML卡片]',
-                              timestamp: baseTimestamp + offset,
-                              metadata: {
-                                  htmlSource: blk.html,
-                                  htmlTextPreview: blk.textPreview,
-                                  ...(meta || {}),
-                              },
-                          } as any);
-                          if (blk.textPreview) savedPreviewChunks.push(blk.textPreview);
-                          offset += 1;
-                      } catch (e) {
-                          console.error('[Proactive/HTML] 落库 html_card 失败', e);
-                      }
-                  }
-                  aiContent = cleanedContent;
-              }
-
-              aiContent = ChatParser.sanitize(aiContent);
-
-              if (aiContent) {
-                  // 双语翻译:沿用 useChatAI 的 <翻译><原文>..</原文><译文>..</译文></翻译> 协议,
-                  // 把每对原文/译文落成一条 text 消息,内容用 `\n%%BILINGUAL%%\n` 串联供渲染端识别。
-                  const hasTranslationTags = /<翻译>\s*<原文>[\s\S]*?<\/原文>\s*<译文>[\s\S]*?<\/译文>\s*<\/翻译>/.test(aiContent);
-
-                  if (hasTranslationTags) {
-                      // 表情包按模型写的位置原地插发（与 applyAssistantPostProcessing 双语分支同款修复）。
-                      // 旧实现先把所有 [[SEND_EMOJI:]] 抽走、正文发完后统一追加到最后（还去了重），
-                      // 表现为「翻译模式下角色永远最后才发表情包」。
-                      const sendEmojiBubble = async (name: string): Promise<void> => {
-                          const foundEmoji = emojis.find(e => e.name === name);
-                          if (!foundEmoji?.url) return;
-                          const meta = consumeThinkingMeta();
-                          await DB.saveMessage({
-                              charId,
-                              role: 'assistant',
-                              type: 'emoji',
-                              content: foundEmoji.url,
-                              timestamp: baseTimestamp + offset,
-                              ...(meta ? { metadata: meta } : {}),
-                          });
-                          offset += 1;
-                      };
-                      // 翻译标签之外的普通文本段：splitResponse 按出现顺序拆出文字 / 表情逐条发
-                      const renderPlainSegment = async (segment: string): Promise<void> => {
-                          for (const part of ChatParser.splitResponse(segment)) {
-                              if (part.type === 'emoji') {
-                                  await sendEmojiBubble(part.content);
-                                  continue;
-                              }
-                              const cleaned = ChatParser.sanitize(part.content);
-                              if (!cleaned || !ChatParser.hasDisplayContent(cleaned)) continue;
-                              for (const chunk of ChatParser.chunkText(cleaned)) {
-                                  if (!chunk) continue;
-                                  const meta = consumeThinkingMeta();
-                                  await DB.saveMessage({
-                                      charId,
-                                      role: 'assistant',
-                                      type: 'text',
-                                      content: chunk,
-                                      timestamp: baseTimestamp + offset,
-                                      ...(meta ? { metadata: meta } : {}),
-                                  });
-                                  savedPreviewChunks.push(chunk);
-                                  offset += 1;
-                              }
-                          }
-                      };
-
-                      const tagPattern = /<翻译>\s*<原文>([\s\S]*?)<\/原文>\s*<译文>([\s\S]*?)<\/译文>\s*<\/翻译>/g;
-                      let lastIndex = 0;
-                      let tagMatch;
-                      while ((tagMatch = tagPattern.exec(aiContent)) !== null) {
-                          const textBefore = aiContent.slice(lastIndex, tagMatch.index).trim();
-                          if (textBefore) await renderPlainSegment(textBefore);
-
-                          // 混进 <原文>/<译文> 里的表情标签剥出来，紧跟这条双语气泡之后发
-                          const inlineEmojis: string[] = [];
-                          const stripInlineEmoji = (s: string): string =>
-                              s.replace(/\[\[SEND_EMOJI:\s*(.*?)\]\]/g, (_m, n) => { inlineEmojis.push(String(n).trim()); return ''; });
-                          const originalText = ChatParser.sanitize(stripInlineEmoji(tagMatch[1]).trim());
-                          const translatedText = ChatParser.sanitize(stripInlineEmoji(tagMatch[2]).trim());
-                          if (originalText || translatedText) {
-                              const biContent = originalText && translatedText
-                                  ? `${originalText}\n%%BILINGUAL%%\n${translatedText}`
-                                  : (originalText || translatedText);
-                              const meta = consumeThinkingMeta();
-                              await DB.saveMessage({
-                                  charId,
-                                  role: 'assistant',
-                                  type: 'text',
-                                  content: biContent,
-                                  timestamp: baseTimestamp + offset,
-                                  ...(meta ? { metadata: meta } : {}),
-                              });
-                              savedPreviewChunks.push(originalText || translatedText);
-                              offset += 1;
-                          }
-                          for (const name of inlineEmojis) await sendEmojiBubble(name);
-
-                          lastIndex = tagMatch.index + tagMatch[0].length;
-                      }
-
-                      const textAfter = aiContent.slice(lastIndex).trim();
-                      if (textAfter) await renderPlainSegment(textAfter.replace(/<\/?翻译>|<\/?原文>|<\/?译文>/g, '').trim());
-                  } else {
-                      const responseParts = ChatParser.splitResponse(aiContent);
-
-                      for (const part of responseParts) {
-                          if (part.type === 'emoji') {
-                              const foundEmoji = emojis.find(e => e.name === part.content);
-                              if (foundEmoji?.url) {
-                                  const meta = consumeThinkingMeta();
-                                  await DB.saveMessage({
-                                      charId,
-                                      role: 'assistant',
-                                      type: 'emoji',
-                                      content: foundEmoji.url,
-                                      timestamp: baseTimestamp + offset,
-                                      ...(meta ? { metadata: meta } : {}),
-                                  });
-                              } else {
-                                  const fallbackText = `发送了表情包：${part.content}`;
-                                  const meta = consumeThinkingMeta();
-                                  await DB.saveMessage({
-                                      charId,
-                                      role: 'assistant',
-                                      type: 'text',
-                                      content: fallbackText,
-                                      timestamp: baseTimestamp + offset,
-                                      ...(meta ? { metadata: meta } : {}),
-                                  });
-                                  savedPreviewChunks.push(fallbackText);
-                              }
-                              offset += 1;
-                              continue;
-                          }
-
-                          const textChunks = ChatParser.chunkText(part.content)
-                              .map(chunk => ChatParser.sanitize(chunk))
-                              .filter(chunk => ChatParser.hasDisplayContent(chunk));
-
-                          for (const chunk of textChunks) {
-                              const meta = consumeThinkingMeta();
-                              await DB.saveMessage({
-                                  charId,
-                                  role: 'assistant',
-                                  type: 'text',
-                                  content: chunk,
-                                  timestamp: baseTimestamp + offset,
-                                  ...(meta ? { metadata: meta } : {}),
-                              });
-                              savedPreviewChunks.push(chunk);
-                              offset += 1;
-                          }
-                      }
-                  }
-              }
-
-              if (offset > 0) {
-                  ProactiveChat.report?.(charId, 'ok');
-                  const previewSource = savedPreviewChunks.join(' ').trim();
-                  const preview = previewSource.replace(/\s+/g, ' ').trim().slice(0, 120)
-                      || `${char.name} sent a proactive message`;
-
-                  // 6. Notify OS for unread badge + toast
-                  window.dispatchEvent(new CustomEvent('proactive-message-sent', {
-                      detail: { charId, charName: char.name, body: preview }
-                  }));
-              } else if (hintMsgId != null) {
-                  await DB.deleteMessage(hintMsgId).catch(() => {});
-              }
-          } catch (err) {
-              console.error(`[Proactive/Global] Error for ${char.name}:`, err);
-              if (hintMsgId != null) {
-                  await DB.deleteMessage(hintMsgId).catch(() => {});
-              }
-              if (charactersRef.current.find(c => c.id === charId)?.proactiveConfig?.enabled) {
-                  const reportResult = ProactiveChat.report?.(charId, 'failed');
-                  if (reportResult?.tripped) {
-                      void updateCharacter(charId, prev => ({
-                          proactiveConfig: { ...(prev.proactiveConfig || { intervalMinutes: 60 }), enabled: false },
-                      }));
-                      addToast(`${char.name} 连续 ${reportResult.streak} 次主动消息调用模型失败，已自动暂停其主动消息`, 'error');
-                  }
-              }
-          } finally {
-              if (friendFeedTask) await releaseFriendFeedEmotionTask(charId, friendFeedTask.id)
-                  .catch(error => console.warn('[Friend feed] Proactive reply release failed', error));
-              proactiveRunningRef.current = false;
-              setProactiveComposingChars(prev => {
-                  if (!prev[charId]) return prev;
-                  const next = { ...prev };
-                  delete next[charId];
-                  return next;
-              });
-              drainQueuedProactive();
-          }
-      };
-
-      ProactiveChat.onTrigger((charId: string) => {
-          void runProactive(charId);
-      });
-      ProactiveChat.reconcile?.(
-          charactersRef.current
-              .filter(c => !!c.proactiveConfig?.enabled)
-              .map(c => ({ charId: c.id, intervalMinutes: c.proactiveConfig?.intervalMinutes || 60 }))
-      );
 
       // 「彼方」自主登入 —— 独立调度，复用同一批 refs 拿最新状态
       const runVR = async (charId: string, room?: string, letterId?: string, manual?: boolean, sarActivity?: VRSARActivity) => {
@@ -2953,8 +2448,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           .catch(() => {});
 
       return () => {
-          // Cleanup: detach proactive listeners when OSContext unmounts (unlikely but safe)
-          ProactiveChat.onTrigger(() => {});
+          // Cleanup: detach scheduler listeners when OSContext unmounts (unlikely but safe)
           VRScheduler.onTrigger(() => {});
           WorldScheduler.onTrigger(() => {});
           window.removeEventListener('world-reroll-request', onRerollRequest as EventListener);
@@ -3084,6 +2578,27 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           }
       };
 
+      const phoneGenerationHandler = (event: Event) => {
+          const { charId, generation } = (event as CustomEvent<{ charId: string; generation: PhoneGeneration }>).detail;
+          setCharacters(previous => previous.map(character => {
+              if (character.id !== charId) return character;
+              const next = { ...character, phoneState: mergePhoneGeneration(character.phoneState, generation) };
+              markAmsgStateDirty({ char: next, userProfile: userProfileRef.current, groups: groupsRef.current, realtimeConfig: realtimeConfigRef.current });
+              return next;
+          }));
+          setLastMsgTimestamp(Date.now());
+      };
+      window.addEventListener(PHONE_GENERATION_COMMITTED, phoneGenerationHandler);
+      const phoneEvidenceSyncHandler = (event: Event) => {
+          const link = (event as CustomEvent<PhoneEvidenceChatLink>).detail;
+          setCharacters(previous => previous.map(character => {
+              const next = applyPhoneEvidenceChatLink(character, link);
+              if (next !== character) markAmsgStateDirty({ char: next, userProfile: userProfileRef.current, groups: groupsRef.current, realtimeConfig: realtimeConfigRef.current });
+              return next;
+          }));
+          setLastMsgTimestamp(Date.now());
+      };
+      window.addEventListener(PHONE_EVIDENCE_SYNCED, phoneEvidenceSyncHandler);
       window.addEventListener('amsg2-tasks-adopted', tasksAdoptedHandler);
       window.addEventListener(SAR_MODULE_RUNTIME_CHANGED_EVENT, sarModuleRuntimeChangedHandler);
       const linkedArchiveDeletedHandler = (event: Event) => {
@@ -3101,6 +2616,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       window.addEventListener('char-music-profile-updated', musicProfileSyncHandler);
       window.addEventListener(MEMORY_AUTO_ARCHIVE_SYNC_EVENT, memoryAutoArchiveSyncHandler);
       return () => {
+          window.removeEventListener(PHONE_GENERATION_COMMITTED, phoneGenerationHandler);
+          window.removeEventListener(PHONE_EVIDENCE_SYNCED, phoneEvidenceSyncHandler);
           window.removeEventListener('amsg2-tasks-adopted', tasksAdoptedHandler);
           window.removeEventListener(SAR_MODULE_RUNTIME_CHANGED_EVENT, sarModuleRuntimeChangedHandler);
           window.removeEventListener(LINKED_ARCHIVE_DELETED, linkedArchiveDeletedHandler);
@@ -3134,6 +2651,31 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       return () => { cancelled = true; };
   // 只在本次数据初始化完成时执行；后续新数据走已修复的统一双写入口。
   // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDataLoaded]);
+
+  // 离开后消息（本地那条路）：打开页面和切回前台时，给超过等待时长没说话的角色补上
+  // 离开期间的消息。云端那条路在 useChatAI 每轮开场维护，见 utils/awayMessage.ts。
+  useEffect(() => {
+      if (!isDataLoaded) return;
+      const run = () => {
+          if (document.visibilityState !== 'visible') return;
+          void runLocalAwayMessages({
+              getCharacters: () => charactersRef.current,
+              getApiConfig: () => apiConfigRef.current,
+              getUserProfile: () => userProfileRef.current,
+              getGroups: () => groupsRef.current,
+              getRealtimeConfig: () => realtimeConfigRef.current,
+              // 正在见面/通话，以及见面/通话挂起期间都不补离开后消息；
+              // 见面挂起后的短时离开提醒走 utils/dateLeaveReminder.ts 的独立计时，不受这里拦截。
+              isBusyWith: (charId) => suspendedCallRef.current?.charId === charId
+                  || suspendedDateRef.current?.charId === charId
+                  || ((activeAppRef.current === AppID.Date || activeAppRef.current === AppID.Call)
+                      && activeCharIdScheduleRef.current === charId),
+          });
+      };
+      run();
+      document.addEventListener('visibilitychange', run);
+      return () => document.removeEventListener('visibilitychange', run);
   }, [isDataLoaded]);
 
   const updateTheme = async (updates: Partial<OSTheme>) => {
@@ -3284,7 +2826,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       const { uploadBackup, cleanupOldBackups } = await loadBackupProvider();
       try {
           setSysOperation({ status: 'processing', message: '正在打包备份数据...', progress: 0 });
-          const blob = await exportSystem(mode);
+          // 个人云备份用于换机恢复，必须保留原后台身份和密钥。不能被文件分享的脱敏偏好剥掉。
+          const blob = await exportSystem(mode, { userScope: 'all', includeBackendConnection: true });
 
           setSysOperation({ status: 'processing', message: '正在上传到云端...', progress: 50 });
           const filename = `Sully_Backup_${mode}_${Date.now()}.zip`;
@@ -3322,7 +2865,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       }
   };
 
-  const cloudRestoreFromWebDAV = async (file: CloudBackupFile) => {
+  const cloudRestoreFromWebDAV = async (file: CloudBackupFile, importOptions?: ImportSystemOptions) => {
       const { downloadBackup } = await loadBackupProvider();
       try {
           setSysOperation({ status: 'processing', message: '正在从云端下载...', progress: 0 });
@@ -3334,7 +2877,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
           setSysOperation({ status: 'processing', message: '正在恢复数据...', progress: 50 });
           const zipFile = new File([blob], file.name, { type: 'application/zip' });
-          await importSystem(zipFile);
+          await importSystem(zipFile, importOptions);
       } catch (e: any) {
           setSysOperation({ status: 'idle', message: '', progress: 0 });
           addToast(`云端恢复失败: ${e.message}`, 'error');
@@ -3358,6 +2901,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     });
     setMemoryPalaceConfig(newConfig);
     localStorage.setItem('os_memory_palace_config', JSON.stringify(newConfig));
+    // 主动消息模板也包含智能语境；切换后刷新已有任务，不能等下次聊天才生效。
+    const smartFlags = ['recallRouter', 'interactionAdaptation', 'deepEngagement'] as const;
+    if (smartFlags.some(key => !!memoryPalaceConfig.featureFlags?.[key] !== !!newConfig.featureFlags?.[key])) {
+      markAmsgStateDirtyForAll({ characters, userProfile, groups, realtimeConfig });
+    }
   };
 
   // 情绪 API 同步到所有角色：API 字段（baseUrl/apiKey/model）所有角色共用，
@@ -3484,7 +3032,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     if (!managed && !options?.force && charMayHaveCloudState(target)) {
       let workerConfigured = false;
       try {
-        workerConfigured = Boolean((await ActiveMsgStore.getGlobalConfig()).workerUrl?.trim());
+        workerConfigured = isAmsg2WorkerActive(await ActiveMsgStore.getGlobalConfig());
       } catch { /* 配置读不到按没配处理，与 purgeCharCloudState 同口径 */ }
 
       if (workerConfigured) {
@@ -3531,6 +3079,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       // 「仍然删除」放行后仍旧尽力清一次：能清掉多少算多少，失败只提示、不再拦。
       void (async () => {
         try {
+          if (!isAmsg2WorkerActive(await ActiveMsgStore.getGlobalConfig().catch(() => null))) return;
           if (localTaskUuids.length > 0) {
             const { failed } = await ActiveMsgClient.cancelAllTasksForChar(id, localTaskUuids);
             if (failed.size > 0) {
@@ -3549,7 +3098,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       })();
     }
 
-    ProactiveChat.stop?.(id);
     VRScheduler.stop?.(id);
     setCharacters(prev => { const remaining = prev.filter(c => c.id !== id); if (remaining.length > 0 && activeCharacterId === id) { setActiveCharacterId(remaining[0].id); } return remaining; });
     await DB.deleteCharacter(id);
@@ -4056,6 +3604,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           const assetsFolder = zip.folder("assets");
           let assetCount = 0;
           let malformedImageCount = 0;
+          let missingAssets: BackupMissingAsset[] = [];
           const malformedImageDiagnostics: MalformedBackupImageDiagnostic[] = [];
           const maxMalformedImageDiagnostics = 100;
 
@@ -4328,6 +3877,17 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   }
                   return Object.keys(map).length > 0 ? map : undefined;
               })() : undefined,
+              chatTranslateStyleByChar: (mode === 'text_only' || mode === 'full') ? (() => {
+                  const map: Record<string, 'bubble' | 'subtitle'> = {};
+                  for (let i = 0; i < localStorage.length; i++) {
+                      const key = localStorage.key(i);
+                      if (!key?.startsWith('chat_translate_style_')) continue;
+                      const charId = key.slice('chat_translate_style_'.length);
+                      const value = localStorage.getItem(key);
+                      if (charId && (value === 'bubble' || value === 'subtitle')) map[charId] = value;
+                  }
+                  return Object.keys(map).length > 0 ? map : undefined;
+              })() : undefined,
               chatTranslateSourceLangByChar: (mode === 'text_only' || mode === 'full') ? (() => {
                   const map: Record<string, string> = {};
                   for (let i = 0; i < localStorage.length; i++) {
@@ -4404,7 +3964,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // ActiveMsg 库里，不在上面那份 store 清单内，所以单独取一次；异步，故在字面量外。
           // 纯配置无媒体，跟着 text_only / full 走。
           if (mode === 'text_only' || mode === 'full') {
-              backupData.amsg2GlobalConfig = await exportAmsg2GlobalConfig(exportOptions);
+              backupData.amsg2GlobalConfig = await exportAmsg2GlobalConfig({ includeBackendConnection });
+              backupData.userLocationSettings = exportUserLocationSettings();
+              backupData.chatSubtitleByChar = exportSubtitleSettings();
           }
 
           // 桌面皮肤偏好（电子宠物/手游风的界面配色 + 看板 banner）——异步（看板图令牌需解析为
@@ -4759,8 +4321,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               );
               if (missing.length > 0) {
                   console.warn(`备份时 ${missing.length} 个图片令牌已无对应数据，已跳过:`, missing);
+                  missingAssets = missing.map(token => ({ id: token.slice('blobref:'.length), locations: [] }));
               }
           }
+          writeMissingBackupAssets(zip as unknown as ZipFileWriter, missingAssets);
 
           if (malformedImageCount > 0) {
               zip.file(
@@ -4794,6 +4358,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           setSysOperation({ status: 'idle', message: '', progress: 100 });
           // 备份成功 → 推进「该备份啦」提醒的计时（本地导出 / 云备份都走这里，一处覆盖两条路径）
           markBackupDone();
+          exportOptions.onMissingAssets?.(missingAssets);
+          if (missingAssets.length) addToast(missingBackupAssetsSummary(missingAssets), 'info');
           if (malformedImageCount > 0) {
               console.warn(`[Backup] 备份已完成，已从导出副本跳过 ${malformedImageCount} 处损坏图片`, malformedImageDiagnostics);
               addToast(`备份已生成，已跳过 ${malformedImageCount} 处无法恢复的损坏图片；其他数据已正常保存`, 'info');
@@ -5160,6 +4726,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           }
 
           showImportProgress('database', '正在写入数据库...', 50, { current: '准备写入数据库', currentFile: '' });
+          if (data.characters && listUserSpaces().length > 1) {
+              await (await import('../utils/userSpaceData')).assertUniqueSpaceCharacters(new Map([[SESSION_SPACE_ID, data.characters]]));
+          }
           suppressFeedbackInvitation();
           await DB.importFullData(data, {
               memoryLinks: deferredStores.get('memoryLinks'),
@@ -5292,6 +4861,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (data.chatTranslateExpandedByChar && typeof data.chatTranslateExpandedByChar === 'object') {
               for (const [charId, expanded] of Object.entries(data.chatTranslateExpandedByChar)) {
                   localStorage.setItem(`chat_translate_expanded_${charId}`, expanded ? 'true' : 'false');
+              }
+          }
+          if (data.chatTranslateStyleByChar && typeof data.chatTranslateStyleByChar === 'object') {
+              for (const [charId, style] of Object.entries(data.chatTranslateStyleByChar)) {
+                  if (style === 'bubble' || style === 'subtitle') localStorage.setItem(`chat_translate_style_${charId}`, style);
               }
           }
           if (data.chatTranslateSourceLangByChar && typeof data.chatTranslateSourceLangByChar === 'object') {
@@ -5450,20 +5024,19 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   } catch (e) {
                       console.warn('[amsg2] 导入后读云端凭据清单失败，孤儿角色可能漏清', e);
                   }
-                  // 取消任务只解决「还会不会响」。旧档角色在云端那份上下文（完整角色卡 +
-                  // 最近 30 条对话原文，一个角色 32KB 起步）和那几行 API 凭据还留着，而且
-                  // 新档里已经没有这个角色，再没有任何一条路会去刷新它或清掉它——角色命名
-                  // 空间在 worker 侧没有 TTL，不在这里清就是永久留着。
                   for (const charId of orphanCharIds) {
                       await purgeCloudCharById(charId).catch(() => {});
                   }
                   // 留下来的角色逐个刷云端快照，同时把导入进来的实时感知凭据传上去。
+                  // 总开关暂停期间内部门禁保证零网络，仅在 localStorage 记下脏标，恢复总开关后自动补传。
                   // 走同一个入口：云端提示词是按凭据裁过的，两者必须同进同退。
                   // 有 AI 任务的角色才会真的上传（门在 markAmsgStateDirty 里）。
                   syncAmsgToolConfigAndPrompts(
                       data.realtimeConfig || realtimeConfig,
                       { characters: importedChars, userProfile: user || userProfile, groups: groupsList },
                   );
+                  // 备份里可能有在云端删过的角色；重启后的对账按「来自备份」的口径问用户要不要恢复。
+                  try { localStorage.setItem(AMSG_OWNER_CHECK_AFTER_IMPORT_LS_KEY, '1'); } catch { /* 写不进去就按普通口径提示 */ }
               }
           } catch (e) {
               console.warn('[amsg2] 导入后云端对账失败（本地数据已恢复，不受影响）', e);
@@ -5515,9 +5088,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       if (!options?.force && cleanup.status === 'failed') {
         return { status: 'cloud-cleanup-failed', workerUrl: cleanup.workerUrl, detail: cleanup.detail };
       }
-      await DB.deleteDB();
+      await (await import('../utils/userSpaceData')).resetAllUserSpaces();
       await ActiveMsgStore.deleteDB();
-      localStorage.clear();
       window.location.reload();
       return { status: 'done' };
     } catch (e) {
@@ -5526,10 +5098,17 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       return { status: 'failed' };
     }
   };
-  const openApp = (appId: AppID) => setActiveApp(appId);
+  const openApp = (appId: AppID) => {
+    // 有挂起的见面时，不管从哪个入口打开见面都回到它：当前角色和见面一起切回去，
+    // 同一次渲染里生效，DateApp 挂载第一帧就是那个角色。
+    if (appId === AppID.Date && suspendedDateRef.current) setActiveCharacterId(suspendedDateRef.current.charId);
+    setActiveApp(appId);
+  };
   const closeApp = () => setActiveApp(AppID.Launcher);
   // 从聊天直接进入某角色的见面：切换当前角色 + 标记自动进入 + 打开见面 App
   const openDateWithChar = (charId: string) => {
+    // 和这个角色的见面正挂着：回到那场见面，不另开一场。
+    if (suspendedDateRef.current?.charId === charId) { openApp(AppID.Date); return; }
     setActiveCharacterId(charId);
     setDateAutoStartCharId(charId);
     setActiveApp(AppID.Date);
@@ -5543,6 +5122,18 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   };
   const resumeCall = () => {
     setActiveApp(AppID.Call);
+  };
+  // 挂起由 DateApp 卸载时调用，不负责导航：用户已经在去别处的路上了。
+  const suspendDate = (info: SuspendedDate) => {
+    suspendedDateRef.current = info;
+    setSuspendedDate(info);
+  };
+  const resumeDate = () => openApp(AppID.Date);
+  const takeSuspendedDate = () => {
+    const taken = suspendedDateRef.current;
+    suspendedDateRef.current = null;
+    setSuspendedDate(null);
+    return taken;
   };
   const clearSuspendedCall = () => {
     setSuspendedCall(null);
@@ -5665,6 +5256,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     suspendCall,
     resumeCall,
     clearSuspendedCall,
+    suspendedDate,
+    suspendDate,
+    resumeDate,
+    takeSuspendedDate,
     dateAutoStartCharId,
     openDateWithChar,
     consumeDateAutoStart

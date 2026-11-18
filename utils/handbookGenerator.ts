@@ -22,6 +22,7 @@ import { loadCharacterContextMessages } from './chatContextRange';
 import { safeResponseJson, extractJson } from './safeApi';
 import { ContextBuilder } from './context';
 import { getLocalDayRange } from './localDate';
+import { injectMemoryPalace } from './memoryPalace/pipeline';
 
 // 局部 seedFloat — composePageLayout 用 (不引用 components/ 避免 utils → components 反向依赖).
 // FNV-1a + xorshift, 与 paper.tsx 里同名函数行为一致.
@@ -456,6 +457,9 @@ ${transcriptParts.join('\n\n')}
 
 直接输出 JSON 数组。`;
 
+    const activeChars = perChar.filter(p => p.totalLines > 0);
+    const soleChar = activeChars.length === 1 ? activeChars[0] : undefined;
+
     try {
         const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
             method: 'POST',
@@ -466,7 +470,13 @@ ${transcriptParts.join('\n\n')}
                 temperature: 0.8,
                 max_tokens: 12000,
             }),
-        });
+            __sullyMeta: {
+                appId: 'handbook',
+                appName: '手账',
+                ...(soleChar ? { charId: soleChar.charId, charName: soleChar.charName } : {}),
+                purpose: '日记手账生成',
+            },
+        } as RequestInit);
         if (!response.ok) {
             console.error('[Handbook/UserDiary] API error:', response.status);
             return { page: null, placements: [], totalUserMsgs, perChar };
@@ -545,7 +555,10 @@ export async function generateLifestreamPage(
     //   /user profile/impression(完整含 likes/triggers/comfort/changes)
     //   /refinedMemories/activeMemoryMonths 详细日志/memoryPalace/buff
     //   是聊天系统在用的 source of truth,改它会自动跟进
-    const characterContextInput = { char, user: userProfile, includeDetailedMemories: true };
+    // 召回结果只挂在本次请求的副本上：角色对象上不存召回，也不能读别处留下的旧值。
+    const recallChar = { ...char, memoryPalaceInjection: '', roomPlatesInjection: '' };
+    await injectMemoryPalace(recallChar, undefined, undefined, userProfile.name);
+    const characterContextInput = { char: recallChar, user: userProfile, includeDetailedMemories: true };
 
 
     // ─── 1b. ta 实际怎么说话 — buildCoreContext 没的,得自己补 ──
@@ -710,7 +723,14 @@ text 里允许少量 markdown 语法,渲染时会变成对应的视觉效果:
                 temperature: 0.85,
                 max_tokens: 12000,
             }),
-        });
+            __sullyMeta: {
+                appId: 'handbook',
+                appName: '手账',
+                charId: char.id,
+                charName: char.name,
+                purpose: '生活流手账生成',
+            },
+        } as RequestInit);
         if (!response.ok) {
             console.error('[Handbook/Lifestream] API error:', response.status, char.name);
             return { page: null, placements: [] };

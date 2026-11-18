@@ -26,6 +26,7 @@ import {
   AMSG_LAST_SKIP_KEY,
   AMSG_SELF_LOG_KEY,
   AMSG_SILENT_MARK,
+  BEFORE_SPEAK_LINES,
   AMSG_SLOT_CURRENT_TIME,
   AMSG_SLOT_LIVE_CHAT,
   AMSG_SLOT_SELF_LOG,
@@ -102,12 +103,13 @@ const firePackValue = (
 
 const presenceValue = (
   activeAt: number,
-  opts: { lastUserMessageAt?: number | null; charId?: string } = {},
+  opts: { lastUserMessageAt?: number | null; charId?: string; scene?: 'date' } = {},
 ) => JSON.stringify({
   v: 1,
   charId: opts.charId ?? CHAR_ID,
   activeAt,
   lastUserMessageAt: opts.lastUserMessageAt === undefined ? activeAt : opts.lastUserMessageAt,
+  ...(opts.scene ? { scene: opts.scene } : {}),
 });
 
 // tool_pack / tool_config 与 fire_pack 同批原子上传，所以默认造齐——缺任何一份都是
@@ -190,6 +192,25 @@ const makeCtx = (opts: {
 };
 
 describe('取消中的 instant hook', () => {
+  it.each([false, true])('自主月度查阅关闭后不进入工具循环，仍发送正常正文（instant=%s）', async instant => {
+    const { ctx, scratch, writeState } = makeCtx({
+      metadata: instant ? { amsgInstantChat: true } : {},
+      charRows: [
+        { key: AMSG_FIRE_PACK_KEY, value: firePackValue(null, instant ? { chat: { messages: [{ role: 'user', content: '还记得六月吗？' }], builtAt: PACK_BUILT_AT } } : {}) },
+        { key: AMSG_TOOL_PACK_KEY, value: JSON.stringify({ ...JSON.parse(toolPackValue), monthlyRecallEnabled: false, memories: [{ date: '2026-06-15', summary: '六月的详细经历' }] }) },
+      ],
+    });
+    const before = await amsgHooks.onBeforeFire(ctx) as any;
+    expect(before.allowedToolNames).not.toContain('recall');
+    const decision = await amsgHooks.onLLMOutput({
+      sessionId: 'sess_task_42', taskId: 42, taskUuid: TASK_UUID,
+      llmResponse: {}, llmOutputText: '六月一起吃过午饭。[[RECALL: 2026-06]]', contactName: 'Nyah',
+      metadata: ctx.task.metadata, scratch, writeState, readState: ctx.readState,
+    } as any) as any;
+    expect(decision.decision).toBe('finish');
+    expect(JSON.stringify(decision.pushPayloads)).toContain('六月一起吃过午饭。');
+    expect(JSON.stringify(decision.pushPayloads)).not.toContain('RECALL');
+  });
   it('已取消的请求不读上下文、不继续处理模型输出', async () => {
     const { ctx, readState, writeState } = makeCtx({ metadata: { amsgInstantChat: true } });
     const cancelled = new DOMException('Stopped', 'AbortError');
@@ -711,6 +732,80 @@ describe('连发上限（到点兜底闸）', () => {
   });
 });
 
+// ─── 离开后消息：对方最后一次开口 + 等待时长，到点必发、计入连发上限 ───
+describe('离开后消息（到点）', () => {
+  const awayMeta = { amsgAwayMessage: true, amsgAwayDelayMinutes: 90, amsgExpirePolicy: 'force' };
+  const rows = (lastUserMessageAt: number | null, extra: Array<{ key: string; value: string }> = []) => [
+    { key: AMSG_FIRE_PACK_KEY, value: firePackValue(lastUserMessageAt, { template: `${BEFORE_SPEAK_LINES.join('\n')}\n${AMSG_SLOT_TASK_INSTRUCTION}` }) },
+    { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+    limitsRow({ minSendGapMinutes: 0 }),
+    ...extra,
+  ];
+
+  it('对方在等待时长内说过话 → 推迟到「最后开口 + 90 分钟」，不消费、不留痕', async () => {
+    const lastUser = NOW.getTime() - 30 * 60_000;
+    const { ctx, writeState } = makeCtx({ metadata: awayMeta, charRows: rows(lastUser) });
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ defer: { afterMs: 60 * 60_000 } });
+    expect(writeState).not.toHaveBeenCalled();
+  });
+
+  it('等待时长已满 → 照发，而且模板里没有【开口之前】，角色不能选择不说', async () => {
+    const { ctx } = makeCtx({ metadata: awayMeta, charRows: rows(NOW.getTime() - 91 * 60_000) });
+    const content = fired(await amsgHooks.onBeforeFire(ctx)).messages[0].content;
+    expect(content).not.toContain('【开口之前】');
+    expect(content).not.toContain(AMSG_SILENT_MARK);
+  });
+
+  it('普通任务照旧带着【开口之前】', async () => {
+    const { ctx } = makeCtx({ charRows: rows(NOW.getTime() - 91 * 60_000) });
+    expect(fired(await amsgHooks.onBeforeFire(ctx)).messages[0].content).toContain('【开口之前】');
+  });
+
+  it('计入连发上限：这段沉默里已经连着找了 3 次 → 跳过', async () => {
+    const selfLog = JSON.stringify({
+      v: 4, basePackAt: PACK_BUILT_AT, anchorUserMsgAt: null,
+      entries: [], unansweredSends: 3, tasks: [],
+    });
+    const { ctx } = makeCtx({
+      metadata: awayMeta,
+      charRows: rows(null, [{ key: AMSG_SELF_LOG_KEY, value: selfLog }]),
+    });
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ skip: true });
+  });
+
+  it('用户删掉推进词只剩角色见面/通话记录（lastAwayAnchorAt 在等待时长内）→ 照样推迟，不误发', async () => {
+    const ancientUser = NOW.getTime() - 360 * 60_000;
+    const recentDateAnchor = NOW.getTime() - 20 * 60_000;
+    const { ctx } = makeCtx({
+      metadata: awayMeta,
+      charRows: [
+        {
+          key: AMSG_FIRE_PACK_KEY,
+          value: firePackValue(ancientUser, {
+            lastAwayAnchorAt: recentDateAnchor,
+            template: `${BEFORE_SPEAK_LINES.join('\n')}\n${AMSG_SLOT_TASK_INSTRUCTION}`,
+          }),
+        },
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+        limitsRow({ minSendGapMinutes: 0 }),
+      ],
+    });
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ defer: { afterMs: 70 * 60_000 } });
+  });
+
+  it('人正停在见面界面里（presence.scene === date）撞上到点 → 推迟到离开后，不当面弹消息', async () => {
+    const ancientUser = NOW.getTime() - 360 * 60_000;
+    const activeAt = NOW.getTime() - 5_000;
+    const { ctx } = makeCtx({
+      metadata: awayMeta,
+      charRows: rows(ancientUser, [
+        { key: AMSG_CHAT_PRESENCE_KEY, value: presenceValue(activeAt, { lastUserMessageAt: null, scene: 'date' }) },
+      ]),
+    });
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ defer: { afterMs: 90 * 60_000 - 5_000 } });
+  });
+});
+
 // ─── 用户定的「频率与额度」：到点那几道闸 ───
 //
 // 每一项都是用户在面板上定的硬闸（见 utils/amsgLimits）。拦下来的一律 skip、在调模型之前，
@@ -917,8 +1012,8 @@ describe('频率与额度（到点兜底闸）', () => {
     });
     ctx.scheduleTask = vi.fn();
     const prompt = fired(await amsgHooks.onBeforeFire(ctx)).messages[0].content;
-    expect(prompt).toContain('现在还能再排 2 次');
-    expect(prompt).toContain('现在挂着 0 个');
+    expect(prompt).toContain('已用 1/3 次');
+    expect(prompt).toContain('挂着 0/1 个');
   });
 
   it('「不停」（0）时重复任务一直照发', async () => {
@@ -964,6 +1059,91 @@ describe('频率与额度（到点兜底闸）', () => {
     fired(await amsgHooks.onBeforeFire(allowed.ctx));
   });
 
+  // 见面期间人就在面前：到点直接作废（不推迟），回执带上原本要说的事，交给见面下一轮。
+  it('正在见面（scene=date 租约新鲜）→ 作废，留 in-person 痕并回传任务概要', async () => {
+    const { ctx, writeState } = makeCtx({
+      charRows: rows({
+        presence: presenceValue(NOW.getTime() - 5_000, { scene: 'date' }),
+        pack: { pendingTasks: [{
+          taskUuid: TASK_UUID, clientTaskId: 'ctid-1', status: 'scheduled', mode: 'prompted',
+          promptHint: '问问药吃了没', recurrenceType: 'none', expirePolicy: 'expire',
+          firstSendTime: '2026-07-25T12:00:00.000Z', createdAt: 1,
+        }] },
+      }),
+    });
+    ctx.emitResult = vi.fn(async () => ({ messageId: 'm', pushed: false }));
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ skip: true });
+    expect(skipReason(writeState)).toBe('in-person');
+    expect(ctx.emitResult.mock.calls[0][0]).toMatchObject({
+      reason: 'in-person',
+      task: { mode: 'prompted', promptHint: '问问药吃了没' },
+    });
+  });
+
+  it('见面租约过期（离开见面超过 TTL）→ 照常发；到点必发的见面中也照发', async () => {
+    const left = makeCtx({ charRows: rows({ presence: presenceValue(NOW.getTime() - 120_000, { scene: 'date' }) }) });
+    fired(await amsgHooks.onBeforeFire(left.ctx));
+
+    const alarm = makeCtx({
+      metadata: { amsgExpirePolicy: 'force' },
+      charRows: rows({ presence: presenceValue(NOW.getTime() - 5_000, { scene: 'date' }) }),
+    });
+    fired(await amsgHooks.onBeforeFire(alarm.ctx));
+  });
+
+  // 见面离开提醒：用户为这次见面设的一次性提醒，必发、不受连发和每日上限拦，也不给排程工具；
+  // 人还在见面里就按租约往后推，走开后在私聊里开过口就作废（见 docs/date-leave-reminder.md）。
+  const dateLeaveMeta = { amsgDateLeave: true, amsgDateLeaveDelayMinutes: 5, amsgExpirePolicy: 'force' };
+  // 见面里续的租约不带开口时刻（DateApp 传 null）。
+  const dateLease = (activeAt: number) => presenceValue(activeAt, { scene: 'date', lastUserMessageAt: null });
+
+  it('见面离开提醒：连发和每日上限都已满 → 照发，而且没有【开口之前】、不给排程工具', async () => {
+    const { ctx } = makeCtx({
+      metadata: dateLeaveMeta,
+      charRows: rows({
+        settings: { maxUnansweredSends: 3, dailySendCap: 2 },
+        selfLog: selfLogWith({ unansweredSends: 3 }),
+        daily: { day: '2026-07-25', sends: 2 },
+        pack: { template: `${BEFORE_SPEAK_LINES.join('\n')}\n${AMSG_SLOT_TASK_INSTRUCTION}` },
+      }),
+    });
+    ctx.scheduleTask = vi.fn();
+    const result = fired(await amsgHooks.onBeforeFire(ctx));
+    expect(result.messages[0].content).not.toContain('【开口之前】');
+    expect(result.tools?.some((t) => t.function.name === AMSG_FIRE_SCHEDULE_TOOL)).toBeFalsy();
+  });
+
+  it('见面离开提醒：对照组——同样的额度下普通自排任务被连发上限拦下', async () => {
+    const { ctx } = makeCtx({
+      metadata: { amsgSelfScheduled: true },
+      charRows: rows({ settings: { maxUnansweredSends: 3 }, selfLog: selfLogWith({ unansweredSends: 3 }) }),
+    });
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ skip: true });
+  });
+
+  it('见面离开提醒：人还在见面里 → 推迟到「最后一次见到人 + 5 分钟」，不留痕', async () => {
+    const { ctx, writeState } = makeCtx({ metadata: dateLeaveMeta, charRows: rows({ presence: dateLease(NOW.getTime() - 10_000) }) });
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ defer: { afterMs: 5 * 60_000 - 10_000 } });
+    expect(writeState).not.toHaveBeenCalled();
+  });
+
+  it('见面离开提醒：走开 2 分钟（租约已过期）→ 再推 3 分钟；走开满 5 分钟 → 照发', async () => {
+    const early = makeCtx({ metadata: dateLeaveMeta, charRows: rows({ presence: dateLease(NOW.getTime() - 2 * 60_000) }) });
+    await expect(amsgHooks.onBeforeFire(early.ctx)).resolves.toEqual({ defer: { afterMs: 3 * 60_000 } });
+
+    const due = makeCtx({ metadata: dateLeaveMeta, charRows: rows({ presence: dateLease(NOW.getTime() - 5 * 60_000) }) });
+    fired(await amsgHooks.onBeforeFire(due.ctx));
+  });
+
+  it('见面离开提醒：租约被私聊盖掉（走开后开过口）→ 作废，不留回执', async () => {
+    const { ctx, writeState } = makeCtx({
+      metadata: dateLeaveMeta,
+      charRows: rows({ presence: presenceValue(NOW.getTime() - 3 * 60_000) }),
+    });
+    await expect(amsgHooks.onBeforeFire(ctx)).resolves.toEqual({ skip: true });
+    expect(skipReason(writeState)).toBeUndefined();
+  });
+
   it('用户自己排的「到点必发」不受这项影响', async () => {
     const { ctx } = makeCtx({
       metadata: { amsgExpirePolicy: 'force' },
@@ -996,9 +1176,25 @@ describe('频率与额度（到点兜底闸）', () => {
     ctx.scheduleTask = vi.fn();
     const prompt = fired(await amsgHooks.onBeforeFire(ctx)).messages[0].content;
     expect(prompt).toContain('用户给你定的规矩');
-    // 连发 3 次，正在发的这一次占 1 次 → 还能再排 2 次；今天发过 1 次 + 这一次 → 还剩 3 次。
-    expect(prompt).toContain('现在还能再排 2 次');
-    expect(prompt).toContain('今天还能再主动找对方 3 次');
+    // 连发 3 次，正在发的这一次占 1 次；今天发过 1 次 + 这一次 → 已用 2 次。
+    expect(prompt).toContain('已用 1/3 次');
+    expect(prompt).toContain('今天的主动联系：已用 2/5 次');
+  });
+
+  // 工具循环里每一步都是新请求，「本轮」会被当成眼下这一步；定时触发要从这份说明算起，
+  // 不能拿「用户最新发来的那条消息」划界——角色连着主动发的时候，用户可能根本没说话。
+  it('带工具的定时触发写明这次回复从到点这份说明算起，不带工具就不写', async () => {
+    const withTools = makeCtx({});
+    withTools.ctx.scheduleTask = vi.fn();
+    const fire = fired(await amsgHooks.onBeforeFire(withTools.ctx));
+    expect(fire.tools?.length).toBeGreaterThan(0);
+    const prompt = fire.messages[0].content;
+    expect(prompt).toContain('这次回复的范围：从你收到这份说明开始（你之前安排的主动消息到点了）');
+    expect(prompt).not.toContain('用户最新发来的那条消息');
+
+    const bare = fired(await amsgHooks.onBeforeFire(makeCtx({}).ctx));
+    expect(bare.tools ?? []).toHaveLength(0);
+    expect(bare.messages[0].content).not.toContain('这次回复的范围');
   });
 });
 
@@ -1451,6 +1647,7 @@ describe('轮次上限与上游共用同一个数', () => {
     contactName: 'Nyah',
     metadata: { charId: CHAR_ID, amsgMode: 'auto' },
     scratch,
+    readState: async () => [],
     iteration,
   }) as any;
 
@@ -1493,6 +1690,7 @@ describe('云端思考链随首条 push 回客户端', () => {
   /** 一轮 LLM：正文 + 可选的思考（放在哪个响应字段里也能挑）。 */
   interface Round {
     output: string;
+    message?: Record<string, unknown>;
     reasoning?: string;
     /** 思考放哪个字段，默认 reasoning_content。 */
     field?: 'reasoning_content' | 'reasoning' | 'thinking';
@@ -1536,6 +1734,7 @@ describe('云端思考链随首条 push 回客户端', () => {
             message: {
               content: round.output,
               ...(round.reasoning ? { [round.field ?? 'reasoning_content']: round.reasoning } : {}),
+              ...round.message,
             },
           }],
         },
@@ -1580,6 +1779,29 @@ describe('云端思考链随首条 push 回客户端', () => {
     }
     expect(payloads.map((p) => p.message)).toEqual(['在的。', '怎么啦？']);
     expect(JSON.stringify(payloads)).not.toContain('<think>');
+  });
+
+  it.each([
+    {content:[{text:'摘要',thought:true},{type:'text',text:'你好'}]},
+    {content:'你好',reasoning_content:'',reasoning_details:[{type:'reasoning.summary',summary:'摘要'}]},
+  ])('structured thoughts stay out of push messages', async message => {
+    const decision=await instantFire([{output:'摘要你好',message}]);
+    expect(decision.decision).toBe('finish');
+    expect(decision.pushPayloads.map((p:any)=>p.message)).toEqual(['你好']);
+    expect(decision.pushPayloads[0].metadata.amsgReasoning).toBe('摘要');
+  });
+
+  it('captures a trailing unfinished block without pushing it', async () => {
+    const decision=await instantFire([{output:'<think>前半段</think>你好<thinking>后半段'}]);
+    expect(decision.decision).toBe('finish');
+    expect(decision.pushPayloads.map((p:any)=>p.message)).toEqual(['你好']);
+    expect(decision.pushPayloads[0].metadata.amsgReasoning).toBe('前半段\n\n后半段');
+  });
+
+  it('does not use SDK fallback thinking as a missing answer', async () => {
+    const decision=await instantFire([{output:'只有思考没有回答',message:{content:null,reasoning:'只有思考没有回答'}}]);
+    expect(decision.decision).toBe('skip-push');
+    expect(decision.pushPayloads).toBeUndefined();
   });
 
   // 工具循环一次 fire 跑好几轮，每轮都有自己的思考。留最后一轮的：用户看到的正文就是
@@ -2885,7 +3107,7 @@ describe('自排后续任务', () => {
   it('单次 fire 排满就打回，不再调远端', async () => {
     const stash = makeStash();
     for (let i = 0; i < MAX_FIRE_SCHEDULES; i += 1) {
-      await runFireScheduleTool(stash, okSchedule, { send_at: new Date(NOW_MS + (90 + i) * 60_000).toISOString() }, NOW_MS);
+      await runFireScheduleTool(stash, okSchedule, { send_at: new Date(NOW_MS + (90 + i * 3) * 60_000).toISOString() }, NOW_MS);
     }
     okSchedule.mockClear();
     const out = await runFireScheduleTool(stash, okSchedule, { send_at: sendAt }, NOW_MS);
@@ -3257,6 +3479,122 @@ describe('fire 侧取消 / 改期任务', () => {
     expect(last.metadata.amsgUsage).toEqual({ promptTokens: 1234, completionTokens: 56 });
   });
 
+  it('排程与查记忆后的续答是一笔独立请求，多个工具不虚增调用次数', async () => {
+    const stash = makeStash({ instant: true, maxToolIterations: 5, selfScheduleAllowed: true,
+      fireToolNames: new Set(['schedule_active_message']) });
+    const common = { sessionId: 'sess_task_42', taskId: FIRE_TASK_ID, taskUuid: TASK_UUID,
+      contactName: 'Nyah', metadata: { charId: CHAR_ID, amsgMode: 'instant', amsgInstantChat: true },
+      scratch: { fire: stash }, scheduleTask: vi.fn(),
+      writeState: vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 })) };
+    const first = await amsgHooks.onLLMOutput({ ...common, iteration: 0,
+      llmResponse: {}, llmOutputText: `[[RECALL: 2026-07]]\nschedule_active_message({"send_at":"${newSendAt}"})`,
+      usage: { prompt_tokens: 1000, completion_tokens: 40 },
+    } as any) as any;
+    expect(first.decision).toBe('tool-request');
+    expect(first.toolCalls.map((call: any) => call.function.name)).toEqual(expect.arrayContaining(['recall', 'schedule_active_message']));
+    const final = await amsgHooks.onLLMOutput({ ...common, iteration: 1,
+      llmResponse: { model: 'actual-backend' }, llmOutputText: '好，到时提醒你。',
+      usage: { prompt_tokens: 1100, completion_tokens: 50, prompt_tokens_details: { cached_tokens: 900 }, provider_secret_detail: 'private' },
+    } as any) as any;
+    const calls = final.pushPayloads.at(-1).metadata.amsgModelCalls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ index: 1, causes: [], promptTokens: 1000, completionTokens: 40 });
+    expect(calls[1]).toMatchObject({ index: 2, causes: expect.arrayContaining(['recall', 'schedule']),
+      promptTokens: 1100, completionTokens: 50, cacheReadTokens: 900, backendModel: 'actual-backend' });
+    expect(JSON.stringify(calls)).not.toContain('private');
+  });
+
+  it.each([
+    ['模型失败', 'failed', 2],
+    ['工具失败', 'failed', 1],
+    ['空回复', 'skipped', 1],
+  ])('%s 时只回传实际发生的模型请求，重复收尾不重发', async (_label, status, llmCalls) => {
+    const stash = makeStash({ instant: true, maxToolIterations: 5 });
+    const writeState = vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 }));
+    await amsgHooks.onLLMOutput({
+      sessionId: 'sess_task_42', taskId: FIRE_TASK_ID, taskUuid: TASK_UUID, iteration: 0,
+      llmResponse: {}, llmOutputText: '[[RECALL: 2026-07]]', contactName: 'Nyah',
+      metadata: { charId: CHAR_ID, amsgMode: 'instant', amsgInstantChat: true },
+      scratch: { fire: stash }, usage: { prompt_tokens: 1000, completion_tokens: 30 }, writeState,
+    } as any);
+    const emitResult = vi.fn(async () => ({}));
+    const info = { status, llmCalls, sentCount: 0, outboxed: false, scratch: { fire: stash }, writeState, emitResult,
+      error: Object.assign(new Error('model rejected'), { llmStatus: 429 }) };
+    await amsgFireSettled(info as any);
+    await amsgFireSettled(info as any);
+    expect(emitResult).toHaveBeenCalledTimes(1);
+    const receipt = (emitResult.mock.calls[0] as any)[0];
+    expect(receipt).toMatchObject({ resultKind: 'instant-api-calls', taskUuid: TASK_UUID, notification: { show: false } });
+    expect(receipt.calls).toHaveLength(llmCalls);
+    expect(receipt.calls[0]).toMatchObject({ ok: true, promptTokens: 1000, completionTokens: 30 });
+    if (llmCalls === 2) {
+      expect(receipt.calls[1]).toMatchObject({ index: 2, ok: false, status: 429, causes: ['recall'] });
+      expect(receipt.calls[1].promptTokens).toBeUndefined();
+    }
+  });
+
+  it('取消租约已禁止写结果时不绕过门禁，也不让记账异常打断收尾', async () => {
+    const emitResult = vi.fn(async () => { throw Object.assign(new Error('cancelled'), { code: 'TASK_CANCELLED' }); });
+    const stash = makeStash({ instant: true, modelCalls: [
+      { index: 1, completedAt: Date.now(), causes: [], ok: true, promptTokens: 1000, completionTokens: 30 },
+    ] });
+    await expect(amsgFireSettled({ status: 'cancelled', llmCalls: 1, outboxed: false,
+      scratch: { fire: stash }, emitResult,
+      writeState: vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 })),
+    } as any)).resolves.toBeUndefined();
+    expect(emitResult).toHaveBeenCalledTimes(1);
+    expect(stash.modelCallsReceiptSent).not.toBe(true);
+  });
+
+  it('已落入消息 outbox 的回复即使推送失败也不额外回传一份调用记录', async () => {
+    const emitResult = vi.fn(async () => ({}));
+    await amsgFireSettled({ status: 'failed', llmCalls: 1, outboxed: true,
+      scratch: { fire: makeStash({ instant: true }) }, emitResult,
+      writeState: vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 })),
+    } as any);
+    expect(emitResult).not.toHaveBeenCalled();
+  });
+
+  it('多轮工具调用时按轮累加 usage 并标 amsgUsageComplete，定时主动消息同样在末条带回 amsgUsage', async () => {
+    const stash = makeStash({ instant: true, maxToolIterations: 5 });
+    const round1 = await amsgHooks.onLLMOutput({
+      sessionId: 'sess_task_42', taskId: FIRE_TASK_ID, taskUuid: TASK_UUID,
+      iteration: 0,
+      llmResponse: {}, llmOutputText: '[[RECALL: 2026-07]]', contactName: 'Nyah',
+      metadata: { charId: CHAR_ID, amsgClientTaskId: 'ct-u', amsgMode: 'instant', amsgInstantChat: true },
+      scratch: { fire: stash },
+      usage: { prompt_tokens: 1000, completion_tokens: 30 },
+      writeState: vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 })),
+    } as any) as any;
+    expect(round1.decision).toBe('tool-request');
+
+    const round2 = await amsgHooks.onLLMOutput({
+      sessionId: 'sess_task_42', taskId: FIRE_TASK_ID, taskUuid: TASK_UUID,
+      iteration: 1,
+      llmResponse: {}, llmOutputText: '想起来了，是七月那件事。', contactName: 'Nyah',
+      metadata: { charId: CHAR_ID, amsgClientTaskId: 'ct-u', amsgMode: 'instant', amsgInstantChat: true },
+      scratch: { fire: stash },
+      usage: { prompt_tokens: 1400, completion_tokens: 70 },
+      writeState: vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 })),
+    } as any) as any;
+    const last = round2.pushPayloads[round2.pushPayloads.length - 1];
+    expect(last.metadata.amsgUsage).toEqual({ promptTokens: 2400, completionTokens: 100 });
+    expect(last.metadata.amsgUsageComplete).toBe(true);
+
+    const scheduledStash = makeStash({ instant: false, selfScheduled: true });
+    const scheduledDecision = await amsgHooks.onLLMOutput({
+      sessionId: 'sess_task_43', taskId: FIRE_TASK_ID, taskUuid: TASK_UUID,
+      llmResponse: {}, llmOutputText: '忙完了吗？', contactName: 'Nyah',
+      metadata: { charId: CHAR_ID, amsgClientTaskId: 'ct-s', amsgMode: 'auto' },
+      scratch: { fire: scheduledStash },
+      usage: { prompt_tokens: 900, completion_tokens: 25 },
+      writeState: vi.fn(async () => ({ upserted: 1, skipped: 0, deleted: 0 })),
+    } as any) as any;
+    const scheduledLast = scheduledDecision.pushPayloads[scheduledDecision.pushPayloads.length - 1];
+    expect(scheduledLast.metadata.amsgUsage).toEqual({ promptTokens: 900, completionTokens: 25 });
+    expect(scheduledLast.metadata.amsgProactiveKind).toBe('self');
+  });
+
   it('取消 / 改期的账随末条 push 的 amsgTaskMutations 回客户端（首条不带）', async () => {
     const stash = makeStash({
       cancelledTasks: ['u-cancelled'],
@@ -3410,7 +3748,7 @@ describe('没发出去时写 last_skip', () => {
       choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: THINK_ONLY } }],
     };
     const runFireCapturingDiag = async (llmOutputText: string, llmResponse: unknown) => {
-      const { ctx, scratch, writeState } = makeCtx({});
+      const { ctx, scratch, readState, writeState } = makeCtx({});
       await amsgHooks.onBeforeFire(ctx);
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
@@ -3422,6 +3760,7 @@ describe('没发出去时写 last_skip', () => {
           contactName: 'Nyah',
           metadata: { charId: CHAR_ID, amsgClientTaskId: 'client-task-1', amsgMode: 'auto' },
           scratch,
+          readState,
           writeState,
         } as any);
         return warn.mock.calls.find(([tag]) => tag === '[amsg:skip-diag]')?.[1];
@@ -3462,7 +3801,7 @@ describe('没发出去时写 last_skip', () => {
   });
 
   it('正常出正文的 fire 不写 empty-generation', async () => {
-    const { ctx, scratch, writeState } = makeCtx({});
+    const { ctx, scratch, readState, writeState } = makeCtx({});
     await amsgHooks.onBeforeFire(ctx);
     await amsgHooks.onLLMOutput({
       sessionId: 'sess_task_42',
@@ -3471,6 +3810,7 @@ describe('没发出去时写 last_skip', () => {
       contactName: 'Nyah',
       metadata: { charId: CHAR_ID, amsgClientTaskId: 'client-task-1', amsgMode: 'auto' },
       scratch,
+      readState,
       writeState,
     } as any);
     const call = writeState.mock.calls.find(([, entries]) =>
@@ -3483,7 +3823,7 @@ describe('没发出去时写 last_skip', () => {
 // update-message 的可写字段里也没有它）。tool_pack 每轮聊天都重新上云，所以以它为准。
 describe('推送标题跟着当前角色名', () => {
   it('tool_pack 的 charName 盖过任务行冻结的 contactName', async () => {
-    const { ctx, scratch, writeState } = makeCtx({
+    const { ctx, scratch, readState, writeState } = makeCtx({
       charRows: [
         { key: AMSG_FIRE_PACK_KEY, value: firePackValue() },
         {
@@ -3503,6 +3843,7 @@ describe('推送标题跟着当前角色名', () => {
       contactName: 'Nyah',   // 任务行还顶着改名前的旧名字
       metadata: { charId: CHAR_ID, amsgClientTaskId: 'client-task-1', amsgMode: 'auto' },
       scratch,
+      readState,
       writeState,
     } as any) as any;
 
@@ -3548,6 +3889,23 @@ describe('stale 跳过留痕（onStaleSkip）', () => {
     expect(written!.skip.reason).toBe('stale');
     expect(written!.skip.occurrenceMs).toBe(Date.parse(occurrence));
     expect(written!.skip.staleAction).toBe('expired');
+  });
+
+  it('诊断任务过期跳过时留一条 fire-settled，不写主动消息的 last_skip', async () => {
+    const writeState = makeWriteState();
+    const runId = '11111111-1111-4111-8111-111111111111';
+    await amsgStaleSkip(
+      { id: 103, uuid: runId },
+      {
+        reason: 'stale', action: 'expired',
+        metadata: { charId: 'amsg-diagnostic', amsgKind: 'diagnostic', amsgDiagnosticRunId: runId },
+        occurrenceMs: Date.now(), skippedCount: 1, nextSendAt: null, writeState,
+      },
+    );
+    expect(lastSkipOf(writeState)).toBeNull();
+    const call = writeState.mock.calls.find(([namespace]) => namespace === 'amsg:diagnostic');
+    expect(call, '应该写过诊断记录').toBeTruthy();
+    expect(JSON.parse(String(call![1][0].value))).toMatchObject({ runId, event: 'fire-settled', status: 'skipped', reason: 'stale' });
   });
 
   it('过期没补发的那次也回一条「这次没发」的结果', async () => {
@@ -4169,6 +4527,49 @@ describe('onBeforeFire — 即时对话分支', () => {
     expect(appended.content).toContain('现在是');
     // 回归守卫：走模板渲染的话这里会出现主动消息那套措辞，用户刚说的话反而没人答
     expect(result.messages.map((m) => m.content).join('\n')).not.toContain('本次任务');
+  });
+
+  // 回归守卫：时效块（排程清单 + 额度 + 自主联系说明）曾一律贴在数组最末，压过本地放在
+  // 易变尾段末尾的「回到你自己」钢印，角色每轮都被最后一眼的排程说明牵着去排消息。
+  it('给了 timelyInsertAt 时，时效块插在本地实时状态段之前；越界退回末尾', async () => {
+    const withTail = [...CHAT_MESSAGES, { role: 'system', content: '[System: 实时状态] 回到你自己' }];
+    const runWith = async (timelyInsertAt: number) => {
+      const { ctx } = instantCtx({
+        charRows: [
+          { key: AMSG_FIRE_PACK_KEY, value: firePackValue(null, { chat: { messages: withTail, builtAt: PACK_BUILT_AT, timelyInsertAt } }) },
+          { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+        ],
+      });
+      return fired(await amsgHooks.onBeforeFire(ctx)).messages;
+    };
+
+    const placed = await runWith(2);
+    expect(placed).toHaveLength(withTail.length + 1);
+    expect(placed.slice(0, 2)).toEqual(CHAT_MESSAGES);
+    expect(placed[2].content).toContain('现在是');
+    expect(placed[3]).toEqual(withTail[2]);
+
+    for (const bad of [0, 99]) {
+      const appended = await runWith(bad);
+      expect(appended.slice(0, 3)).toEqual(withTail);
+      expect(appended[3].content).toContain('现在是');
+    }
+  });
+
+  it('即时对话带工具时写明这次回复从用户最新发来的那条消息算起', async () => {
+    const { ctx } = makeCtx({
+      charRows: [
+        { key: AMSG_FIRE_PACK_KEY, value: instantPack() },
+        { key: AMSG_TOOL_PACK_KEY, value: toolPackValue },
+      ],
+      globalRows: [{ key: AMSG_TOOL_CONFIG_KEY, value: mcpToolConfigValue({ mcpUseNativeTools: true }) }],
+      metadata: { amsgInstantChat: true, amsgTaskInstruction: undefined },
+    });
+    (ctx as any).scheduleTask = vi.fn();
+    const text = fired(await amsgHooks.onBeforeFire(ctx)).messages.map((m) => m.content).join('\n');
+    expect(text).toContain('这次回复的范围：从用户最新发来的那条消息开始');
+    expect(text.match(/这次回复的范围/g)).toHaveLength(1);
+    expect(text).not.toContain('主动消息到点了');
   });
 
   // 本地有常驻自主联系说明，云端以前只教「主动消息发完再接着说」。
@@ -5210,5 +5611,77 @@ describe('打包进来的 amsg-server 得会写 pushStatus', () => {
       `package.json 里还锁着 ${version}：那个版本的上游不写 last_error.pushStatus，`
       + '打出来的 worker 会把「推送投递」这一项一路报绿。等上游发版后升到 next.20 再打 bundle。',
     ).toBe(true);
+  });
+});
+
+// 开场那道租约门只查一次，生成要几十秒：这期间用户在本地开口的话，主动消息没看到新对话，
+// 跟本地那轮回复会同时落到聊天里各说各的。推送前要再查一次，聊上了就不发、留回执。
+describe('推送前复查：生成期间用户开口了', () => {
+  const EXPIRE_META = { amsgMode: 'auto', amsgTaskInstruction: '想到什么说什么', amsgExpirePolicy: 'expire' };
+
+  /** 跑一次 fire，在 onBeforeFire 和 onLLMOutput 之间写进一份 presence（模拟生成期间用户开口）。 */
+  const fireWithPresenceInBetween = async (metadata: Record<string, unknown>, presence?: string) => {
+    const store = makeFireStore();
+    const scratch: Record<string, unknown> = {};
+    const meta = { charId: CHAR_ID, ...metadata };
+    const emitResult = vi.fn(async () => ({}));
+    await amsgHooks.onBeforeFire({
+      task: {
+        id: FIRE_TASK_ID, uuid: TASK_UUID, contactName: 'Nyah', recurrenceType: 'none',
+        nextSendAt: FIRE_NEXT_SEND_AT, metadata: meta,
+      },
+      userId: 'u1', readState: store.readState, writeState: store.writeState,
+      now: NOW, scratch, emitResult,
+    } as any);
+    if (presence) store.rows.set(AMSG_CHAT_PRESENCE_KEY, presence);
+    const decision = await amsgHooks.onLLMOutput({
+      sessionId: `sess_task_${FIRE_TASK_ID}@1`, taskId: FIRE_TASK_ID, taskUuid: TASK_UUID,
+      llmResponse: {}, llmOutputText: '在干嘛呀', contactName: 'Nyah',
+      metadata: meta, scratch, readState: store.readState, writeState: store.writeState, emitResult,
+    } as any) as any;
+    return { decision, store, emitResult };
+  };
+
+  it('生成期间来了一条新的用户消息（租约已过期也算）→ 不发，留 last_skip 和回执', async () => {
+    // activeAt 故意很旧：只靠「最近一条用户消息变新了」判，不依赖设备时钟准不准。
+    const { decision, store, emitResult } = await fireWithPresenceInBetween(
+      EXPIRE_META,
+      presenceValue(NOW.getTime() - 10 * 60_000, { lastUserMessageAt: NOW.getTime() + 5_000 }),
+    );
+    expect(decision.decision).toBe('skip-push');
+    expect(JSON.parse(store.rows.get(AMSG_LAST_SKIP_KEY) ?? '{}').reason).toBe('chat-overlap');
+    expect(emitResult).toHaveBeenCalledWith(expect.objectContaining({ resultKind: 'fire-skipped', reason: 'chat-overlap' }));
+  });
+
+  it('生成期间开了新鲜租约（本地正在回复）→ 不发', async () => {
+    const { decision } = await fireWithPresenceInBetween(
+      EXPIRE_META,
+      presenceValue(Date.now(), { lastUserMessageAt: null }),
+    );
+    expect(decision.decision).toBe('skip-push');
+  });
+
+  it('生成期间用户进了见面 → 不发，原因记成 in-person', async () => {
+    const { decision, store, emitResult } = await fireWithPresenceInBetween(
+      EXPIRE_META,
+      presenceValue(Date.now(), { lastUserMessageAt: null, scene: 'date' }),
+    );
+    expect(decision.decision).toBe('skip-push');
+    expect(JSON.parse(store.rows.get(AMSG_LAST_SKIP_KEY) ?? '{}').reason).toBe('in-person');
+    expect(emitResult).toHaveBeenCalledWith(expect.objectContaining({ reason: 'in-person' }));
+  });
+
+  it('生成期间没人开口 → 照常发', async () => {
+    const { decision, store } = await fireWithPresenceInBetween(EXPIRE_META);
+    expect(decision.decision).toBe('finish');
+    expect(store.rows.has(AMSG_LAST_SKIP_KEY)).toBe(false);
+  });
+
+  it('到点必发（force）不复查', async () => {
+    const { decision } = await fireWithPresenceInBetween(
+      { ...EXPIRE_META, amsgExpirePolicy: 'force' },
+      presenceValue(Date.now(), { lastUserMessageAt: Date.now() }),
+    );
+    expect(decision.decision).toBe('finish');
   });
 });

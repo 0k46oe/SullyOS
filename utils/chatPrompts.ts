@@ -1,4 +1,6 @@
 import { resolveCharacterUserProfile } from './characterUserProfile';
+import { resolveCharacterUser } from './userPersona';
+import { isMonthlyRecallEnabled } from './monthlyRecall';
 import {weatherForCharacter} from './characterWeather';
 import {secretNoteContext} from './secretNote';
 import { buildCharacterResponsePrinciples } from './characterResponsePrinciples';
@@ -161,6 +163,17 @@ export const detectChatModeTransition = (messages: readonly Message[]): ChatMode
  * | 群聊背景的「约 X 分钟前」 | 打包时的「刚才」到点变成昨天 | 保留绝对时间戳 |
  * | 生活记录的代记工具说明 | 后台没有用户新说的话，记下来的一定是重复或臆造 | 不补（摘要数据仍保留） |
  * | `[schedule_message]` 教学 | 排的是浏览器里的本地定时消息，App 关着没人派发 | worker 追加自己的排程工具说明 |
+ * | 协同功能里「系统另给已有文件标题」那句 | 文件柜清单只在私聊请求里拼，模板里没有，留着这句角色会编文件或说没有 | 不补 |
+ * | 彼方称号 | 游戏内装饰信息，主动开口用不上，带上反而容易拿它开场 | 不补 |
+ *
+ * 记忆宫殿召回与门牌不在这张表里：它们照常进模板，由 buildFirePack 打包时现跑一次召回
+ * （即时对话复用本轮刚算的），只去掉按召回时刻算的「今天 / 距今约 N 天」。
+ *
+ * buildFirePack 不走 buildChatRequestPayload，后者每轮另拼的这些块也不进模板：
+ * 智能语境由 buildFirePack 调用共用渲染器补入，明确标注为最近对话分析；
+ * 下列现场块仍不进模板：
+ * 小程序 / 瑞一杯快照与串门申请（都是用户此刻开着的界面状态）、
+ * SAR 模块说明与输出容器（worker 只在即时对话里拆 SAR 信封，定时触发会把容器原样发给用户）。
  */
 export interface PromptBuildOptions {
     /** Other conversation surfaces replace only app rules; shared context and recency stay identical. */
@@ -329,7 +342,10 @@ export const ChatPrompts = {
         userProfile = resolveCharacterUserProfile(userProfile, char);
         // 主动消息的模板是最后一次聊天时打好、到点才渲染的，凡是「打包这一刻」的状态
         // 到触发时都已经过期，一律不烤进模板。见 PromptBuildOptions 的清单。
+        userProfile = resolveCharacterUser(userProfile, char);
         const forFirePack = promptOptions?.forFirePack === true;
+        const monthlyRecallEnabled = isMonthlyRecallEnabled(char);
+        const recallReference = monthlyRecallEnabled ? '和 `[[RECALL]]`' : '';
         // 即时对话：这一轮交给 worker 生成，时钟和真实世界块由它在 fire 时刻补。
         // 本地私有的易变段照常烤进去（worker 拿不到，而这一刻它们是新鲜的）。
         const timelyByWorker = promptOptions?.timelyByWorker === true;
@@ -799,7 +815,7 @@ ${notionEnabled ? `8. **📔 日记系统（你的私人 Notion 日记本）**:
    - \`[[READ_DIARY: 1月15日]]\` — 某月某日
 
    **📌 关于"翻日记"和"记忆"的关系（重要，别搞混）:**
-   - 你的记忆系统本身是完整、可靠的——回忆过去的事、回答"还记得吗"，靠的是你的记忆和 \`[[RECALL]]\`，**不需要**靠翻日记才能"想起来"。
+   - 你的记忆系统本身是完整、可靠的——回忆过去的事、回答"还记得吗"，靠的是你的记忆${recallReference}，**不需要**靠翻日记才能"想起来"。
    - 所以翻日记**不是**回忆的必经之路，更不是规则。用户提到"那天"、"之前"、"上次"、"你忘了吗"时，你直接凭记忆自然地回应即可。
    - \`[[READ_DIARY: ...]]\` 是一个小情趣：只有当你**自己**真的想重温那天亲手写下的心情、措辞或藏起来的小秘密时，才翻一翻。比如你忽然好奇当时的自己是怎么记录这件事的。
    - 一天可能有多篇日记，翻阅时系统会全部读取给你。
@@ -865,7 +881,7 @@ ${feishuEnabled ? `${notionEnabled ? '9' : '8'}. **📒 日记系统（你的飞
    - \`[[FS_READ_DIARY: 1月15日]]\` — 某月某日
 
    **📌 翻日记不是回忆的必经之路:**
-   - 你的记忆本身完整可靠，回忆过去靠记忆和 \`[[RECALL]]\` 就够了，**不需要**靠翻日记来"想起来"。用户提到"那天"、"之前"、"上次"时，直接凭记忆自然回应即可。
+   - 你的记忆本身完整可靠，回忆过去靠记忆${recallReference} 就够了，**不需要**靠翻日记来"想起来"。用户提到"那天"、"之前"、"上次"时，直接凭记忆自然回应即可。
    - \`[[FS_READ_DIARY: ...]]\` 只是一个小情趣：当你**自己**想重温那天亲手写下的心情或细节时，才翻一翻。
 ` : ''}
 ${notionNotesEnabled ? `${[notionEnabled, feishuEnabled].filter(Boolean).length + 8}. **📝 ${userProfile.name}的笔记（偷偷关心ta的小窗口）**:
@@ -1001,7 +1017,7 @@ ${xhsEnabled ? `${[notionEnabled, feishuEnabled, notionNotesEnabled].filter(Bool
         // 状态也会隐藏 date/call/story 消息，而 API 历史仍会携带它们。
         // fire_pack 不烤：打包时确实刚挂电话，但那条主动消息可能是第二天凌晨才发出去的，
         // 角色照着这句接一句「刚才电话里说的那个……」就穿帮了。
-        const returningFromMode = !forFirePack
+        const returningFromMode = !forFirePack && promptOptions?.appRules === undefined
             ? (promptOptions?.returningFromMode || detectChatModeTransition(currentMsgs))
             : null;
         if (returningFromMode) {

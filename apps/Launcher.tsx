@@ -16,6 +16,7 @@ import { getDailyScheduleForChar } from '../utils/dailySchedule';
 import { useLocalDateKey } from '../hooks/useLocalDateKey';
 import { resolveCharTimeZone } from '../utils/timezone';
 import { trackEvent } from '../utils/analytics';
+import { resolveReducedGlassCardStyle, useReducedBlur } from '../utils/blurPolicy';
 
 const CompanionHome = React.lazy(() => import('../components/os/CompanionHome'));
 const HomelyHome = React.lazy(() => import('../components/os/HomelyHome'));
@@ -130,6 +131,7 @@ const CharacterWidget = React.memo(({
     paper?: boolean,
 }) => {
     const { theme } = useOS();
+    const reducedBlur = useReducedBlur();
     const acnh = theme.skin === 'animalcrossing'; // 动森彩蛋：会"说话"的村民卡
     // 卡片底的虚化头像画在 CSS background-image 上，吃不到 TokenImg 的解析，这里自己解析一次。
     const avatarUrl = useBlobRefUrl(char?.avatar);
@@ -183,7 +185,7 @@ const CharacterWidget = React.memo(({
                     background: 'rgb(247,243,223)',
                     border: '2px solid #e8e2d6',
                     boxShadow: '0 8px 24px 0 rgba(61,52,40,0.14)',
-                } : {
+                } : reducedBlur ? resolveReducedGlassCardStyle(contentColor) : {
                     background: 'rgba(255,255,255,0.08)',
                     backdropFilter: 'blur(24px) saturate(1.4)',
                     WebkitBackdropFilter: 'blur(24px) saturate(1.4)',
@@ -191,8 +193,8 @@ const CharacterWidget = React.memo(({
                     boxShadow: '0 8px 32px rgba(0,0,0,0.15), inset 0 1px 0 rgba(255,255,255,0.08)',
                 }}
              >
-                 {/* 背景虚化角色头像（动森模式下省略，避免糊在奶油底上） */}
-                 {!acnh && !paper && avatarUrl && (
+                 {/* 背景虚化角色头像（动森与无实时模糊模式下省略） */}
+                 {!acnh && !paper && !reducedBlur && avatarUrl && (
                      <div className="absolute inset-0 opacity-25 pointer-events-none"
                          style={{
                              backgroundImage: `url(${avatarUrl})`,
@@ -1032,11 +1034,11 @@ const Launcher: React.FC<{ staticPreview?: boolean }> = ({ staticPreview = false
       )}
       
       {/* Visual Elements (Decorative Background - Static, low-cost gradients instead of blur) */}
-      {/* 动森模式跳过：这层冷蓝光斑会污染奶油底 */}
+      {/* 动森模式跳过；底部暖色光斑仅用于纸张壁纸，避免给其他壁纸染色。 */}
       {!acnh && (
       <div className="absolute inset-0 pointer-events-none">
           <div className="absolute -top-20 -right-20 w-80 h-80 rounded-full" style={{ background: paper ? 'radial-gradient(circle, rgba(255,255,255,0.22) 0%, transparent 68%)' : 'radial-gradient(circle, rgba(255,255,255,0.05) 0%, transparent 70%)' }}></div>
-          <div className="absolute -bottom-20 -left-20 w-80 h-80 rounded-full" style={{ background: paper ? 'radial-gradient(circle, rgba(123,104,78,0.06) 0%, transparent 68%)' : 'radial-gradient(circle, rgba(59,130,246,0.08) 0%, transparent 70%)' }}></div>
+          {paper && <div className="absolute -bottom-20 -left-20 w-80 h-80 rounded-full" style={{ background: 'radial-gradient(circle, rgba(123,104,78,0.06) 0%, transparent 68%)' }}></div>}
       </div>
       )}
 
@@ -1262,7 +1264,6 @@ const Launcher: React.FC<{ staticPreview?: boolean }> = ({ staticPreview = false
           onSwitchCharacter={(id) => setScheduleCharId(id)}
           schedule={scheduleData}
           activeCharacter={scheduleChar}
-          contentColor={contentColor}
       />
 
     </div>

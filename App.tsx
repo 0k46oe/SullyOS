@@ -1,3 +1,4 @@
+import UserSpaceNotice from './components/user/UserSpaceNotice';
 
 import React from 'react';
 import { OSProvider } from './context/OSContext';
@@ -6,9 +7,11 @@ import PhoneShell from './components/PhoneShell';
 import BuildBadge from './components/BuildBadge';
 import DevDebugPanel from './components/DevDebugPanel';
 import Amsg2DebugPanel from './components/Amsg2DebugPanel';
+import AmsgOwnerConflictNotice from './components/AmsgOwnerConflictNotice';
 import VRBroadcast from './components/VRBroadcast';
 import WorldBroadcast from './components/WorldBroadcast';
 import ChatBroadcast from './components/ChatBroadcast';
+import InstantChatSendHelp from './components/chat/InstantChatSendHelp';
 import WebUpdateNotice from './components/WebUpdateNotice';
 import MeetingBroadcast from './components/MeetingBroadcast';
 import { isIOSStandaloneWebApp } from './utils/iosStandalone';
@@ -47,6 +50,8 @@ const App: React.FC = () => {
                 面板自身用 portal 渲染到 body，绕开上面那层 transform 对 fixed 定位的影响。 */}
             <Amsg2DebugPanel />
             <WebUpdateNotice />
+            <AmsgOwnerConflictNotice />
+            <UserSpaceNotice />
           </OSProvider>
         </div>
       </div>
@@ -55,6 +60,7 @@ const App: React.FC = () => {
       <VRBroadcast />
       <WorldBroadcast />
       <ChatBroadcast />
+      <InstantChatSendHelp />
     </>
   );
 };

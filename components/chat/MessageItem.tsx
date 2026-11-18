@@ -2,7 +2,10 @@ import { avatarDecorationImageStyle, isAnniversaryFrame } from '../../utils/anni
 
 
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import ChatSendProgress from './ChatSendProgress';
+import type { ChatSendPhase } from '../../utils/chatSendProgress';
+import { createPortal } from 'react-dom';
 const AivenFishSaleReceipt = React.lazy(() => import('../../apps/vrWorld/AivenFishSaleReceipt').then(module => ({ default: module.AivenFishSaleReceipt })));
 import { Message, ChatTheme } from '../../types';
 import { phoneFieldToText } from '../../utils/phoneEvidence';
@@ -10,8 +13,11 @@ import { tryParseLifeSimResetCard } from '../../utils/lifeSimChatCard';
 import { VALID_INTERJECTION_TAGS, cleanVoiceMarkupForDisplay } from '../../utils/minimaxTts';
 import { stripFishCuesForDisplay } from '../../utils/fishAudioTts';
 import { formatStatCount } from '../../utils/videoParser';
+import { buildXhsNoteLink } from '../../utils/xhsNoteLink';
 import { trackEvent } from '../../utils/analytics';
 import { resolveBubbleCornerRadii, shouldHideBubbleTail } from '../../utils/bubbleAppearance';
+import { formatChatTimeDivider, formatChatTimestamp } from '../../utils/chatMessageGrouping';
+import { isReducedBlurActive } from '../../utils/blurPolicy';
 import { isImageValue, useBlobRefUrl } from '../../utils/blobRef';
 import { buildReplySnapshotContent } from '../../utils/applyAssistantPostProcessing';
 import { stripLeakedSourceTags } from '../../utils/sanitize';
@@ -32,7 +38,11 @@ export type {ThinkingChainStyleId,ThinkingChainStyleSpec} from '../../utils/psyc
 import {ChatCardSurface} from './ChatCardSurface';
 import { formatStoryDateTime, type ActiveStoryTime } from '../../utils/tavernStoryTime';
 import {FriendFeedNote} from './FriendFeedNote';
+import { ChatTranslationText } from './ChatSubtitleLayer';
+import type { ChatTranslationStyle } from '../../utils/chatTranslationStyle';
 import FriendFeedShareCard from './FriendFeedShareCard';
+import ThinkingActionsMenu from './ThinkingActionsMenu';
+import { readThinkingTranslation, thinkingTranslationPairs, type ThinkingTranslation } from '../../utils/thinkingTranslation';
 // 心象卡片的「破格」装饰：溢出卡片边框的风格化元素。
 // 必须渲染在卡片（overflow-hidden）的兄弟层、且父容器 relative + 不裁剪，才能真的探出边框。
 // 被 ThinkingChainBlock 与设置弹窗的 StylePreview 共用；compact 用于迷你预览缩小尺寸。
@@ -142,20 +152,35 @@ export const ThinkingChainBlock: React.FC<{
     styleId?: ThinkingChainStyleId;
     customColors?: { bg?: string; accent?: string; text?: string };
     onOpenSettings?: () => void;
-}> = ({ chain, styleId, customColors, onOpenSettings, initiallyExpanded=false }) => {
+    translation?: ThinkingTranslation;
+    onTranslate?: () => Promise<ThinkingTranslation>;
+}> = ({ chain, styleId, customColors, onOpenSettings, initiallyExpanded=false, translation, onTranslate }) => {
     const [expanded, setExpanded] = useState(initiallyExpanded);
+    const [actionsOpen, setActionsOpen] = useState(false);
+    const [result, setResult] = useState<ThinkingTranslation>();
+    const [translationView, setTranslationView] = useState<'translation' | 'original' | 'parallel'>('translation');
+    const [translating, setTranslating] = useState(false);
+    const [translationError, setTranslationError] = useState('');
+    const alive = useRef(true);
+    const translationBusy = useRef(false);
     const [copyState, setCopyState] = useState<'idle' | 'ready' | 'ok' | 'error'>('idle');
     const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const pointerIdRef = useRef<number | null>(null);
-    const pointerTypeRef = useRef<React.PointerEvent<HTMLDivElement>['pointerType'] | ''>('');
     const pointerStartRef = useRef({ x: 0, y: 0 });
     const longPressReadyRef = useRef(false);
     const suppressNextClickRef = useRef(false);
     const trimmed = (chain || '').trim();
+    const latestChain = useRef(trimmed);
+    latestChain.current = trimmed;
+    const translatedText = readThinkingTranslation(trimmed, result) || readThinkingTranslation(trimmed, translation);
+    const showingTranslation = !!translatedText && translationView !== 'original';
+    const pairs = useMemo(() => thinkingTranslationPairs(trimmed, readThinkingTranslation(trimmed, result) ? result : translation), [trimmed, result, translation]);
+    const showingParallel = showingTranslation && translationView === 'parallel';
+    const displayedText = showingParallel ? pairs.map(row => row.source + '\n' + row.text).join('\n\n') : (showingTranslation ? translatedText : trimmed) || trimmed;
     const spec = resolveThinkingChainStyle(styleId, customColors);
-    const firstLine = trimmed.replace(/\s+/g, ' ').slice(0, 38);
-    const hasMore = trimmed.length > 38;
+    const firstLine = displayedText.replace(/\s+/g, ' ').slice(0, 38);
+    const hasMore = displayedText.length > 38;
 
     const clearCopyTimer = () => {
         if (copyTimerRef.current) {
@@ -164,10 +189,16 @@ export const ThinkingChainBlock: React.FC<{
         }
     };
 
-    useEffect(() => () => {
-        clearCopyTimer();
-        if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+    useEffect(() => {
+        alive.current = true;
+        return () => {
+            alive.current = false;
+            clearCopyTimer();
+            if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+        };
     }, []);
+    useEffect(() => { setTranslationError(''); setTranslating(false); translationBusy.current = false; }, [trimmed]);
+    useEffect(() => { if (!actionsOpen) suppressNextClickRef.current = false; }, [actionsOpen]);
 
     if (!trimmed) return null;
 
@@ -175,14 +206,14 @@ export const ThinkingChainBlock: React.FC<{
         let success = false;
         try {
             if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
-            await navigator.clipboard.writeText(trimmed);
+            await navigator.clipboard.writeText(displayedText);
             success = true;
         } catch {
             // iOS PWA / 非安全上下文可能拒绝 Clipboard API，保留 textarea 兜底。
             let textarea: HTMLTextAreaElement | null = null;
             try {
                 textarea = document.createElement('textarea');
-                textarea.value = trimmed;
+                textarea.value = displayedText;
                 textarea.setAttribute('readonly', '');
                 textarea.style.position = 'fixed';
                 textarea.style.opacity = '0';
@@ -210,20 +241,18 @@ export const ThinkingChainBlock: React.FC<{
         if (copyState === 'ready') setCopyState('idle');
     };
 
-    // 必须由 pointerup / touchend / contextmenu 这类真实用户手势直接调用。
-    // Safari 会拒绝在长按 setTimeout 回调里发起的剪贴板写入。
-    const finishLongPressCopy = () => {
+    const finishLongPress = () => {
         if (!longPressReadyRef.current) return false;
         clearCopyTimer();
         longPressReadyRef.current = false;
         suppressNextClickRef.current = true;
-        void copyThinkingChain();
+        setCopyState('idle');
+        setActionsOpen(true);
         return true;
     };
 
     const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
         e.stopPropagation();
-        pointerTypeRef.current = e.pointerType;
         if (e.button !== 0) return;
         pointerIdRef.current = e.pointerId;
         pointerStartRef.current = { x: e.clientX, y: e.clientY };
@@ -250,7 +279,7 @@ export const ThinkingChainBlock: React.FC<{
         e.stopPropagation();
         if (pointerIdRef.current !== e.pointerId) return;
         pointerIdRef.current = null;
-        if (!finishLongPressCopy()) resetLongPress();
+        if (!finishLongPress()) resetLongPress();
     };
 
     const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -258,9 +287,25 @@ export const ThinkingChainBlock: React.FC<{
         if (pointerIdRef.current !== e.pointerId) return;
         pointerIdRef.current = null;
         clearCopyTimer();
-        // iOS 弹出原生选区时可能先派发 pointercancel，随后仍会派发 touchend。
-        // 此时保留 ready，让 touchend 仍可在真实用户手势中执行复制。
+        // iOS 长按可能先派发 pointercancel，随后仍会派发 touchend。
         if (e.pointerType !== 'touch' || !longPressReadyRef.current) resetLongPress();
+    };
+
+    const translate = async () => {
+        setActionsOpen(false); setExpanded(true);
+        if (translatedText) { setTranslationView(translationView === 'original' ? 'translation' : 'original'); return; }
+        if (!onTranslate || translationBusy.current) return;
+        const source = trimmed;
+        translationBusy.current = true;
+        setTranslating(true); setTranslationError('');
+        try {
+            const translated = await onTranslate();
+            if (alive.current && latestChain.current === source) { setResult(translated); setTranslationView('translation'); }
+        } catch (error) {
+            if (alive.current && latestChain.current === source) setTranslationError(error instanceof Error ? error.message : '翻译失败，请重试。');
+        } finally {
+            if (alive.current && latestChain.current === source) { setTranslating(false); translationBusy.current = false; }
+        }
     };
 
     const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -276,7 +321,7 @@ export const ThinkingChainBlock: React.FC<{
     const copyStatusLabel = copyState === 'ok'
         ? '已复制'
         : copyState === 'ready'
-            ? '松开复制'
+            ? '松开查看操作'
             : copyState === 'error'
                 ? '请用系统复制'
                 : expanded ? spec.silenceLabel : spec.listenLabel;
@@ -286,8 +331,8 @@ export const ThinkingChainBlock: React.FC<{
             className="sully-psyche relative mb-2 w-full max-w-full select-text cursor-pointer group"
             role="button"
             tabIndex={0}
-            aria-label="心象：点击展开，长按复制全文"
-            title="长按复制心象全文"
+            aria-label="心象：点击展开，长按选择复制或翻译"
+            title="长按选择复制或翻译"
             onClick={handleClick}
             onPointerDown={handlePointerDown}
             onPointerMove={handlePointerMove}
@@ -295,17 +340,18 @@ export const ThinkingChainBlock: React.FC<{
             onPointerCancel={handlePointerCancel}
             onTouchEnd={(e) => {
                 e.stopPropagation();
-                finishLongPressCopy();
+                finishLongPress();
             }}
             onContextMenu={(e) => {
                 e.stopPropagation();
-                // 触屏保留 Safari 原生蓝色选区与复制菜单，作为剪贴板权限受限时的兜底。
-                if (pointerTypeRef.current !== 'mouse') return;
                 e.preventDefault();
+                resetLongPress();
                 suppressNextClickRef.current = false;
-                void copyThinkingChain();
+                setActionsOpen(true);
             }}
             onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) { e.preventDefault(); setActionsOpen(true); return; }
                 if (e.key !== 'Enter' && e.key !== ' ') return;
                 e.preventDefault();
                 setExpanded(v => !v);
@@ -314,7 +360,7 @@ export const ThinkingChainBlock: React.FC<{
                 touchAction: 'pan-y',
                 userSelect: 'text',
                 WebkitUserSelect: 'text',
-                WebkitTouchCallout: 'default',
+                WebkitTouchCallout: 'none',
             }}
         >
             <div
@@ -375,7 +421,7 @@ export const ThinkingChainBlock: React.FC<{
                     >
                         {spec.titleZh}
                     </span>
-                    <span className="text-[8.5px] tracking-[0.32em] opacity-70" style={{ color: spec.text }}>
+                    <span className="sully-psyche-subtitle text-[8.5px] tracking-[0.32em] opacity-70" style={{ color: spec.text }}>
                         {spec.titleEn}
                     </span>
                     {spec.showCorners && (
@@ -387,6 +433,8 @@ export const ThinkingChainBlock: React.FC<{
                     >
                         {copyStatusLabel}
                     </span>
+                    <button type="button" aria-label="心象操作" style={{ color: spec.subtext, background: 'none', border: 0, minWidth: 28, minHeight: 28, padding: 0 }}
+                        onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); setActionsOpen(true); }}>···</button>
                 </div>
 
                 {/* 装饰横线 */}
@@ -424,18 +472,36 @@ export const ThinkingChainBlock: React.FC<{
                             }}
                             onClick={(e) => e.stopPropagation()}
                         >
-                            {trimmed}
+                            {showingParallel ? <div className="sully-psyche-parallel">{pairs.map((row, index) => <div key={index} className="sully-psyche-parallel-pair">
+                                <p className="sully-psyche-parallel-original">{row.source}</p><p className="sully-psyche-parallel-translation" lang="zh-CN">{row.text}</p>
+                            </div>)}</div> : displayedText}
                         </div>
+                        {(onTranslate || translatedText) && <div className="sully-psyche-translation-tools" style={{ color: spec.subtext }} onPointerDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()}>
+                            {translating ? <span role="status">翻译中…</span> : translatedText ? <div className="sully-psyche-view-switch" role="group" aria-label="心象显示方式">
+                                {([['translation', '译文'], ['original', '原文'], ['parallel', '中英对照']] as const).map(([mode, label]) => <button key={mode} type="button" aria-pressed={translationView === mode} onClick={() => setTranslationView(mode)}>{label}</button>)}
+                            </div> : <span>长按可复制或翻译</span>}
+                            {translationError && <span role="alert" className="sully-psyche-translation-error">{translationError}</span>}
+                        </div>}
                     </div>
                 )}
             </div>
             {/* 破格装饰渲染在卡片外层（卡片自身 overflow-hidden 裁不掉它） */}
             <PsycheDecor spec={spec} />
+            {actionsOpen && <ThinkingActionsMenu translated={showingTranslation} parallel={showingParallel} hasTranslation={!!translatedText} busy={translating}
+                onClose={() => setActionsOpen(false)} onCopy={() => { setActionsOpen(false); void copyThinkingChain(); }}
+                onTranslate={onTranslate || translatedText ? () => { void translate(); } : undefined}
+                onSettings={onOpenSettings ? () => { setActionsOpen(false); onOpenSettings(); } : undefined} />}
         </div>
     );
 };
 
 // --- Forward Card with expand/collapse ---
+const renderChatOverlayPortal = (node: React.ReactNode, anchorEl: HTMLElement | null) => {
+    if (typeof document === 'undefined') return node;
+    const mountTarget = anchorEl?.closest('.home-phone-screen') || document.body;
+    return createPortal(node, mountTarget);
+};
+
 const ForwardCard: React.FC<{
     forwardData: any;
     commonLayout: (content: React.ReactNode) => JSX.Element;
@@ -443,6 +509,7 @@ const ForwardCard: React.FC<{
     selectionMode: boolean;
 }> = ({ forwardData, commonLayout, selectionMode }) => {
     const [expanded, setExpanded] = useState(false);
+    const cardRef = useRef<HTMLDivElement | null>(null);
 
     const handleCardClick = (e: React.MouseEvent) => {
         if (selectionMode) return;
@@ -450,12 +517,12 @@ const ForwardCard: React.FC<{
         setExpanded(true);
     };
 
-    const formatTime = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    const formatTime = formatChatTimestamp;
 
     return (
         <>
             {commonLayout(
-                <div className="w-64 bg-white rounded-2xl overflow-hidden shadow-sm border border-slate-100 active:scale-[0.98] transition-transform cursor-pointer" onClick={handleCardClick}>
+                <div ref={cardRef} className="w-64 bg-white rounded-2xl overflow-hidden shadow-sm border border-slate-100 active:scale-[0.98] transition-transform cursor-pointer" onClick={handleCardClick}>
                     <div className="px-4 pt-3 pb-2 border-b border-slate-50">
                         <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4 text-primary"><path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 0 1 .865-.501 48.172 48.172 0 0 0 3.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" /></svg>
@@ -475,8 +542,8 @@ const ForwardCard: React.FC<{
             )}
 
             {/* Expanded Full-screen Overlay */}
-            {expanded && (
-                <div className="fixed inset-0 z-[100] bg-slate-50 flex flex-col animate-fade-in" style={{ paddingBottom: 'var(--safe-bottom)' }} onClick={(e) => e.stopPropagation()}>
+            {expanded && renderChatOverlayPortal(
+                <div className="fixed inset-0 z-[100] bg-slate-50 text-slate-800 flex flex-col animate-fade-in" style={{ paddingBottom: 'var(--safe-bottom)' }} onClick={(e) => e.stopPropagation()}>
                     {/* Header */}
                     <div className="pt-[calc(var(--safe-top)+0.75rem)] pb-3 px-4 bg-white border-b border-slate-100 shrink-0 flex items-center gap-3">
                         <button onClick={() => setExpanded(false)} className="p-2 -ml-2 rounded-full hover:bg-slate-100 text-slate-600">
@@ -507,7 +574,8 @@ const ForwardCard: React.FC<{
                             );
                         })}
                     </div>
-                </div>
+                </div>,
+                cardRef.current
             )}
         </>
     );
@@ -700,7 +768,7 @@ const TransferCard: React.FC<{
             {open && (
                 <div className="sully-chat-transfer-overlay fixed inset-0 z-[100] bg-black/40 backdrop-blur-sm flex items-center justify-center p-6 animate-fade-in" onClick={(e) => { e.stopPropagation(); setOpen(false); }}>
                     <div
-                        className="sully-chat-transfer-dialog w-full max-w-[320px] bg-white rounded-3xl overflow-hidden shadow-2xl"
+                        className="sully-chat-transfer-dialog w-full max-w-[320px] bg-white text-slate-800 rounded-3xl overflow-hidden shadow-2xl"
                         onClick={(e) => e.stopPropagation()}
                     >
                         {/* 顶部金额区 */}
@@ -770,6 +838,7 @@ const TransferCard: React.FC<{
 
 const Like520ChatCard: React.FC<{ data: any }> = ({ data }) => {
     const [open, setOpen] = useState(false);
+    const cardRef = useRef<HTMLDivElement | null>(null);
     const stop = (e: React.MouseEvent | React.TouchEvent) => e.stopPropagation();
     const dateStr = (() => {
         try {
@@ -782,6 +851,7 @@ const Like520ChatCard: React.FC<{ data: any }> = ({ data }) => {
         <>
             {/* 拍立得 / 复古剪贴本：照片 + 胶带 + 手写感落款 */}
             <div
+                ref={cardRef}
                 onClick={() => setOpen(true)}
                 style={{
                     width: 256,
@@ -903,8 +973,9 @@ const Like520ChatCard: React.FC<{ data: any }> = ({ data }) => {
                 </div>
             </div>
 
-            {open && (
+            {open && renderChatOverlayPortal(
                 <div
+                    className="fixed"
                     onClick={() => setOpen(false)}
                     style={{
                         position: 'fixed', inset: 0, zIndex: 9999,
@@ -981,7 +1052,8 @@ const Like520ChatCard: React.FC<{ data: any }> = ({ data }) => {
                             </div>
                         </div>
                     </div>
-                </div>
+                </div>,
+                cardRef.current
             )}
         </>
     );
@@ -1108,6 +1180,7 @@ interface MessageItemProps {
     // Translation (AI messages only, bilingual content parsed from %%BILINGUAL%%)
     translationEnabled?: boolean;
     translationExpanded?: boolean;
+    translationStyle?: ChatTranslationStyle;
     isShowingTarget?: boolean;
     onTranslateToggle?: (msgId: number) => void;
     // Voice TTS
@@ -1122,6 +1195,11 @@ interface MessageItemProps {
     bubbleVariant?: 'modern' | 'flat' | 'outline' | 'shadow' | 'wechat' | 'ios';
     messageSpacing?: 'compact' | 'default' | 'spacious';
     showTimestamp?: 'always' | 'hover' | 'never';
+    timestampPosition?: 'below' | 'top_center';
+    startsTimeSegment?: boolean;
+    timestampNow?: Date;
+    /** Only the user turn being handed to the Worker receives this prop. */
+    sendPhase?: ChatSendPhase;
     /** 酒馆角色剧情年份；有值且 showRealTime 不为 true 时，分组时间显示剧情年份 */
     storyTime?: ActiveStoryTime | null;
     /** 整页切到现实时间显示（只改显示，不改发给 AI 的内容） */
@@ -1149,6 +1227,7 @@ interface MessageItemProps {
         styleId?: ThinkingChainStyleId;
         customColors?: { bg?: string; accent?: string; text?: string };
         onOpenSettings?: () => void;
+        onTranslate?: (message: Message) => Promise<ThinkingTranslation>;
     };
 }
 
@@ -1173,6 +1252,7 @@ const MessageItem = React.memo(({
     onToggleThinkingSelect,
     translationEnabled,
     translationExpanded,
+    translationStyle = 'bubble',
     isShowingTarget,
     onTranslateToggle,
     voiceData,
@@ -1185,6 +1265,10 @@ const MessageItem = React.memo(({
     bubbleVariant = 'modern',
     messageSpacing = 'default',
     showTimestamp = 'always',
+    timestampPosition = 'below',
+    startsTimeSegment = false,
+    timestampNow,
+    sendPhase,
     storyTime = null,
     showRealTime = false,
     onToggleTimeMode,
@@ -1200,9 +1284,15 @@ const MessageItem = React.memo(({
     thinkingChainOptions,
 }: MessageItemProps) => {
     const isUser = m.role === 'user';
+    const showSendProgress = isUser && !selectionMode && !!sendPhase && sendPhase !== 'accepted' && sendPhase !== 'cancelled';
     const isSystem = m.role === 'system';
-    const spacingClass = messageSpacing === 'compact' ? (isLastInGroup ? 'mb-3' : 'mb-0.5') : messageSpacing === 'spacious' ? (isLastInGroup ? 'mb-8' : 'mb-2.5') : (isLastInGroup ? 'mb-6' : 'mb-1.5');
-    const marginBottom = spacingClass;
+    const groupBottomGap = timestampPosition === 'top_center'
+        ? (messageSpacing === 'compact' ? 'mb-2.5' : messageSpacing === 'spacious' ? 'mb-6' : 'mb-3.5')
+        : (messageSpacing === 'compact' ? 'mb-3' : messageSpacing === 'spacious' ? 'mb-8' : 'mb-6');
+    const spacingClass = isLastInGroup
+        ? groupBottomGap
+        : (messageSpacing === 'compact' ? 'mb-0.5' : messageSpacing === 'spacious' ? 'mb-2.5' : 'mb-1.5');
+    const marginBottom = showSendProgress && (timestampPosition === 'top_center' || !isLastInGroup) ? 'mb-5' : spacingClass;
     const avatarSizeClass = avatarSize === 'small' ? 'w-7 h-7' : avatarSize === 'large' ? 'w-12 h-12' : 'w-9 h-9';
     const avatarRadiusClass = avatarShape === 'square' ? 'rounded-sm' : avatarShape === 'rounded' ? 'rounded-xl' : 'rounded-full';
     const avatarSizePx = avatarSize === 'small' ? 28 : avatarSize === 'large' ? 48 : 36;
@@ -1339,7 +1429,17 @@ const MessageItem = React.memo(({
         onClick: handleClick
     };
 
-    const formatTime = (ts: number) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+    const formatTime = formatChatTimestamp;
+    const showTopTimeDivider = timestampPosition === 'top_center' && startsTimeSegment && showTimestamp !== 'never';
+    const showBelowTimestamp = timestampPosition !== 'top_center' && isLastInGroup && showTimestamp !== 'never';
+    const isWechatTopCapsule = bubbleVariant === 'wechat';
+    const timeDividerNode = showTopTimeDivider ? (
+        <div className={`sully-chat-time-divider flex justify-center w-full px-3 mt-1.5 mb-3 select-none ${showTimestamp === 'hover' ? 'opacity-0 hover:opacity-100 transition-opacity' : ''}`}>
+            <span className={`sully-chat-timestamp text-[11px] leading-tight font-normal whitespace-nowrap ${isWechatTopCapsule ? 'bg-black/[0.05] text-[#7f7f7f] px-2.5 py-[3px] rounded-[4px]' : 'text-slate-400 px-2 py-0.5 rounded-md'}`}>
+                {formatChatTimeDivider(m.timestamp, timestampNow)}
+            </span>
+        </div>
+    ) : null;
 
 /**
  * 剧情年份版本：始终写出剧情年份 + 月日 + 时刻（「3777年11月1日 14:20」）。
@@ -1544,7 +1644,7 @@ const formatTimestamp = (ts: number) => {
                                     <div className="flex items-center gap-2">
                                         <span className="text-[9px] font-bold shrink-0" style={{ color: '#9b8a8e' }}>好感度</span>
                                         <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: 'rgba(230,220,225,0.6)' }}>
-                                            <div className="h-full rounded-full" style={{ width: `${Math.min(Math.max((scoreData.finalAffinity + 100) / 200 * 100, 2), 100)}%`, background: isPositive ? 'linear-gradient(90deg, #c9b1bd, #b8909a)' : 'linear-gradient(90deg, #c8a0a8, #b87880)' }} />
+                                            <div className="sully-chat-meter-fill h-full rounded-full" style={{ width: `${Math.min(Math.max((scoreData.finalAffinity + 100) / 200 * 100, 2), 100)}%`, background: isPositive ? 'linear-gradient(90deg, #c9b1bd, #b8909a)' : 'linear-gradient(90deg, #c8a0a8, #b87880)' }} />
                                         </div>
                                         <span className="text-[9px] font-mono font-bold shrink-0" style={{ color: '#8b7a7e' }}>{scoreData.finalAffinity}</span>
                                     </div>
@@ -1618,7 +1718,7 @@ const formatTimestamp = (ts: number) => {
                     </div>
                 )}
                 <div className="flex justify-center my-6 px-10 w-full" {...interactionProps}>
-                    <div className="flex items-center gap-1.5 bg-slate-200/40 backdrop-blur-md text-slate-500 px-3 py-1 rounded-full shadow-sm border border-white/20 select-none cursor-pointer active:scale-95 transition-transform">
+                    <div className="sully-chat-system-notice flex items-center gap-1.5 bg-white/60 bg-slate-200/40 backdrop-blur-md text-slate-500 px-3 py-1 rounded-full shadow-sm border border-slate-200/70 border-white/20 select-none cursor-pointer active:scale-95 transition-transform">
                         {/* Optional Icon based on content */}
                         <img src={displayText.includes('任务') ? 'https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/2728.png' :
                         displayText.includes('纪念日') || displayText.includes('Event') ? 'https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f4c5.png' :
@@ -1632,24 +1732,29 @@ const formatTimestamp = (ts: number) => {
 
     if (m.type === 'interaction') {
         return (
-            <div className={`flex flex-col items-center ${marginBottom} w-full animate-fade-in relative transition-[padding] duration-300 ${selectionMode ? 'pl-8' : ''}`}>
-                {selectionMode && (
-                    <div className="absolute left-2 top-1/2 -translate-y-1/2 cursor-pointer z-20" onClick={() => onToggleSelect(m.id)}>
-                        <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'bg-primary border-primary' : 'border-slate-300 bg-white/80'}`}>
-                            {isSelected && <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>}
+            <>
+                {timeDividerNode}
+                <div className={`flex flex-col items-center ${marginBottom} w-full animate-fade-in relative transition-[padding] duration-300 ${selectionMode ? 'pl-8' : ''}`}>
+                    {selectionMode && (
+                        <div className="absolute left-2 top-1/2 -translate-y-1/2 cursor-pointer z-20" onClick={() => onToggleSelect(m.id)}>
+                            <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'bg-primary border-primary' : 'border-slate-300 bg-white/80'}`}>
+                                {isSelected && <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>}
+                            </div>
+                        </div>
+                    )}
+                    {timestampPosition !== 'top_center' && showTimestamp !== 'never' && (
+                        <div className={`sully-chat-timestamp text-[10px] text-slate-400 mb-1 opacity-70 ${showTimestamp === 'hover' ? 'opacity-0 hover:opacity-100 transition-opacity' : ''}`}>{formatTime(m.timestamp)}</div>
+                    )}
+                    <div className="group relative cursor-pointer active:scale-95 transition-transform" {...interactionProps}>
+                            <div className="sully-chat-poke text-[11px] text-slate-500 bg-white/60 bg-slate-200/50 backdrop-blur-sm px-4 py-1.5 rounded-full flex items-center gap-1.5 border border-slate-200/70 border-white/40 shadow-sm select-none">
+                            <img src="https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f449.png" alt="poke" className="w-4 h-4 group-hover:animate-bounce" />
+                            <span className="font-medium opacity-80">{isUser ? '你' : charName}</span>
+                            <span className="opacity-60">戳了戳</span>
+                            <span className="font-medium opacity-80">{isUser ? charName : '你'}</span>
                         </div>
                     </div>
-                )}
-                <div className="text-[10px] text-slate-400 mb-1 opacity-70">{formatTime(m.timestamp)}</div>
-                <div className="group relative cursor-pointer active:scale-95 transition-transform" {...interactionProps}>
-                        <div className="text-[11px] text-slate-500 bg-slate-200/50 backdrop-blur-sm px-4 py-1.5 rounded-full flex items-center gap-1.5 border border-white/40 shadow-sm select-none">
-                        <img src="https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f449.png" alt="poke" className="w-4 h-4 group-hover:animate-bounce" />
-                        <span className="font-medium opacity-80">{isUser ? '你' : charName}</span>
-                        <span className="opacity-60">戳了戳</span>
-                        <span className="font-medium opacity-80">{isUser ? charName : '你'}</span>
-                    </div>
                 </div>
-            </div>
+            </>
         );
     }
 
@@ -1683,6 +1788,8 @@ const formatTimestamp = (ts: number) => {
                     styleId={thinkingChainOptions?.styleId}
                     customColors={thinkingChainOptions?.customColors}
                     onOpenSettings={thinkingChainOptions?.onOpenSettings}
+                    translation={m.metadata?.thinkingChainTranslation}
+                    onTranslate={thinkingChainOptions?.onTranslate ? () => thinkingChainOptions.onTranslate!(m) : undefined}
                 />
             </div>
         </div>
@@ -1949,17 +2056,11 @@ const formatTimestamp = (ts: number) => {
     // --- XHS Card Rendering (小红书笔记卡片) ---
     if (m.type === 'xhs_card' && m.metadata?.xhsNote) {
         const note = m.metadata.xhsNote;
-        const openXhsNote = () => {
-            const nid = note.noteId || note.note_id || note.id;
-            if (!nid) return;
-            const token = note.xsecToken || note.xsec_token;
-            const url = `https://www.xiaohongshu.com/explore/${nid}${token ? `?xsec_token=${encodeURIComponent(token)}&xsec_source=pc_feed` : ''}`;
-            window.open(url, '_blank', 'noopener,noreferrer');
-        };
+        const noteUrl = buildXhsNoteLink(note, /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
+            || navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
         return commonLayout(
-            <div
-                onClick={openXhsNote}
-                className="w-64 bg-white rounded-xl overflow-hidden shadow-sm border border-slate-100 cursor-pointer active:opacity-90 transition-opacity">
+            <a href={noteUrl} target="_blank" rel="noopener noreferrer"
+                className="block no-underline w-64 bg-white rounded-xl overflow-hidden shadow-sm border border-slate-100 cursor-pointer active:opacity-90 transition-opacity">
                 {/* Cover image */}
                 {note.coverUrl ? (
                     <div className="relative w-full h-36 bg-slate-100 overflow-hidden">
@@ -2016,8 +2117,14 @@ const formatTimestamp = (ts: number) => {
                     <div className="mt-2 pt-1.5 flex items-center gap-1 text-[9px] text-slate-300">
                         <span className="text-red-400 font-bold">小红书</span> <span>·</span> <span>{note.type === 'video' ? '视频' : '笔记'}{isUser ? '分享' : '推荐'}</span>
                     </div>
+                    <div className="mt-1 text-[10px] text-slate-400"
+                        onPointerDown={e => { if (!selectionMode) e.stopPropagation(); }}
+                        onContextMenu={e => { if (!selectionMode) e.stopPropagation(); }}
+                        style={{WebkitTouchCallout:'default'}}>
+                        {noteUrl ? '点击查看原帖 · 长按此处复制链接' : '这张卡片缺少有效链接，可按标题搜索原帖'}
+                    </div>
                 </div>
-            </div>
+            </a>
         );
     }
 
@@ -2909,7 +3016,7 @@ const formatTimestamp = (ts: number) => {
                         <div className="flex items-center gap-2">
                             <span className="text-[9px] font-bold shrink-0" style={{ color: '#9b8a8e' }}>好感度</span>
                             <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: 'rgba(230,220,225,0.6)' }}>
-                                <div className="h-full rounded-full transition-all" style={{ width: `${Math.min(Math.max((scoreData.finalAffinity + 100) / 200 * 100, 2), 100)}%`, background: isPositive ? 'linear-gradient(90deg, #c9b1bd, #b8909a)' : 'linear-gradient(90deg, #c8a0a8, #b87880)' }} />
+                                <div className="sully-chat-meter-fill h-full rounded-full transition-all" style={{ width: `${Math.min(Math.max((scoreData.finalAffinity + 100) / 200 * 100, 2), 100)}%`, background: isPositive ? 'linear-gradient(90deg, #c9b1bd, #b8909a)' : 'linear-gradient(90deg, #c8a0a8, #b87880)' }} />
                             </div>
                             <span className="text-[9px] font-mono font-bold shrink-0" style={{ color: '#8b7a7e' }}>{scoreData.finalAffinity}</span>
                         </div>
@@ -3205,7 +3312,13 @@ const formatTimestamp = (ts: number) => {
         ...(bubbleVariant === 'shadow' ? { boxShadow: '0 4px 12px rgba(0,0,0,0.12)' } : {}),
         ...(bubbleVariant === 'flat' ? { boxShadow: 'none' } : {}),
         ...(bubbleVariant === 'wechat' ? { boxShadow: 'none', border: '1px solid rgba(15,23,42,0.05)' } : {}),
-        ...(bubbleVariant === 'ios' ? { boxShadow: '0 10px 24px rgba(148,163,184,0.16)', border: '1px solid rgba(255,255,255,0.75)', backdropFilter: 'blur(12px)' } : {}),
+        ...(bubbleVariant === 'ios'
+            ? {
+                  boxShadow: '0 10px 24px rgba(148,163,184,0.16)',
+                  border: '1px solid rgba(255,255,255,0.75)',
+                  ...(isReducedBlurActive() ? {} : { backdropFilter: 'blur(12px)' }),
+              }
+            : {}),
     };
 
     // --- Inline formatting parser: code → bold → italic → plain ---
@@ -3336,7 +3449,8 @@ const formatTimestamp = (ts: number) => {
 
     // 语音文字（转文字面板 / 语音条预览）显示前：先洗 MiniMax 标记，再洗鱼声情绪 cue，
     // 两家服务商的演出标记都不会漏给用户看。
-    const cleanVoiceText = (t?: string | null) => stripFishCuesForDisplay(cleanVoiceMarkupForDisplay(t ?? ''));
+    // 旧数据里口播文本可能混着整块字幕（字幕曾写进语音标签里），字幕另有一行显示，这里剥掉。
+    const cleanVoiceText = (t?: string | null) => stripFishCuesForDisplay(cleanVoiceMarkupForDisplay((t ?? '').replace(/<字幕>[\s\S]*?<\/字幕>/g, '')));
 
     // 引用快照原样存着 %%BILINGUAL%% 等原始标记（双语消息），预览前先清洗。
     // 历史快照里还可能原样躺着图片令牌 / data: / 图床 URL（用户侧引用图片消息时曾直接落库），
@@ -3441,15 +3555,16 @@ const formatTimestamp = (ts: number) => {
             {/* Layer 4: Text Content — shown when there's visible text after stripping voice tags */}
             {/* 外语语音消息把双语文字交给下方语音条渲染，顶部不再重复正文 */}
             {displayContent && !isForeignVoiceMsg && (
-            <div className="relative z-10 text-[15px] leading-relaxed whitespace-pre-wrap break-normal [overflow-wrap:anywhere] select-text" style={{ color: styleConfig.textColor }}>
+            <ChatTranslationText className="relative z-10 text-[15px] leading-relaxed whitespace-pre-wrap break-normal [overflow-wrap:anywhere] select-text" style={{ color: styleConfig.textColor }}
+                subtitle={showExpandedTranslation && translationStyle === 'subtitle' ? renderContent(langBContent) : undefined}>
                 {renderContent(displayContent)}
-                {showExpandedTranslation && (
+                {showExpandedTranslation && translationStyle !== 'subtitle' && (
                     <div className="mt-2.5 pt-2 border-t border-current/15">
                         <div className="mb-1 text-[9px] font-bold tracking-[0.16em] opacity-40 select-none">翻译</div>
                         {renderContent(langBContent)}
                     </div>
                 )}
-            </div>
+            </ChatTranslationText>
             )}
 
             {hasSarSurface && (displayContent || hasVoiceContent) && (
@@ -3677,6 +3792,11 @@ const formatTimestamp = (ts: number) => {
            prev.msg.metadata?.reviewStatus === next.msg.metadata?.reviewStatus &&
            prev.msg.metadata?.status === next.msg.metadata?.status &&
            prev.msg.metadata?.receipt === next.msg.metadata?.receipt &&
+           prev.msg.metadata?.thinkingChain === next.msg.metadata?.thinkingChain &&
+           prev.msg.metadata?.thinkingChainTranslation?.source === next.msg.metadata?.thinkingChainTranslation?.source &&
+           prev.msg.metadata?.thinkingChainTranslation?.text === next.msg.metadata?.thinkingChainTranslation?.text &&
+           prev.msg.metadata?.thinkingChainTranslation?.segments === next.msg.metadata?.thinkingChainTranslation?.segments &&
+           prev.thinkingChainOptions === next.thinkingChainOptions &&
            prev.msg.metadata?.sarModuleSurface?.surface === next.msg.metadata?.sarModuleSurface?.surface &&
            prev.isFirstInGroup === next.isFirstInGroup &&
            prev.isLastInGroup === next.isLastInGroup &&
@@ -3690,6 +3810,7 @@ const formatTimestamp = (ts: number) => {
            prev.isSelected === next.isSelected &&
            prev.translationEnabled === next.translationEnabled &&
            prev.translationExpanded === next.translationExpanded &&
+           prev.translationStyle === next.translationStyle &&
            prev.isShowingTarget === next.isShowingTarget &&
            prev.avatarShape === next.avatarShape &&
            prev.avatarSize === next.avatarSize &&

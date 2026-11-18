@@ -273,6 +273,38 @@ export const buildTaskInstruction = (mode: ActiveMsg2Mode, promptHint?: string):
   ].join('\n');
 };
 
+// ─── 离开后消息 ───
+// 每个角色最多一条云端任务：对方开口后往后推到「最后一次开口 + 等待时长」，到点前对方
+// 又说过话就由 worker 原地推迟（见 worker onBeforeFire）。到点必发，不给角色选择不说。
+
+/** 任务 metadata 上的标记与等待时长（分钟）。worker 认这两个键。 */
+export const AMSG_AWAY_MESSAGE_META = 'amsgAwayMessage';
+export const AMSG_AWAY_DELAY_META = 'amsgAwayDelayMinutes';
+
+export const buildAwayTaskInstruction = (delayMinutes: number): string => [
+  `对方已经超过 ${delayMinutes} 分钟没跟你说话了，这次是你主动去找对方。`,
+  '这次一定要发出消息：结合你们最后聊到哪儿、对方离开了多久、你自己这会儿在做什么，像真人一样自然地发一到三句私聊。',
+  '可以惦记对方去哪了、分享你刚经历的事，或者接上没聊完的话；不要像系统提醒，也不要提「多少分钟」这种计时。',
+].join('\n');
+
+// ─── 见面离开提醒 ───
+// 见面对话中途走开，过了用户设定的时长，角色在私聊里找对方一次（见 docs/date-leave-reminder.md）。
+// 任务在进入见面对话时就建好；人还在见面里（「见面中」租约在续）时 worker 把它推到「最后
+// 一次见到人 + 等待时长」，人一走开租约不再续，到点就发。走开那一刻客户端什么都不用做，
+// 切到后台后脚本被冻住也不影响。
+// 到点必发；不受连发和每日上限拦、这一轮不给排程工具：它一次离开只发一条，带不出后续。
+
+/** 任务 metadata 上的标记与等待时长（分钟）。worker 认这两个键。 */
+export const AMSG_DATE_LEAVE_META = 'amsgDateLeave';
+export const AMSG_DATE_LEAVE_DELAY_META = 'amsgDateLeaveDelayMinutes';
+
+/** 云端任务指令和本地提示共用这一段，两条路说的是同一件事。 */
+export const buildDateLeaveInstruction = (): string => [
+  '你们刚才正在线下见面，聊到一半对方忽然走开了，到现在还没回来。你拿起手机，主动给对方发私聊找人。',
+  '这次一定要发出消息：接着刚才见面时的气氛和你们聊到的地方，像真人一样自然地发一到三句。',
+  '可以问对方去哪了、是不是临时有事，说你还在等、或者先去做点别的；按你的人设和你们的关系来，不要像系统提醒，也不要提「多少分钟」这种计时。',
+].join('\n');
+
 // ─── send_at 的时间参照系 ───
 //
 // 角色在 prompt 里看到的钟是自己时区的（fire_pack 的 tzId），它写出来的 send_at

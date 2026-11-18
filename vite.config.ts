@@ -5,6 +5,7 @@ import { bakeVoiceMiddleware } from './server/bake-voice-middleware';
 import { staticCachePlugin } from './scripts/static-cache-build';
 import { homeResourcePacksPlugin } from './scripts/home-resource-packs.mjs';
 import { startupRecoveryPlugin } from './scripts/startup-recovery-plugin';
+import { pageBuildMetadataPlugin } from './scripts/build-metadata';
 import { APP_VERSION_TAG } from './utils/appVersion';
 import { tikhubMiddleware } from './server/tikhub-middleware';
 
@@ -88,6 +89,7 @@ export default defineConfig({
   plugins: [
     homeResourcePacksPlugin(),
     startupRecoveryPlugin(appBuildId),
+    pageBuildMetadataPlugin({ buildId: appBuildId, branch: gitInfo.branch, commit: gitInfo.commit, time: buildTime }),
     react(),
     staticCachePlugin({ buildId: appBuildId, appVersion: APP_VERSION_TAG }),
     {
@@ -99,11 +101,8 @@ export default defineConfig({
     },
   ],
   define: {
-    __BUILD_BRANCH__: JSON.stringify(gitInfo.branch),
-    __BUILD_COMMIT__: JSON.stringify(gitInfo.commit),
-    __BUILD_TIME__: JSON.stringify(buildTime),
+    // Keep feature gating compile-time; only descriptive release metadata moves to HTML.
     __BUILD_BADGE_VISIBLE__: JSON.stringify(showBuildBadge),
-    __APP_BUILD_ID__: JSON.stringify(appBuildId),
   },
   // GitHub Pages 发布时使用相对路径，避免仓库子路径导致资源 404
   base: process.env.GITHUB_PAGES ? './' : '/',
@@ -212,6 +211,8 @@ export default defineConfig({
             if (/[\\/]node_modules[\\/]animal-island-ui[\\/]/.test(id)) return 'vendor-island';
             if (/[\\/]node_modules[\\/]ag-psd[\\/]/.test(id)) return 'vendor-psd';
             if (/[\\/]node_modules[\\/]pdfjs-dist[\\/]/.test(id)) return 'vendor-pdf';
+            // Pure-JS gzip fallback is loaded on demand only when native CompressionStream is unavailable or produces incomplete output.
+            if (/[\\/]node_modules[\\/]fflate[\\/]/.test(id)) return 'vendor-fflate';
             // BVH imports Three: leaving it in common vendor pulls the 3D engine
             // back into desktop startup, even when application imports are lazy.
             // VRM/Three 用于按需打开的 3D 小屋及通话。单独成包，避免 3D 引擎

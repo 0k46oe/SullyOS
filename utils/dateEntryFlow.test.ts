@@ -16,14 +16,19 @@ vi.mock('../context/OSContext', async () => {
         return {
             activeCharacterId, setActiveCharacterId,
             characters: mocks.characters,
-            closeApp: vi.fn(), openApp: vi.fn(), addToast: mocks.toast, updateCharacter: mocks.updateCharacter,
+            closeApp: vi.fn(), openApp: mocks.openApp, addToast: mocks.toast, updateCharacter: mocks.updateCharacter,
             updateUserProfile: vi.fn(), userProfile: { name: '用户' }, groups: [], characterGroups: [],
-            virtualTime: { hours: 12, minutes: 0, day: 'Thu' }, apiConfig: { baseUrl: 'https://example.invalid' }, consumeDateAutoStart: vi.fn(),
+            virtualTime: { hours: 12, minutes: 0, day: 'Thu' }, apiConfig: { baseUrl: 'https://example.invalid' },
+            dateAutoStartCharId: mocks.autoStart, consumeDateAutoStart: () => { mocks.autoStart = null; },
+            suspendedDate: mocks.suspended, suspendDate: mocks.suspendDate,
+            takeSuspendedDate: () => { const taken = mocks.suspended; mocks.suspended = null; return taken; },
         };
     } };
 });
 vi.mock('../components/date/DateSession', () => ({ default: (props: any) => {
     mocks.session = props;
+    // 真组件每次渲染都把画面状态写进 snapshotRef，挂起时父组件从这里取。
+    if (props.snapshotRef) props.snapshotRef.current = { currentText: '画面上这一句' };
     return React.createElement('button', { onClick: props.onExit }, '退出见面');
 } }));
 vi.mock('../components/date/DateSettings', () => ({ default: () => null }));
@@ -52,6 +57,8 @@ beforeEach(() => {
     mocks.characters = [{ id: 'c', name: '测试角色', avatar: '', savedDateState: { currentText: '旧快照' } }];
     mocks.rows = [];
     mocks.session = null;
+    mocks.suspended = null;
+    mocks.autoStart = null;
     mocks.fetch.mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', mocks.fetch);
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;

@@ -46,6 +46,7 @@
               surface: 'rgba(255, 255, 255, 0.75)',
               'surface-glass': 'rgba(255, 255, 255, 0.35)',
             },
+            opacity: Object.fromEntries(Array.from({ length: 101 }, (_, i) => [i, (i / 100).toString()])),
             animation: {
               'fade-in': 'fadeIn 0.35s cubic-bezier(0.4, 0, 0.2, 1)',
               'slide-up': 'slideUp 0.35s cubic-bezier(0.25, 1, 0.5, 1)',
@@ -149,6 +150,8 @@
       }
       body {
         background-color: #0f1115;
+        color: #0f172a;
+        color-scheme: light;
         margin: 0;
         overflow: hidden;
         /* Critical: Prevent browser back/forward swipe navigation AND vertical rubber-banding */
@@ -172,11 +175,17 @@
       html.sully-statusbar-compact {
         --chrome-top: max(var(--safe-top), 1.5rem);
       }
+      /* 外壳本身可多画一段 home 安全区，但不能因此把根页面变成可拖动的滚动容器。 */
+      html.ios-standalone {
+        height: var(--app-visible-height, 100dvh);
+        min-height: 0;
+        overflow: hidden;
+        overscroll-behavior: none;
+      }
       body.ios-standalone {
         min-height: var(--app-height);
         height: var(--app-height);
-        overscroll-behavior-y: auto;
-        overscroll-behavior-x: none;
+        overscroll-behavior: none;
       }
       body.ios-standalone #root {
         min-height: var(--app-height);
@@ -274,7 +283,47 @@
         overflow: hidden;
         pointer-events: none;
       }
+      /* Gecko 渲染引擎与系统「减弱透明度」偏好下统一关闭实时背景采样模糊与滚动容器内的投影滤镜，
+         避免高分屏滚动时逐帧重算高斯模糊导致掉帧；各卡片与导航栏由组件同步提供高对比度半透纯色底。 */
+      html[data-reduced-blur] *,
+      html[data-reduced-blur] *::before,
+      html[data-reduced-blur] *::after {
+        -webkit-backdrop-filter: none !important;
+        backdrop-filter: none !important;
+      }
+      html[data-reduced-blur] .launcher-desktop [class*="drop-shadow"],
+      html[data-reduced-blur] .sully-chat-root [class*="drop-shadow"] {
+        filter: none !important;
+      }
+      @media (prefers-reduced-transparency: reduce) {
+        *, *::before, *::after {
+          -webkit-backdrop-filter: none !important;
+          backdrop-filter: none !important;
+        }
+        .launcher-desktop [class*="drop-shadow"],
+        .sully-chat-root [class*="drop-shadow"] {
+          filter: none !important;
+        }
+      }
+      @supports (-moz-appearance: none) {
+        *, *::before, *::after {
+          -webkit-backdrop-filter: none !important;
+          backdrop-filter: none !important;
+        }
+        .launcher-desktop [class*="drop-shadow"],
+        .sully-chat-root [class*="drop-shadow"] {
+          filter: none !important;
+        }
+      }
     </style>
+    <script>
+      (function () {
+        var ua = navigator.userAgent || '';
+        var gecko = /\bGecko\/\d/i.test(ua) && !/\blike Gecko\b/i.test(ua);
+        var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-transparency: reduce)').matches;
+        if (gecko || reduced) document.documentElement.setAttribute('data-reduced-blur', '');
+      })();
+    </script>
   <script type="importmap">
 {
   "imports": {

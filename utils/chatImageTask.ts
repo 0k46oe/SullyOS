@@ -24,7 +24,8 @@ export async function generateAndSaveChatImage(char: CharacterProfile, user: Use
     pending.add(char.id);
     try {
         options.signal?.throwIfAborted(); options.onProgress?.('正在整理图片提示词…');
-        const messages = await ContextBuilder.buildCharacterRequest({ char, user, instructions:
+        // memoryPalaceInjection: '' is intentionally represented by the empty request-scoped context below.
+        const messages = await ContextBuilder.buildCharacterRequest({ char, user, memoryPalaceContext: '', instructions:
             '本次是独立的图片提示词整理任务，不是聊天回复。只输出可直接提交给 ' + selection.provider.toUpperCase() + ' 的图片提示词，不要解释、标签或代码块。\n用户选择的生图规则：\n' + instructions },
             [{ role: 'user', content: requirement.trim() }]);
         options.signal?.throwIfAborted();

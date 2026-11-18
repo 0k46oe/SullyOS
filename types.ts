@@ -88,6 +88,7 @@ export interface ScheduleCardAppearance {
   accentColor?: string;
   /** 仅允许 .sully-schedule-* 作用域的进阶美化。 */
   customCss?: string;
+  desktopGlass?: boolean;
 }
 
 export type JournalAppearancePresetId =
@@ -191,6 +192,7 @@ export interface OSTheme {
   chatBubbleStyle?: 'modern' | 'flat' | 'outline' | 'shadow' | 'wechat' | 'ios';
   chatMessageSpacing?: 'compact' | 'default' | 'spacious';
   chatShowTimestamp?: 'always' | 'hover' | 'never';
+  chatTimestampPosition?: 'below' | 'top_center';
   chatHeaderStyle?: 'default' | 'minimal' | 'gradient' | 'wechat' | 'telegram' | 'discord' | 'pixel';
   chatInputStyle?: 'default' | 'rounded' | 'flat' | 'wechat' | 'ios' | 'telegram' | 'discord' | 'pixel';
   chatChromeStyle?: 'soft' | 'flat' | 'floating' | 'pixel';
@@ -335,6 +337,7 @@ export interface APIConfig {
   apiKey: string;
   // 可选识图中转：给不支持 image_url 的主模型补视觉能力。
   visionApi?: VisionApiConfig;
+  thinkingTranslationApi?: DialogueApiConfig;
   minimaxApiKey?: string;
   minimaxGroupId?: string;
   // 'domestic' → https://api.minimaxi.com (国内站)
@@ -393,6 +396,7 @@ export type ActiveMsg2Mode = 'fixed' | 'auto' | 'prompted';
 export type ActiveMsg2Recurrence = 'none' | 'daily' | 'weekly';
 
 export interface ActiveMsg2GlobalConfig {
+  enabled?: boolean;
   /** Native Gemini support is confirmed for this Worker URL. */
   geminiNativeSupported?: boolean;
   geminiNativeWorkerUrl?: string;
@@ -404,6 +408,8 @@ export interface ActiveMsg2GlobalConfig {
   workerUrl: string;
   /** 与 worker 约定的共享密钥；配了就每次请求带 X-Client-Token，缺/错 worker 返回 401 */
   serverToken?: string;
+  useRelay?: boolean;
+  relayToken?: string;
   /**
    * 一键部署时生成的 AMSG_MASTER_KEY（worker 侧用它加密任务内容）。
    * 存在这里只为「重装时沿用同一把」——它一换，之前加密进 D1 的任务就全解不开了，
@@ -412,6 +418,8 @@ export interface ActiveMsg2GlobalConfig {
   masterKey?: string;
   /** 上次「连接」（在 worker 端建表）成功的时间 */
   initializedAt?: number;
+  pushMode?: 'web-push' | 'third-party';
+  thirdPartyPush?: { provider: 'wxpusher' | 'bark' | 'meow'; token: string; serverUrl?: string };
   /**
    * 即时对话：聊天的每一轮都交给云端跑（POST /instant-chat），回复走推送回来。
    * 只在设置页那一处开关（开关本身还有连接 / 通知权限 / worker 能力三道门），
@@ -500,10 +508,13 @@ export interface ActiveMsg2TaskRecord {
   status: ActiveMsg2TaskStatus;
   createdAt: number;
   lastError?: string;
+  away?: boolean;
+  dateLeave?: boolean;
 }
 
 export interface ActiveMsg2CharacterConfig {
   enabled: boolean;
+  allowWithoutTimeAwareness?: boolean;
   /**
    * 即时对话按角色单独关。undefined = 跟随全局（全局即时对话开着就默认开）；
    * false = 这个角色的聊天回到本地前台生成。与 enabled（排程开关）互相独立：
@@ -618,6 +629,7 @@ export interface RealtimeConfig {
   // 天气配置
   weatherEnabled: boolean;
   weatherApiKey: string;  // OpenWeatherMap API Key（可选；留空走免 key 的 Open-Meteo）
+  weatherFreeSource?: import('./utils/weatherSources').FreeWeatherSource;
   weatherCities?: Record<string, string>; // Per-character override; missing/blank inherits weatherCity.
     weatherCity: string;    // 城市名（如 "北京"、"Beijing"）
 
@@ -2261,6 +2273,20 @@ export interface DateState {
     peekStatus: string;
     /** 当前批次解析出的观测数据（开了 OBSERVE 才有），用于恢复会话时回填 HUD */
     observation?: DateObservation;
+    lastAssistantContent?: string;
+    showingOpening?: boolean;
+    draftInput?: string;
+}
+
+export interface SuspendedDate {
+    charId: string;
+    charName: string;
+    encounterId: string;
+    peekStatus: string;
+    cameFromChat: boolean;
+    state: DateState | null;
+    suspendedAt: number;
+    pendingTurn?: Promise<unknown>;
 }
 
 // ─── 见面 · 剧情剧场 ────────────────────────────────────────────────
@@ -2334,6 +2360,7 @@ export interface StoryTheaterEntry {
     archiveAfter: number;
     /** 归档时至少留在会话里的最近楼层数；旧数据默认 5。 */
     archiveKeepRecent?: number;
+    archiveMode?: 'auto' | 'manual';
     archiveStrategy: StoryTheaterArchiveStrategy;
     archives: StoryTheaterArchive[];
     /** 从演员挂载世界书去重得到；只影响本剧情，不改外部挂载。 */
@@ -2813,6 +2840,7 @@ export interface TavernStoryTimeConfig {
 }
 
 export interface CharacterProfile {
+  userPersona?: import('./utils/userPersona').CharacterUserPersona;
   /** Local default for this character's dialogue; absent means follow Settings. Never shared in cards. */
   dialogueApi?: DialogueApiConfig;
   id: string;
@@ -2987,6 +3015,9 @@ export interface CharacterProfile {
   /** Imported author-facing card information; never executed or injected as author instructions. */
   /** Private player identity for this character; included in system backups, excluded from character shares. */
   characterUserProfile?: { enabled: boolean; name: string; bio: string };
+  monthlyRecallEnabled?: boolean;
+  awayMessage?: { enabled: boolean; delayMinutes?: number };
+  dateLeaveReminder?: { enabled: boolean; delayMinutes?: number };
   chatActionDescriptionEnabled?: boolean;
   chatImageGenerationEnabled?: boolean;
   generatedImageContextMode?: 'image' | 'prompt';
@@ -4079,6 +4110,9 @@ export interface FullBackupData {
     assets?: { id: string, data: string }[];
     galleryImages?: GalleryImage[];
     userProfile?: UserProfile;
+    userLocationSettings?: import('./utils/userLocationPrivacy').UserLocationConfig;
+    chatTranslateStyleByChar?: Record<string, 'bubble' | 'subtitle'>;
+    chatSubtitleByChar?: Record<string, import('./utils/chatTranslationStyle').ChatSubtitleSettings>;
     diaries?: DiaryEntry[];
     tasks?: Task[];
     anniversaries?: Anniversary[];

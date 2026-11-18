@@ -49,6 +49,20 @@ const quotedUserMsg = {
     timestamp: Date.now() - 1000,
 };
 
+it('关闭自主月度查阅后，即使模型输出 RECALL 也不发起第二次 API，正文仍正常落库', async () => {
+    const charId = `monthly-recall-off-${Date.now()}`;
+    const ctx = makeCtx(charId, []);
+    ctx.char.monthlyRecallEnabled = false;
+    ctx.char.memories = [{ id: 'detail', date: '2026-06-15', summary: '详细经历', mood: 'happy' }];
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('不应调用 API'));
+    try {
+        await applyAssistantPostProcessing('这件事我记得。[[RECALL: 2026-06]]', ctx);
+        expect(fetchSpy).not.toHaveBeenCalled();
+        const messages = await DB.getRecentMessagesByCharId(charId, 20);
+        expect(messages.filter(m => m.role === 'assistant').map(m => m.content)).toEqual(['这件事我记得。']);
+    } finally { fetchSpy.mockRestore(); }
+}, 20000);
+
 describe('renderAndPersist 引用解析', () => {
     it('[[QUOTE:]] 单独成行 (后跟 SEND_EMOJI + 正文) 时引用顺延到第一条文字气泡', async () => {
         const charId = `c-quote-${Date.now()}`;
@@ -841,6 +855,31 @@ describe('double-bracket sticker history output', () => {
         expect(messages.map(m => [m.type, m.content])).toEqual([
             ['text','前一句'], ['emoji','https://example.com/happy.png'], ['text','后一句'],
         ]);
+    });
+});
+
+describe('心象与正文分离', () => {
+    it.each([true,false])('trailing unfinished thinking is stored only when enabled (%s)', async enabled => {
+        const charId = `c-thought-tail-${enabled}`;
+        const ctx = makeCtx(charId,[]);
+        ctx.instantRender = true;
+        ctx.char.showThinkingChain = enabled;
+        const raw='<think mode="summary">第一段</think >你好<thinking>后半段';
+        ctx.initialData={choices:[{message:{content:raw,reasoning:'原生摘要'}}]};
+        await applyAssistantPostProcessing(raw,ctx);
+        const messages=await DB.getRecentMessagesByCharId(charId,20);
+        expect(messages.map(m=>m.content)).toEqual(['你好']);
+        expect(messages[0].metadata?.thinkingChain).toBe(enabled ? '原生摘要\n\n第一段\n\n后半段' : undefined);
+    });
+
+    it('does not hide unmarked English analytical prose', async () => {
+        const charId='c-thought-unmarked';
+        const ctx=makeCtx(charId,[]);
+        ctx.instantRender=true;
+        const raw="The patient's recollection aligns with the timeline.";
+        await applyAssistantPostProcessing(raw,ctx);
+        const messages=await DB.getRecentMessagesByCharId(charId,20);
+        expect(messages.map(m=>m.content)).toEqual([raw]);
     });
 });
 

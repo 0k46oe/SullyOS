@@ -34,6 +34,7 @@ import { readImageGenerationConfig } from './chatImageConfig';
 import { generateImageWithFallback } from './chatImageWithFallback';
 import { savePendingAutomaticImage } from './chatImageLibrary';
 import { DB } from './db';
+import { readAssistantThinking, splitInlineThinking } from './assistantThinking';
 import { ChatParser, type FrozenMusicSong } from './chatParser';
 import { resolveCharTimeZone } from './timezone';
 import { NotionManager, FeishuManager, XhsNote } from './realtimeContext';
@@ -96,8 +97,7 @@ export function buildReplySnapshotContent(msg: { type?: string; content: string 
 const normalizeAiContent = (raw: string): string => {
     let cleaned = normalizeAssistantActionFormatting(raw || '');
     // Strip hidden chain-of-thought blocks: <think> / <thinking> / <thought>
-    cleaned = cleaned.replace(/<(think|thinking|thought)>[\s\S]*?<\/\1>/gi, '');
-    cleaned = cleaned.replace(/<(?:think|thinking|thought)>[\s\S]*$/gi, '');
+    cleaned = splitInlineThinking(cleaned).content;
     cleaned = cleaned.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\]/g, '');
     cleaned = cleaned.replace(/^[\w一-龥]+:\s*/, '');
     // Strip source tags leaked from history context, including model-mutated forms such as [聊chat].
@@ -745,6 +745,7 @@ export async function applyAssistantPostProcessing(
 
     // 局部 data 副本 — 后续 2nd-pass 会覆盖, 模仿旧版的 let data 行为
     let data: any = initialData;
+    const initialRawMessage = initialData?.choices?.[0]?.message || {content:rawAiContent};
 
     let scheduleFailureNotified = false;
     // 这句话**说出口**的时刻。本地聊天没传就是「现在」；主动消息传 push 的 sentAt。
@@ -1285,7 +1286,7 @@ export async function applyAssistantPostProcessing(
                     signal: ctx.replyRun?.signal,
                 method: 'POST', headers,
                 body: JSON.stringify({ model: effectiveApi.model, messages: msgs, temperature: 0.8, max_tokens: dialogueMaxTokens(effectiveApi), stream: false })
-            }, 2, 0, { ...apiLogMeta, purpose: '写日记' }));
+            }, 2, 0, { ...apiLogMeta, purpose: '翻阅日记' }));
             updateTokenUsage(data, historyMsgCount, 'diary-fallback');
             aiContent = data.choices?.[0]?.message?.content || '';
             aiContent = await normalizeReplyContent(aiContent);

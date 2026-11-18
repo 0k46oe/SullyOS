@@ -112,6 +112,7 @@ export function resolveXhsConfig(
  */
 export interface AgenticToolChar {
     name: string;
+    monthlyRecallEnabled?: boolean;
     xhsEnabled?: boolean;
     activeMemoryMonths?: string[];
     memories?: AgenticToolMemory[];
@@ -141,7 +142,7 @@ export interface AgenticToolCtx {
 
 export type RecallResult =
     | { ok: true; alreadyActive: boolean; yearMonth: string; logsText: string | null }
-    | { ok: false; reason: 'no_logs'; yearMonth: string };
+    | { ok: false; reason: 'no_logs' | 'disabled'; yearMonth: string };
 
 /**
  * 记忆库里到底存了哪些月份（`YYYY-MM`，升序去重）。
@@ -171,6 +172,7 @@ export async function runRecall(
 ): Promise<RecallResult> {
     const { char } = ctx;
     const targetMonth = `${args.year}-${args.month.padStart(2, '0')}`;
+    if (char.monthlyRecallEnabled === false) return { ok: false, reason: 'disabled', yearMonth: targetMonth };
     const alreadyActive = !!char.activeMemoryMonths?.includes(targetMonth);
 
     if (alreadyActive) {
@@ -695,6 +697,8 @@ export async function runXhsDetail(
                     author: detailNote.author || matched?.author || '',
                     authorId: detailNote.authorId || matched?.authorId || '',
                     xsecToken: detailNote.xsecToken || detailToken || xsecToken || matched?.xsecToken,
+                    url: matched?.url || detailNote.url,
+                    xsecSource: matched?.xsecSource || detailNote.xsecSource,
                     comments: detailNote.comments || matched?.comments,
                 };
                 const index = ctx.lastXhsNotesRef.current.findIndex(n => n.noteId === args.noteId);

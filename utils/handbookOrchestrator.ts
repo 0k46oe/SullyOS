@@ -31,6 +31,7 @@ import { ContextBuilder, type CharacterContextInput } from './context';
 import { LAYOUT_TEMPLATES, pickTemplate } from './handbookLayouts';
 import { getLocalDayRange } from './localDate';
 import { normalizeMessageContent } from './messageFormat';
+import { injectMemoryPalace } from './memoryPalace/pipeline';
 
 interface ApiConfig {
     baseUrl: string;
@@ -135,7 +136,13 @@ async function callLLM(
                 temperature,
                 max_tokens: maxTokens,
             }),
-        });
+            __sullyMeta: {
+                appId: 'handbook',
+                appName: '手账',
+                ...(characterContext?.char ? { charId: characterContext.char.id, charName: characterContext.char.name } : {}),
+                purpose: '手账排版编排',
+            },
+        } as RequestInit);
         if (!response.ok) {
             console.error(`[Handbook v2] HTTP ${response.status} ${response.statusText}`);
             return null;
@@ -477,6 +484,11 @@ ${exampleSchemas}
 
 直接输出 JSON 数组。`;
 
+    // 召回结果只挂在本次请求的副本上：角色对象上不存召回，也不能读别处留下的旧值。
+    // 主调和重试共用这一份召回。
+    const recallChar = { ...char, memoryPalaceInjection: '', roomPlatesInjection: '' };
+    await injectMemoryPalace(recallChar, undefined, undefined, userProfile.name);
+
     // 一次主调 + 最多一次重试
     let attempt = 0;
     while (attempt < 2) {
@@ -485,7 +497,7 @@ ${exampleSchemas}
             ? prompt + `\n\n【⚠️ 重试】上一次响应没产出有效内容 (slotId 错 / 数组空 / sticky 没 refersTo)。再试一次, 必须返回 ${targetMin}~${targetMax} 个有效对象的数组。`
             : prompt;
         if (isRetry) console.warn(`[Handbook v2] ⟳ char "${char.name}" — 重试 (第 ${attempt + 1} 次)`);
-        const raw = await callLLM(apiConfig, finalPrompt, 0.85, 6000, { char, user: userProfile });
+        const raw = await callLLM(apiConfig, finalPrompt, 0.85, 6000, { char: recallChar, user: userProfile });
         attempt++;
         if (!raw) {
             console.error(`[Handbook v2] ✗ char "${char.name}" — LLM 返回空`);

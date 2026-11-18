@@ -10,7 +10,7 @@
 
 Geoapify 同样先检查设备定位与隐藏地点；命中隐私圈或边界精度不确定时零地图请求。圈外设备直连固定 `https://api.geoapify.com/v1/geocode/reverse`，使用 WGS84、CORS、`credentials: omit`、`cache: no-store` 与 AbortSignal，不用 Worker／代理、不加载第三方地图脚本。配置修改、切后台或超时取消；失败只输出固定错误，未授权／额度不足不回退其他服务。
 
-响应仅选国家、省市、区镇、街道、门牌及地点名称文字；不使用 `formatted` 兜底，不读取经纬度、邮编、Plus Code、电话、place_id 或完整原始数据。实际查到的 Geoapify 地址在位置提示词中标明来源，预览同一信息框显示 Geoapify 与 OpenStreetMap 链接；隐藏地点别名不标成地图查询结果。`geoapifyKey` 与隐私配置同存 `os_user_location_privacy_v1`，不进角色卡、备份、云端或 localStorage 镜像。
+响应仅选国家、省市、区镇、街道、门牌及地点名称文字；不使用 `formatted` 兜底，不读取经纬度、邮编、Plus Code、电话、place_id 或完整原始数据。实际查到的 Geoapify 地址在位置提示词中标明来源，预览同一信息框显示 Geoapify 与 OpenStreetMap 链接；隐藏地点别名不标成地图查询结果。`geoapifyKey` 与隐私配置同存 `os_user_location_privacy_v1`，随个人备份迁移，不进角色卡、Worker 状态或 localStorage 镜像。
 
 `isUserLocationLookupUrl` 对 Geoapify 固定接口直接透传原 fetch，避免坐标及 Key 进入 API 抓取、请求比较缓存和失败诊断。短缓存仍只在内存保留五分钟，复用前必须重新取定位并检查隐藏地点。没有新增定位埋点、后台轮询或轨迹。
 
@@ -45,11 +45,13 @@ Geoapify 同样先检查设备定位与隐藏地点；命中隐私圈或边界�
 
 高德模式同样先匹配本机隐藏地点，圈内不会加载查询 iframe。圈外通过其 `/v3/geocode/regeo` 的 callback（JSONP）接口直接查询，不经过 Worker／代理、不加载完整地图 SDK。查询脚本在只有 `allow-scripts`、没有 `allow-same-origin` 的 iframe 中运行，不能读取父页面的 localStorage、隐藏中心点或聊天；内层 CSP 仅允许查询高德，禁止 connect/img/form。消息回程同时校验 frame.contentWindow 和本次随机 token，成功、失败或取消后清除 frame 与监听器。
 
-手机 WGS84 坐标只在本机近似转换为高德 GCJ02 坐标，隐藏距离判断仍使用转换前的 WGS84。转换算法改编自 MIT 的 [coordtransform](https://github.com/wandergis/coordtransform)，授权声明保留在 `amapCoordinates.ts`。返回只读取 formatted_address／地址文字与 100 米内最近 POI 名称，不读取电话、经纬度、ID；位置仅作参考，具体以 user 的说明为准。Key 仅存在本机并直接提交高德，不进入角色提示词、共享配置或备份。高德查不到／Key 无效／网络阻断时位置未知，不自动切换免费服务。
+手机 WGS84 坐标只在本机近似转换为高德 GCJ02 坐标，隐藏距离判断仍使用转换前的 WGS84。转换算法改编自 MIT 的 [coordtransform](https://github.com/wandergis/coordtransform)，授权声明保留在 `amapCoordinates.ts`。返回只读取 formatted_address／地址文字与 100 米内最近 POI 名称，不读取电话、经纬度、ID；位置仅作参考，具体以 user 的说明为准。Key 保存在本机，查询时直接提交高德，并随个人备份迁移；不进入角色提示词或 Worker 状态。高德查不到／Key 无效／网络阻断时位置未知，不自动切换免费服务。
 
 BigDataCloud 会收到区域外坐标及请求 IP，并将它们用于改进其 IP 定位数据。设置里明确展示这个用途及说明链接：[服务说明](https://www.bigdatacloud.com/docs/article/why-is-reverse-geocoding-api-free)、[客户端接口](https://www.bigdatacloud.com/free-api/free-reverse-geocode-to-city-api)、[使用政策](https://www.bigdatacloud.com/docs/article/fair-use-policy-for-free-client-side-reverse-geocoding-api)。仅设备直接请求当前授权取得的位置；不在服务端调用、不自动兜底其它地图接口。
 
-隐私配置单独保存在 `os_user_location_privacy_v1`，不进入 RealtimeConfig、角色卡、整机／云端备份或 localStorage 镜像；导入备份保留本机已有定位设置，新设备导入后仍默认关闭，需重新设置隐藏地点与 Key。当前设备坐标不落库，区域外地点查询短缓存只在内存中保留最多五分钟，且每次复用前必须取得新定位并再次判断隐私圈；距旧查询位置超过 50 米则重新查询。定位请求本身并发合并，不做后台轮询或轨迹记录。
+隐私配置单独保存在 `os_user_location_privacy_v1`，不进入 RealtimeConfig、角色卡、Worker 状态或 localStorage 镜像。个人整合／文字备份（包括云端）包含开关、地图服务与 Key、隐藏地点的名称／中心／半径，以及各用户自己的可见角色范围。当前设备坐标不落库、不备份；区域外地点查询短缓存只在内存中保留最多五分钟，每次复用前必须取得新定位并再次判断隐私圈；距旧查询位置超过 50 米则重新查询。定位请求本身并发合并，不做后台轮询或轨迹记录。
+
+备份专用路径 `userLocationBackup.ts` 只导出校验后的设置白名单，未知的实时定位或查询缓存字段不会带走。单用户写入 `userLocationSettings`，多用户写入 `user-spaces.json.userLocation`，共享设置与按空间的授权分开保存；`null` 表示该空间全部角色，空数组表示无人，缺失或损坏范围不能放宽成全部。导入在任何数据写入前校验，恢复后取消旧定位请求并清内存缓存；系统定位权限仍由新设备授权，不复制旧设备当前位置。仅媒体包、没有该字段的旧包、迁入独立用户均保留目的地定位设置；旧包的缺失内容需要从原设备重新备份。设置读取失败中止导出，不能静默生成缺项备份。
 
 Umami 只在 `当前功能启用` 冷启动快照中报告「真实定位」开关（开／关／读取失败），不收位置、隐藏地点、半径或 Key，不在定位或保存时逐次打点。本地开发照常不发送统计。
 
@@ -84,10 +86,22 @@ Umami 只在 `当前功能启用` 冷启动快照中报告「真实定位」开�
 
 ## 按角色授权与天气城市（2026-10-31）
 
-真实定位 → 可见角色：可选「所有角色」或「仅选中的角色」，支持头像列表、搜索、全选和清空。旧配置不带 characterIds 时保持所有角色可见；切到仅选中时初始为空，空列表表示无人可见，新角色不会自动得到授权。列表按角色 ID 保存，损坏的范围配置按未授权处理。范围与隐私圈一起只保存在本机 `os_user_location_privacy_v1`，不进备份、云端或角色卡。
+真实定位 → 可见角色：可选「所有角色」或「仅选中的角色」，支持头像列表、搜索、全选和清空。旧配置不带 characterIds 时保持所有角色可见；切到仅选中时初始为空，空列表表示无人可见，新角色不会自动得到授权。列表按角色 ID 保存，损坏的范围配置按未授权处理。范围与隐私圈一起保存在本机 `os_user_location_privacy_v1`，随个人备份按用户恢复，不进入 Worker 状态或角色卡。
 
 聊天本地／即时对话、电话和见面在发起设备定位前检查目标角色，并在结果返回后再检查一次。未授权时不定位、不查询地图、不注入“位置未知”。后台模板也按角色控制“位置未知”，始终不包含真实位置；本机预览仍由用户主动发起，可独立于授权范围查看。所有原有隐私圈、直连地图与失败不回退规则保留。
 
 天气感知保留默认城市，并提供按角色设置城市的可折叠列表。空白或「恢复默认」沿用默认城市；配置 `RealtimeConfig.weatherCities` 按角色 ID 保存，与真实定位授权和角色时区互不关联。天气缓存按城市与 API Key 隔离；城市失败时不借用别的城市天气。前台聊天选取目标角色的有效城市；后台主动／即时消息通过 tool_config 的城市映射与任务 charId 取城，同样禁止复用其他城市快照。用户自建的主动消息 Worker 需要更新为包含此逻辑的新 bundle，旧 Worker 不识别城市映射。
 
 验收：`test/fixtures/character-awareness.html` 使用模拟角色与本地组件；`characterWeather.test.ts`、`characterAwarenessSettings.test.ts`、`userLocationContext.test.ts` 与 Worker realtimeWorld 测试覆盖选择、恢复默认、未授权零查询、在途撤权和多城市隔离。
+
+### 免费天气双源与故障切换
+
+天气 Key 留空时可选择首选免费源：**免费源 1 · Open-Meteo（默认）**、**免费源 2 · wttr.in**。偏好 `weatherFreeSource` 随实时配置保存并同步至后台 `tool_config`，旧配置或未知值按源 1。两源都查询手填的城市，与设备真实定位无关，不读取 GPS、不走公共代理。源 2 直接按城市查询，不依赖源 1 的城市接口；拒绝空路径及特殊路径，避免 wttr.in 回退按 IP 定位。接口与 JSON 格式见 [wttr.in 官方文档](https://github.com/chubin/wttr.in#json-output)，天气码按 [WorldWeatherOnline 码表](https://www.worldweatheronline.com/weather-api/api/docs/weather-icons.aspx)转换为中文，未知码保留服务商文字。
+
+「测试源 1」「测试源 2」各自只测对应服务，结果互不覆盖，单源最多等 8 秒（城市与天气共用预算，含响应体），不把另一源的成功伪装成测试成功。「预览天气（自动切换）」与聊天共用 `fetchWeatherOrThrow` 路由：所选免费源失败、超时或数据无效后尝试另一个，每源最多 4 秒；有 OWM Key 时先测 OWM，再按免费源偏好回落，每源最多 3 秒。自动流程分别最多 8/9 秒，留在后台 10 秒取数预算内。实际来源与自动切换显示在预览中；全失败保留各源原因，聊天按无天气处理，缺失数值不当成 0°C。更改城市、Key 或首选源后清除旧测试状态，忽略在途旧结果。
+
+城市和 Key 会去除首尾空格，只有空格的 Key 视为留空。Open-Meteo 城市查询无结果且输入是「北京市」这类全称时，再试不带「市」的简称；已有结果不改写，避免截断海外地名。两家服务的地名匹配与天气模型可能不同，同名城市仍建议用明确的英文名／地区限定。wttr.in 的 `nearest_area` 是气象站附近地名，显示保留用户指定的城市，不用附近站点名替代。
+
+前台缓存按城市、Key 与首选源隔离；后台快照记录城市、首选源及实际来源，切换首选源后不复用旧偏好的快照。前后台共用取数逻辑，用户自建 Worker 需更新 bundle。没有新增统计事件或上报来源／城市；测试仍只报告原有连接测试的成功／失败。
+
+超时不代表 Key 填错，也不足以判断服务全球宕机。Open-Meteo [官方说明](https://github.com/open-meteo/open-meteo/issues/1651)指出，公共出口 IP 的请求量可能触发限制；网络连通性也要在实际设备确认。`realtimeWorldCore.weather.test.ts`、`weatherSourceSettings.test.ts`、`characterWeather.test.ts`、Worker realtimeWorld 与 toolPack 测试覆盖双向回落、预算中止、单源测试、缓存与云端偏好；`test/fixtures/weather-sources.html` 默认模拟源 1 故障、源 2 成功，`?live=1` 才查询实际服务。

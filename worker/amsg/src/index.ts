@@ -1,5 +1,7 @@
 import { INSTANT_INPUT_NAMESPACE, INSTANT_INPUT_TTL_DAYS, parseInstantInputEnvelope, parseInstantInputRef } from './instantInput';
 import { installAnthropicFetch } from '../../../utils/anthropicApi';
+import { isMonthlyRecallEnabled, stripDisabledMonthlyRecall } from '../../../utils/monthlyRecall';
+import { INSTANT_API_CALLS_RESULT_KIND, makeModelCall, modelCallCauses, type AmsgModelCall, type AmsgCallCause } from '../../../utils/amsgApiCallRecords';
 
 // Stateless endpoint adapter also covers the upstream SDK's private LLM transport.
 // No request/tenant credentials are retained in the isolate.
@@ -42,13 +44,15 @@ import {
   SCHEMA_VERSION,
   summarizeErrorCause,
 } from '@rei-standard/amsg-server/cloudflare';
-import { stripReasoningTags } from '@rei-standard/amsg-shared';
+import { readAssistantMessage, readAssistantThinking, splitInlineThinking } from '../../../utils/assistantThinking';
+import { settleReproduction, traceDiagnosticTransport, writeDiagnosticStage } from './reproduction';
+import { DIAGNOSTIC_NAMESPACE, DIAGNOSTIC_RETENTION_DAYS, diagnosticRunId } from '../../../utils/amsgReproduction';
 import { AMSG_BUNDLE_VERSION } from '../../../utils/amsgBundleVersion';
 // 「上一次推送被判订阅失效」的形状，跟前端体检共用一个类型定义（那份是零依赖纯叶子；
 // 往里加任何浏览器依赖都会连累这个 bundle）。这里只产出事实，红绿灯和文案归前端。
 import type { AmsgPushGoneFailure } from '../../../utils/amsgDiagnostics';
 import type { UserProfile } from '../../../types';
-import { AMSG_JOB_NAMESPACE, AMSG_JOB_TTL_DAYS } from '../../../utils/amsgTaskKinds';
+import { AMSG_JOB_NAMESPACE, AMSG_JOB_TTL_DAYS, classifyTaskRow } from '../../../utils/amsgTaskKinds';
 import {
   FIRE_KIND_HANDLERS,
   getKindFireStash,
@@ -102,7 +106,11 @@ import {
 } from '../../../utils/amsgLimits';
 import { resolveFireSceneSong } from '../../../utils/amsgFireScene';
 import {
-  type AmsgFireSkipTaskBrief, buildFireSkipResult, shouldReportFireSkip,
+  type AmsgFireSkipTaskBrief,
+  type AmsgFireSkipUsage,
+  type AmsgProactiveKind,
+  buildFireSkipResult,
+  shouldReportFireSkip,
 } from '../../../utils/amsgFireSkipResult';
 import { buildFireTaskListBlock, currentOccurrenceMs, isPendingTask, shortTaskId } from '../../../utils/amsg2Tasks';
 import {
@@ -120,9 +128,14 @@ import {
   parseFireScheduleArgs,
   resolveFireTargetTask,
   buildTaskInstruction,
+  AMSG_AWAY_DELAY_META,
+  AMSG_AWAY_MESSAGE_META,
+  AMSG_DATE_LEAVE_META,
+  AMSG_DATE_LEAVE_DELAY_META,
 } from '../../../utils/amsgFireSchedule';
 import {
   AMSG_CHAT_PRESENCE_KEY,
+  chattedDuringFire,
   isFreshChatPresence,
   parseAmsgChatPresence,
 } from '../../../utils/amsgChatPresence';
@@ -155,6 +168,7 @@ import {
   type McpSessionState,
 } from '../../../utils/mcpFireCore';
 import { dispatchAgenticTool, type AgenticToolChar, type AgenticToolCtx } from '../../../utils/agenticTools';
+import { buildReplyScopeRule } from '../../../utils/replyScope';
 import {
   buildDuplicateToolMessage,
   buildToolResultMessage,
@@ -330,6 +344,8 @@ type ScheduleTask = (options: {
   firstSendTime: string;
   recurrenceType?: string;
   messageType?: string;
+  /** 不传就继承当前任务的。 */
+  messageSubtype?: string;
   metadata?: Record<string, unknown>;
   taskInput?: Record<string, unknown>;
   uuid?: string;
@@ -371,6 +387,7 @@ interface SessionCtx {
   avatarUrl?: string;
   metadata: Record<string, unknown>;
   scratch?: Record<string, unknown>;
+  readState: (namespace: string, options?: { key: string }) => Promise<Array<{ key: string; value: string }>>;
   writeState?: WriteState;
   storeAttachment?: StoreAttachment;
   scheduleTask?: ScheduleTask;
@@ -520,6 +537,11 @@ interface FireStash {
   /** 这条任务是不是即时对话（用户刚发完消息在等回复）；决定要不要写 outbox。 */
   instant: boolean;
   /**
+   * 推送前复查「生成期间用户开口没有」要的基准：开场时看到的最近一条真实用户消息。
+   * 只有让路型（expire）的定时任务才有；即时对话和到点必发的任务是 null，不复查。
+   */
+  overlapGuard: { lastUserMessageAt: number | null } | null;
+  /**
    * 一次性即时对话任务绑定的 `amsg:instant-input` 键（定时任务的兜底输入不在这里清）。
    * 本轮即时对话落定（送达 / skip / 取消 / 终态失败）后即刻删掉，避免每轮聊天在 D1 里
    * 留下一份 300KB~500KB 的分块历史快照等 30 天才过期，撑爆云端数据管理清单。
@@ -539,6 +561,18 @@ interface FireStash {
   emotionLatePending: boolean;
   /** 本轮可顺手清理的过期或超量 `chat_stop:<uuid>` 键。 */
   staleStoppedKeys?: string[];
+  /** 定时任务细分身份與多轮模型用量累加（供客户端写入「API 调用记录」）。 */
+  away?: boolean;
+  dateLeave?: boolean;
+  selfScheduled?: boolean;
+  llmRounds?: number;
+  llmRoundsWithUsage?: number;
+  promptTokensAcc?: number;
+  completionTokensAcc?: number;
+  /** 即时对话每次模型请求独立用量；nextCallCauses 说明下一次为什么需要继续请求。 */
+  modelCalls?: AmsgModelCall[];
+  nextCallCauses?: AmsgCallCause[];
+  modelCallsReceiptSent?: boolean;
 }
 
 const getFireStash = (scratch: Record<string, unknown> | undefined): FireStash | undefined =>
@@ -552,6 +586,12 @@ const getFireStash = (scratch: Record<string, unknown> | undefined): FireStash |
  * 取整一分钟的话，下一跳来的时候还差几秒没到期，白白多等一整跳。
  */
 const REPLY_IN_FLIGHT_DEFER_MS = 45_000;
+/** 离开后消息到点时离真正该来的时刻差不到这么多就照发（cron 一分钟一跳）。 */
+const AWAY_DUE_TOLERANCE_MS = 60_000;
+/** 上游 defer 的上限是 24 小时。 */
+const AWAY_MAX_DEFER_MS = 24 * 60 * 60_000;
+// 见面离开提醒的等待时长最短 1 分钟，人还在见面里时剩余时间可能只有十几秒，容差要比上面小得多。
+const DATE_LEAVE_DUE_TOLERANCE_MS = 5_000;
 
 /** 两个时间戳取较新的那个；两个都没有为 null。 */
 const laterOf = (a: number | null, b: number | null): number | null =>
@@ -574,6 +614,7 @@ const buildToolCtx = (
     name: pack.charName,
     xhsEnabled: pack.xhsEnabled,
     activeMemoryMonths: pack.activeMemoryMonths,
+    monthlyRecallEnabled: pack.monthlyRecallEnabled,
     memories: pack.memories,
   };
 
@@ -621,27 +662,6 @@ const fireStateError = (reason: string, detail: Record<string, unknown>): Error 
   const error = new Error(`AMSG2_FIRE_STATE_MISSING: ${reason}`);
   (error as Error & { permanent: boolean }).permanent = true;
   return error;
-};
-
-/** 内联思考块的成对标签，跟 stripReasoningTags 认的是同一批。 */
-const INLINE_THINK_RE = /<(think|thinking|thought)>([\s\S]*?)<\/\1>/gi;
-
-/**
- * 把正文里内联的思考块抄出来拼成一段（没有就是空串）。
- *
- * 只认闭合的成对标签：抄的范围要跟正文剥掉的范围对得上（stripReasoningTags 主判的就是
- * 成对标签），也跟客户端渲染那份同口径——本地的 extractThinkingChain 只在**全文一个闭合
- * 标签都没有**时才走 open-only 兜底。没闭合的那种照旧交给正文侧兜：sanitize 有自己的
- * 未闭合兜底，整段只有一个没闭合的思考块时这一轮压根不发 push。
- */
-const extractInlineThink = (text: string): string => {
-  if (!text.includes('<')) return '';
-  const blocks: string[] = [];
-  for (const match of text.matchAll(INLINE_THINK_RE)) {
-    const inner = match[2].trim();
-    if (inner) blocks.push(inner);
-  }
-  return blocks.join('\n\n');
 };
 
 /**
@@ -834,6 +854,28 @@ const writeLastSkip = async (
   }
 };
 
+const proactiveKindOf = (
+  stash: Pick<FireStash, 'away' | 'dateLeave' | 'selfScheduled'>,
+): AmsgProactiveKind => (
+  stash.away ? 'away' : stash.dateLeave ? 'dateLeave' : stash.selfScheduled ? 'self' : 'scheduled'
+);
+
+const readStashUsage = (
+  stash: Pick<FireStash, 'promptTokensAcc' | 'completionTokensAcc'>,
+): { promptTokens?: number; completionTokens?: number } | undefined => {
+  const pt = stash.promptTokensAcc;
+  const ct = stash.completionTokensAcc;
+  if (pt === undefined && ct === undefined) return undefined;
+  return {
+    ...(pt !== undefined ? { promptTokens: pt } : {}),
+    ...(ct !== undefined ? { completionTokens: ct } : {}),
+  };
+};
+
+const hasPartialStashUsage = (
+  stash: Pick<FireStash, 'llmRounds' | 'llmRoundsWithUsage'>,
+): boolean => (stash.llmRounds ?? 0) > (stash.llmRoundsWithUsage ?? 0);
+
 /**
  * 把「这次到点没发」送回客户端（见 utils/amsgFireSkipResult）。落服务端收件箱、不弹通知，
  * 客户端上线拉到后给角色留一条回执。best-effort：送不出去只是角色少知道一件事。
@@ -846,9 +888,11 @@ const emitFireSkip = async (
     occurrenceMs: number;
     reason: AmsgLastSkip['reason'];
     task?: AmsgFireSkipTaskBrief | null;
+    usage?: AmsgFireSkipUsage;
+    proactiveKind?: AmsgProactiveKind;
   },
 ): Promise<void> => {
-  if (!args.taskUuid || !shouldReportFireSkip(args.reason) || typeof emitResult !== 'function') return;
+  if (!args.taskUuid || (!shouldReportFireSkip(args.reason) && !args.usage) || typeof emitResult !== 'function') return;
   try {
     await emitResult({
       ...buildFireSkipResult({ ...args, taskUuid: args.taskUuid }),
@@ -1083,6 +1127,7 @@ export const amsgFireSettled = async (
      * 老版本上没有——那样每日计数里就只有「发了几次」，没有「调了几次模型」。
      */
     llmCalls?: unknown;
+    emitResult?: EmitResult;
     /**
      * 这一批有没有整批落进服务端收件箱（上游 amsg-server 新版才报）。落进去了就说明内容
      * 已经定了：推送这一跳就算没成，上游重试时只会原样补推、不会重新生成，客户端上线
@@ -1093,6 +1138,7 @@ export const amsgFireSettled = async (
     writeState: WriteState;
   },
 ): Promise<void> => {
+  if (await settleReproduction(info)) return;
   const stash = getFireStash(info.scratch);
   if (!stash) return;   // onBeforeFire 没走到挂 stash 那步（比如取 fire_pack 就失败了）
 
@@ -1102,6 +1148,28 @@ export const amsgFireSettled = async (
   if (cancelled) stash.selfLogTexts = null;
   const committed = !cancelled && (info.outboxed === true || stash.actionResultCommitted === true);
   const delivered = committed || (info.sentCount ?? 0) > 0;
+
+  // 成功正文/动作已在末条带上逐次用量。失败、取消、空回复也要留下已发生的调用，
+  // 走可靠结果箱补收；不把「工具失败」或「推送失败」冒充一次新的模型请求。
+  // 取消后的 emitResult 仍受 SDK 租约约束，禁止写入时只能保留未知，不绕过门禁。
+  if (stash.instant && stash.taskUuid && !committed && !stash.modelCallsReceiptSent) {
+    const calls = stash.modelCalls ?? (stash.modelCalls = []);
+    const attempted = typeof info.llmCalls === 'number' && Number.isInteger(info.llmCalls)
+      ? Math.min(info.llmCalls, 32) : calls.length;
+    while (calls.length < attempted) {
+      const status = (info.error as { llmStatus?: unknown } | null)?.llmStatus;
+      calls.push(makeModelCall({ index: calls.length + 1, completedAt: Date.now(), causes: stash.nextCallCauses ?? [], ok: false,
+        ...(typeof status === 'number' ? { status } : {}),
+      }));
+    }
+    if (calls.length && info.emitResult) {
+      try {
+        await info.emitResult({ resultKind: INSTANT_API_CALLS_RESULT_KIND, charId: stash.charId,
+          charName: stash.toolCtx.char.name, taskUuid: stash.taskUuid, calls, notification: { show: false } });
+        stash.modelCallsReceiptSent = true;
+      } catch (error) { console.warn('[amsg:usage] 逐次调用记录写入结果箱失败', error); }
+    }
+  }
 
   // 这一轮往云端回写的条目攒在一起，收尾一次写完。
   const stateWrites: Array<{ key: string; value: string | null }> = [];
@@ -1296,6 +1364,11 @@ export const amsgStaleSkip = async (
     console.log('[amsg:stale-skip] 后台任务过期跳过，不写 last_skip', {
       taskId: task?.id ?? null, kind: taskKind, action: info.action,
     });
+    // 诊断任务过期跳过也要留一条收尾记录，否则报告只能说「证据不足」。
+    const diagnosticRun = diagnosticRunId(meta);
+    if (diagnosticRun) {
+      await writeDiagnosticStage(info.writeState, diagnosticRun, 'fire-settled', { status: 'skipped', reason: info.reason, staleAction: info.action });
+    }
     return;
   }
 
@@ -1557,6 +1630,9 @@ export const runFireScheduleTool = async (
       ...(stash.scheduledTaskInput ? { taskInput: stash.scheduledTaskInput } : {}),
       recurrenceType: parsed.recurrence,
       messageType: parsed.mode,
+      // 不写的话上游会继承当前任务的 subtype：即时对话里排的后续会带上 'instant-chat'，
+      // 列表投影里就被 classifyTaskRow 当成即时对话——前端看不见、取消不了它。
+      messageSubtype: 'chat',
       uuid,
       // 角色自排的循环任务也按角色所在时区的墙钟推进，跟用户在面板排的同一套。
       tzId: stash.tz.tzId,
@@ -1937,6 +2013,11 @@ export const amsgHooks = {
     const taskPolicy = typeof taskMeta.amsgExpirePolicy === 'string'
       ? taskMeta.amsgExpirePolicy : undefined;
     const selfScheduled = taskMeta.amsgSelfScheduled === true;
+    // 离开后消息：到点必发、计入连发上限，对方又开过口就原地推迟（见 docs/away-message.md）。
+    const away = taskMeta[AMSG_AWAY_MESSAGE_META] === true;
+    // 见面离开提醒：到点必发，不受连发和每日上限拦，这一轮不给排程工具（见 docs/date-leave-reminder.md）。
+    // 原因：一次离开只发一条，生成时又排不了后续，没有离开后消息那条「越排越多」的链要拦。
+    const dateLeave = taskMeta[AMSG_DATE_LEAVE_META] === true;
     const recurring = ctx.task.recurrenceType === 'daily' || ctx.task.recurrenceType === 'weekly';
 
     // 副 API 凭据落地即取走：这一份 metadata 对象上游还要按引用往下传（onLLMOutput 的
@@ -2005,7 +2086,9 @@ export const amsgHooks = {
     const presence = parseAmsgChatPresence(
       charRows.find((r) => r.key === AMSG_CHAT_PRESENCE_KEY)?.value,
     );
-    if (!instant && policy === 'expire' && isFreshChatPresence(presence, charId, ctx.now.getTime())) {
+    // 见面中的租约不在这里推迟，交给下面的 in-person 闸作废（那里才拿得到任务概要）。
+    const inPerson = presence?.scene === 'date' && isFreshChatPresence(presence, charId, ctx.now.getTime());
+    if (!instant && policy === 'expire' && !inPerson && isFreshChatPresence(presence, charId, ctx.now.getTime())) {
       console.log('[amsg:defer]', {
         taskId: ctx.task.id,
         reason: 'reply-in-flight',
@@ -2106,6 +2189,12 @@ export const amsgHooks = {
     // 「开口之前」），这个时刻只是给它的事实之一。
     const presenceLastUserMessageAt = presence?.charId === charId ? presence.lastUserMessageAt : null;
     const lastUserMessageAt = laterOf(pack.lastUserMessageAt ?? null, presenceLastUserMessageAt);
+    // 已落库的最近一次在场互动：除了线上真实用户发言，也认云端快照里的线下见面/通话记录
+    // （pack.lastAwayAnchorAt），即使用户在见面阅读模式里删掉了自己的推进词也不会退回旧时间。
+    const lastInteractionAt = laterOf(pack.lastAwayAnchorAt ?? null, lastUserMessageAt);
+    // 离开后消息推迟判定额外把当前新鲜的见面租约（inPerson → presence.activeAt）算进去：
+    // 人正停在见面界面里（哪怕刚进画面还没打字）时，绝不当面弹出离开后消息。
+    const awayAnchorAt = laterOf(lastInteractionAt, inPerson && presence ? presence.activeAt : null);
     // 两个来源分别留一行，便于排查 fire_pack / presence 是否落后于真实对话。
     // 字段全是时间戳与枚举，不含正文、不含角色名。
     if (!instant) {
@@ -2116,8 +2205,39 @@ export const amsgHooks = {
         occurrenceMs,
         nowMs: ctx.now.getTime(),
         packLastUserMessageAt: pack.lastUserMessageAt ?? null,
+        packLastAwayAnchorAt: pack.lastAwayAnchorAt ?? null,
         presenceLastUserMessageAt,
       });
+    }
+
+    // 见面离开提醒：按「见面中」租约最后一次续上的时刻算该什么时候发。人还在见面里（或刚走开）
+    // 就推迟到「最后一次见到人 + 等待时长」，不消费任务、不占重试、不留痕。租约行被私聊那边
+    // 盖成了聊天场景，说明走开之后已经在私聊里开过口，这次离开就结束了：按取消处理，不留回执
+    // （客户端开口时会先取消它，这里兜住取消没发出去的情况）。
+    if (!instant && dateLeave && presence?.charId === charId) {
+      if (presence.scene !== 'date') {
+        console.log('[amsg:date-leave-returned]', { taskId: ctx.task.id, charId, presenceActiveAt: presence.activeAt });
+        return { skip: true } as const;
+      }
+      const dueAt = presence.activeAt + Number(taskMeta[AMSG_DATE_LEAVE_DELAY_META]) * 60_000;
+      const waitMs = Number.isFinite(dueAt) ? dueAt - ctx.now.getTime() : 0;
+      if (waitMs > DATE_LEAVE_DUE_TOLERANCE_MS) {
+        console.log('[amsg:defer]', { taskId: ctx.task.id, reason: 'date-leave-not-due', dueAt });
+        return { defer: { afterMs: Math.min(waitMs, AWAY_MAX_DEFER_MS) } } as const;
+      }
+    }
+
+    // 离开后消息按「最近一次在场互动 + 等待时长」触发。客户端只在排期差得多时才去改期，
+    // 差的那点在这里补：等待时长内有过聊天、见面或通话（含此刻正在见面），就推迟到该来的时候，
+    // 不消费任务、不占重试。
+    if (!instant && away) {
+      const delayMs = Number(taskMeta[AMSG_AWAY_DELAY_META]) * 60_000;
+      const dueAt = awayAnchorAt != null && delayMs > 0 ? awayAnchorAt + delayMs : null;
+      const waitMs = dueAt == null ? 0 : dueAt - ctx.now.getTime();
+      if (waitMs > AWAY_DUE_TOLERANCE_MS) {
+        console.log('[amsg:defer]', { taskId: ctx.task.id, reason: 'away-not-due', dueAt });
+        return { defer: { afterMs: Math.min(waitMs, AWAY_MAX_DEFER_MS) } } as const;
+      }
     }
 
     // 任务指令缺失（开发期旧格式任务）：不能用默认 auto 指令凑一个渲染——那会把
@@ -2177,7 +2297,7 @@ export const amsgHooks = {
       ctx.now.getTime(),
       typeof ctx.task.uuid === 'string' && ctx.task.uuid ? stoppedReplyKey(ctx.task.uuid) : null,
     );
-    const selfLog = reconcileSelfLogWithPack(storedSelfLog, pack, lastUserMessageAt);
+    const selfLog = reconcileSelfLogWithPack(storedSelfLog, pack, lastInteractionAt);
     // 这条任务的概要：到点被拦下时随「这次没发」一起送回客户端。
     const taskBrief = findTaskBrief([...pack.pendingTasks, ...selfLog.tasks], ctx.task.uuid);
 
@@ -2203,8 +2323,19 @@ export const amsgHooks = {
       return { skip: true } as const;
     }
 
+    // 用户正在和这个角色见面：人就在面前，这时候弹手机消息会穿帮。直接作废、不推迟——
+    // 推迟到见面结束再发，角色每次都得编个「刚才忘了说」来圆。回执送回客户端，见面的
+    // 下一轮当成可提可不提的小事交给角色。到点必发（force）的照发。
+    if (!instant && policy === 'expire' && inPerson) {
+      console.log('[amsg:in-person-skip]', { taskId: ctx.task.id, charId });
+      await recordSkip(ctx, charId, 'in-person', occurrenceMs, taskBrief);
+      return { skip: true } as const;
+    }
+
     const maxUnansweredSends = limits.maxUnansweredSends;
-    if (!instant && selfScheduled
+    // 离开后消息也归它管：它发出去就算一次「没回时找你」，后面角色自排的接着往上数。
+    // 原因：它这一轮能顺手再排下一条，不放进同一个计数，用户不回时会一路排下去。
+    if (!instant && (selfScheduled || away)
       && countUnansweredSends(selfLog) >= maxUnansweredSends) {
       console.log('[amsg:unanswered-limit-skip]', {
         taskId: ctx.task.id,
@@ -2252,7 +2383,7 @@ export const amsgHooks = {
     const dailyDay = dayKeyInZone(nowMs, pack.userTzId);
     const dailySends = parseDailySends(charRows.find((r) => r.key === AMSG_DAILY_SENDS_KEY)?.value);
     const sentToday = sendsOnDay(dailySends, dailyDay);
-    if (!instant && sentToday >= limits.dailySendCap) {
+    if (!instant && !dateLeave && sentToday >= limits.dailySendCap) {
       console.log('[amsg:daily-limit-skip]', {
         taskId: ctx.task.id, charId, day: dailyDay, sentToday, cap: limits.dailySendCap,
       });
@@ -2274,7 +2405,7 @@ export const amsgHooks = {
         for (const row of page.tasks) {
           const meta = row.metadata ?? {};
           if ((row.charId ?? meta.charId) !== charId || row.status !== 'pending' || !row.uuid || !row.nextSendAt
-            || meta.amsgInstantChat === true || meta.amsgKind || row.messageSubtype === 'instant-chat') continue;
+            || classifyTaskRow(row) !== 'scheduled') continue;
           const old = known.get(row.uuid);
           live.push({
             ...old,
@@ -2303,7 +2434,8 @@ export const amsgHooks = {
     // amsg2ToolsInjected——用户显式关掉的功能不能被云端聊天轮绕开重排任务。
     // 必填字段（parseFirePack 把关），不做缺省——这道闸缺省放行就是 fail-open。
     // limits 那份更新得更快（关 2.0 时第一个写的就是它），任一说关就是关。
-    const selfScheduleAllowed = !scheduleOff;
+    // 见面离开提醒这一轮也不给：见上面 dateLeave 处的说明。
+    const selfScheduleAllowed = !scheduleOff && !dateLeave;
 
     // 老 worker 部署（amsg-server < 2.6.0-next.9）没有这个口子。教了也排不成，
     // 只会让角色说「我等下再找你」然后没有下文——干脆不教。
@@ -2367,10 +2499,15 @@ export const amsgHooks = {
       // （resolveFireSceneSong 与 renderFireSceneBlock 共用判定），冻的必然是正文里那首。
       sceneSong: resolveFireSceneSong(pack.scene, ctx.now.getTime(), tz),
       instant,
+      // 见面离开提醒也查：生成期间回到见面或开了口，人已经回来了，这条就不发。
+      overlapGuard: !instant && (policy === 'expire' || dateLeave) ? { lastUserMessageAt } : null,
       instantInputKey,
       // 下面即时对话那一支起跑（要等请求消息拼完才知道给评估喂什么）。
       emotionEvalPromise: null,
       emotionLatePending: false,
+      away,
+      dateLeave,
+      selfScheduled,
     };
     ctx.scratch.fire = stash;
 
@@ -2426,7 +2563,7 @@ export const amsgHooks = {
     // 不然一边声明成 tools、一边教语法，模型会两种都写一遍。
     // 时间上下文让 send_at 的示例是「明天这个点」的裸墙钟，别再教模型写 offset。
     //
-    // 块尾接「用户给你定的规矩」：还能再排几条、最早排到几点、今天还剩几条。额度摆在它
+    // 块尾接「用户给你定的规矩」：连发、今天、任务名额各报「已用/上限」，外加最早排到几点。额度摆在它
     // 面前，比让它排了再被打回省一轮；真超了照样由排程工具打回。
     const limitsBrief = canSelfSchedule
       ? buildLimitsBrief({
@@ -2460,6 +2597,10 @@ export const amsgHooks = {
         ? [buildFireCancelTool(), buildFireRenewTool({ nowMs: ctx.now.getTime(), tz })]
         : []),
     ];
+    // 带工具时说清「这次回复」从哪儿算起：即时对话是用户那条消息，定时触发是这份说明本身。
+    const replyScopeBlock = fireTools.length > 0 || mcpBlock || scheduleBlock
+      ? `\n${buildReplyScopeRule(instant ? 'user' : 'scheduled')}\n`
+      : '';
     // 非 MCP 的声明名单独留一份给 onLLMOutput 认领 native 调用用（见 FireStash.fireToolNames）。
     stash.fireToolNames = new Set(fireTools
       .map((t) => t?.function?.name)
@@ -2468,7 +2609,7 @@ export const amsgHooks = {
     // 而上游只有内部默认值、没导出常量，各写各的迟早对不上。
     // tools 由 amsg-server 带 agentic-fire-tools feature 的版本起透传给每轮 LLM 请求。
     stash.allowedToolNames = new Set([
-      ...DATA_TOOL_NAMES,
+      ...DATA_TOOL_NAMES.filter(name => name !== 'recall' || isMonthlyRecallEnabled(stash.toolCtx.char)),
       ...(mcpResolve ? [...mcpResolve.keys()].map(name => `${MCP_FIRE_NAME_PREFIX}${name}`) : []),
       ...(canSelfSchedule ? [AMSG_FIRE_SCHEDULE_TOOL] : []),
       ...(canManageTasks ? [AMSG_FIRE_CANCEL_TOOL, AMSG_FIRE_RENEW_TOOL] : []),
@@ -2493,9 +2634,16 @@ export const amsgHooks = {
         blocks: [
           realtimeWorldBlock,
           renderSelfLogBlock(selfLog, ctx.now.getTime(), tz, maxUnansweredSends),
-          taskListBlock, mcpBlock, scheduleBlock,
+          taskListBlock, mcpBlock, scheduleBlock, replyScopeBlock,
         ],
       });
+      const chatMessages = pack.chat!.messages;
+      // 时效块（排程清单/额度/时钟等）插在本地「实时状态」段前面，与本地路径同位；
+      // 旧前端没给下标或下标越界时追加到末尾。
+      const insertAt = pack.chat!.timelyInsertAt;
+      const timelyAt = Number.isInteger(insertAt) && insertAt! >= 1 && insertAt! <= chatMessages.length
+        ? insertAt!
+        : chatMessages.length;
       const instantMessages = [
         // content 原样透传，一个字都不动：带图片的消息本地就是结构化分段
         // （`[{type:'text'},{type:'image_url'}]`），上游把这个数组整个丢进
@@ -2503,8 +2651,9 @@ export const amsgHooks = {
         // `messages: llmMessages`，不看 content 的类型）。这里但凡 String() 一下，
         // 模型收到的就是「[object Object]」而不是那张图。
         // 每条重新包一层对象只是不把 pack 上那份交出去，content 仍是同一个引用。
-        ...pack.chat!.messages.map((m) => ({ role: m.role, content: m.content })),
+        ...chatMessages.slice(0, timelyAt).map((m) => ({ role: m.role, content: m.content })),
         ...(timelyBlock ? [{ role: 'system' as const, content: timelyBlock }] : []),
+        ...chatMessages.slice(timelyAt).map((m) => ({ role: m.role, content: m.content })),
       ];
       if (userHoliday) {
         const profileMessage = instantMessages.find(m => m.role === 'system' && typeof m.content === 'string' && m.content.includes('### 互动对象 (User)\n'));
@@ -2562,11 +2711,12 @@ export const amsgHooks = {
       selfLog,
       taskListBlock,
       realtimeWorldBlock,
-      lastUserMessageAt,
+      lastUserMessageAt: lastInteractionAt,
       // 「此刻在做什么」里的钟点跟今日节日同一个开关：关掉时间感知的角色不该从日程块
       // 读到「23:00」——那正是这个开关要挡的东西。日程内容本身照给。
       includeClock: toolPack.timeAwarenessEnabled,
-    }), userHoliday) + mcpBlock + scheduleBlock;
+      mustSpeak: away || dateLeave,
+    }), userHoliday) + mcpBlock + scheduleBlock + replyScopeBlock;
     return {
       messages: [{ role: 'user' as const, content: prompt }],
       ...common,
@@ -2587,7 +2737,13 @@ export const amsgHooks = {
       return handler.llmOutput({ ctx, state: kindFire.state });
     }
 
-    const content = stripReasoningTags(ctx.llmOutputText || '').trim();
+    const llmMessage = (ctx.llmResponse as {
+      choices?: Array<{ message?: Record<string, unknown> }>;
+    })?.choices?.[0]?.message;
+    // An explicitly empty answer must not be replaced by a provider/SDK reasoning fallback.
+    const rawContent = llmMessage && 'content' in llmMessage
+      ? readAssistantMessage(llmMessage).content : ctx.llmOutputText || '';
+    const content = splitInlineThinking(rawContent).content.trim();
 
     // 任务身份直接从 ctx 上读（sessionId 是给日志和去重用的不透明串，不拿它切）。
     const taskId = ctx.taskId != null ? String(ctx.taskId) : null;
@@ -2608,10 +2764,30 @@ export const amsgHooks = {
     }
     const session = stash.session;
 
-    // 思考链两个来源：响应字段 + 正文内联 <think>。抄的是没 strip 过的原文
-    // （上面那个 content 是剥完的）。字段名认三个，跟本地路径一样宽
-    // （见 utils/safeApi.ts）：reasoning_content 是 deepseek-r1 / GLM 那批的写法，
-    // OpenRouter 转出来叫 reasoning，还有渠道写 thinking——只认一个就会静默没有卡片。
+    // 按轮累加模型调用的 token 用量：带工具的一轮会连进多次 onLLMOutput，只取末轮会把前面
+    // 查记忆、跑 MCP、排程那几轮的消耗漏掉。任一轮供应商没报 usage 时保留已累加的部分并标为偏小。
+    stash.llmRounds = (stash.llmRounds ?? 0) + 1;
+    const roundRawUsage = (ctx as { usage?: Record<string, unknown> | null }).usage
+      ?? ((ctx.llmResponse as { usage?: Record<string, unknown> | null } | null)?.usage);
+    if (stash.instant) {
+      const calls = stash.modelCalls ?? (stash.modelCalls = []);
+      calls.push(makeModelCall({ index: calls.length + 1, completedAt: Date.now(), causes: stash.nextCallCauses ?? [],
+        ok: true, usage: roundRawUsage, response: ctx.llmResponse }));
+    }
+    if (roundRawUsage && typeof roundRawUsage === 'object') {
+      const pt = typeof roundRawUsage.prompt_tokens === 'number' && Number.isFinite(roundRawUsage.prompt_tokens)
+        ? roundRawUsage.prompt_tokens : undefined;
+      const ct = typeof roundRawUsage.completion_tokens === 'number' && Number.isFinite(roundRawUsage.completion_tokens)
+        ? roundRawUsage.completion_tokens : undefined;
+      if (pt !== undefined || ct !== undefined) {
+        stash.llmRoundsWithUsage = (stash.llmRoundsWithUsage ?? 0) + 1;
+        if (pt !== undefined) stash.promptTokensAcc = (stash.promptTokensAcc ?? 0) + pt;
+        if (ct !== undefined) stash.completionTokensAcc = (stash.completionTokensAcc ?? 0) + ct;
+      }
+    }
+
+    // 与本地共用响应解析：别名、结构化摘要、带 thought 标记的 content 块与内联标签。
+    // 保留原始 content 块供心象提取；上面的 rawContent 已经只剩正文。
     // 不复用上游的 readReasoningContent：它是「原生**或**第一个内联块」，这里要的是
     // 「原生**加**全部内联块」，跟客户端渲染的那份对齐。
     //
@@ -2624,14 +2800,8 @@ export const amsgHooks = {
     // 由上游 buildLlmRequestBody 展开进请求体；上游没认领这个字段时退化为只有
     // -thinking 模型名后缀生效。这里替客户端多开一份的话，Gemini 系 thinking + tools
     // 同发直接 400。
-    const llmMessage = (ctx.llmResponse as {
-      choices?: Array<{ message?: Record<string, unknown> }>;
-    })?.choices?.[0]?.message;
-    const nativeReasoning = llmMessage?.reasoning_content ?? llmMessage?.reasoning ?? llmMessage?.thinking;
-    const roundReasoning = [nativeReasoning, extractInlineThink(ctx.llmOutputText || '')]
-      .filter((s): s is string => typeof s === 'string' && !!s.trim())
-      .map((s) => s.trim())
-      .join('\n\n');
+    const roundReasoning = readAssistantThinking(llmMessage && 'content' in llmMessage
+      ? llmMessage : {...llmMessage, content:rawContent});
     session.finalReasoning = roundReasoning || null;
 
     // native tool_calls：只认声明过的工具（fireToolNames 的管理工具 + mcpResolve 的
@@ -2652,7 +2822,7 @@ export const amsgHooks = {
       });
     }
 
-    let decision = processLLMRound(session, content, {
+    let decision = processLLMRound(session, stripDisabledMonthlyRecall(content, stash.toolCtx.char), {
       // 名字取 tool_pack 里的那份：它跟着每轮聊天重新上云，改名当天就是新的。
       // ctx.contactName 是排程那一刻冻进任务行的快照，用户改完名字之后，之前排的
       // 任务推送出来横幅还顶着旧名字（上游 update-message 也不让改这个字段）。
@@ -2689,6 +2859,7 @@ export const amsgHooks = {
     stash.maxToolIterations);
 
     if (decision.decision === 'tool-request') {
+      stash.nextCallCauses = modelCallCauses(decision.toolCalls.map(tc => tc.function.name));
       console.log('[amsg:agentic]', {
         type: 'tool_request',
         sessionId: ctx.sessionId,
@@ -2703,16 +2874,65 @@ export const amsgHooks = {
       });
     }
 
+    // 开场那道门只查过一次，生成要几十秒：这期间用户在本地聊上的话，这句没看到新对话，
+    // 跟本地那轮回复会同时落到聊天里各说各的。推送前再看一眼，聊上了就不发，给角色留回执。
+    if (decision.decision === 'finish' && stash.overlapGuard) {
+      const presenceRows = await ctx.readState(amsgStateNamespace(stash.charId), { key: AMSG_CHAT_PRESENCE_KEY });
+      const presence = parseAmsgChatPresence(presenceRows.find((r) => r.key === AMSG_CHAT_PRESENCE_KEY)?.value);
+      if (chattedDuringFire(presence, stash.charId, Date.now(), stash.overlapGuard.lastUserMessageAt)) {
+        // 生成期间用户进了见面：跟开场那道 in-person 闸同一个原因，回执才会带进见面。
+        const overlapReason = presence?.scene === 'date' ? 'in-person' as const : 'chat-overlap' as const;
+        // shortcut: 这一轮已经用工具改过任务的照常发出——跳过的话客户端收不到这批改动、认领不到新任务；
+        // 真撞上再改成拦下时单独 emitResult 送任务改动。
+        if (stash.scheduledTasks.length || stash.cancelledTasks.length || stash.renewedTasks.length) {
+          console.warn('[amsg:chat-overlap] 生成期间用户开口了，但这轮改过任务，照常发出', { taskId });
+        } else {
+          console.log('[amsg:chat-overlap] 生成期间用户开口了，这条不发', {
+            taskId,
+            seenLastUserMessageAt: stash.overlapGuard.lastUserMessageAt,
+            presenceLastUserMessageAt: presence?.lastUserMessageAt ?? null,
+          });
+          await writeLastSkip(ctx.writeState, stash.charId, {
+            v: 1,
+            taskUuid: stash.taskUuid,
+            occurrenceMs: stash.occurrenceMs,
+            reason: overlapReason,
+            skippedAt: Date.now(),
+          });
+          const overlapUsage = readStashUsage(stash);
+          await emitFireSkip(ctx.emitResult, {
+            charId: stash.charId,
+            taskUuid: stash.taskUuid,
+            occurrenceMs: stash.occurrenceMs,
+            reason: overlapReason,
+            task: findTaskBrief(stash.pendingTasks, stash.taskUuid),
+            ...(overlapUsage ? {
+              usage: { ...overlapUsage, ...(hasPartialStashUsage(stash) ? { tokensPartial: true } : {}) },
+              proactiveKind: proactiveKindOf(stash),
+            } : {}),
+          });
+          return { decision: 'skip-push' as const };
+        }
+      }
+    }
+
     if (decision.decision === 'skip-push' && decision.sideEffects) {
       // 没有聊天正文仍可能有有效卡片/动作。可靠落账后再让任务消费；失败抛出走原重试链。
       if (typeof ctx.emitResult !== 'function') throw new Error('AMSG2_RESULT_UNSUPPORTED: 请更新 Worker 以接收动作结果');
+      const sideEffectUsage = readStashUsage(stash);
       const metadata = {
         ...stripSarSnapshot(stripEmotionEvalSpec(ctx.metadata)),
         ...decision.sideEffects,
         amsgOccurrenceMs: stash.occurrenceMs,
+        ...(stash.instant && stash.modelCalls?.length ? { amsgModelCalls: stash.modelCalls } : {}),
         ...(stash.scheduledTasks.length ? { amsgSelfScheduled: stash.scheduledTasks } : {}),
         ...((stash.cancelledTasks.length || stash.renewedTasks.length) ? {
           amsgTaskMutations: { cancelled: stash.cancelledTasks, renewed: stash.renewedTasks },
+        } : {}),
+        ...(sideEffectUsage ? {
+          amsgUsage: sideEffectUsage,
+          amsgProactiveKind: proactiveKindOf(stash),
+          ...(hasPartialStashUsage(stash) ? { amsgTokensPartial: true } : {}),
         } : {}),
       };
       await ctx.emitResult({
@@ -2788,12 +3008,17 @@ export const amsgHooks = {
       });
       // 定时主动消息这次没发：也告诉客户端一声，角色下一轮聊天时知道这条没说出去。
       if (!stash.instant) {
+        const skipUsage = readStashUsage(stash);
         await emitFireSkip(ctx.emitResult, {
           charId: stash.charId,
           taskUuid: stash.taskUuid,
           occurrenceMs: stash.occurrenceMs,
           reason: decision.reason,
           task: findTaskBrief(stash.pendingTasks, stash.taskUuid),
+          ...(skipUsage ? {
+            usage: { ...skipUsage, ...(hasPartialStashUsage(stash) ? { tokensPartial: true } : {}) },
+            proactiveKind: proactiveKindOf(stash),
+          } : {}),
         });
       }
       // 即时对话被 skip：一次性行会被上游当成功消费删掉，客户端点名只能看到「行没了、
@@ -2873,23 +3098,16 @@ export const amsgHooks = {
       // 两样都排在旁路存储之前，装不下时才能连它们一起挪走。
       if (stash.instant && payloads.length > 0) {
         const lastMeta: Record<string, unknown> = {};
+        if (stash.modelCalls?.length) lastMeta.amsgModelCalls = stash.modelCalls;
         const toolTrace = condenseToolTrace(session.toolCalls);
         if (toolTrace.length > 0) lastMeta.amsgToolTrace = toolTrace;
-        // 最后一轮的 token 用量（amsg-server 2.6.0-next.15 起 sessionCtx 带 usage，
-        // 来源是供应商响应体的 usage 字段）。只挑三个数、不透传原对象——各家供应商
-        // 往 usage 里塞的私有字段（缓存命中、思考 token 明细…）没必要跟着每条 push 走。
-        // 客户端暂时只存不显示，将来做用量角标不用再动 worker。
-        const usage = (ctx as { usage?: Record<string, unknown> | null }).usage;
-        if (usage && typeof usage === 'object') {
-          const pick = (key: string): number | undefined =>
-            typeof usage[key] === 'number' ? usage[key] as number : undefined;
-          const promptTokens = pick('prompt_tokens');
-          const completionTokens = pick('completion_tokens');
-          if (promptTokens !== undefined || completionTokens !== undefined) {
-            lastMeta.amsgUsage = {
-              ...(promptTokens !== undefined ? { promptTokens } : {}),
-              ...(completionTokens !== undefined ? { completionTokens } : {}),
-            };
+        // 整轮模型调用的累加 token 用量（只挑两个数、不透传供应商私有字段）。
+        // 多轮工具调用且每一轮都报了 usage 时额外标 amsgUsageComplete，客户端不用再一律打「只算末轮」。
+        const stashUsage = readStashUsage(stash);
+        if (stashUsage) {
+          lastMeta.amsgUsage = stashUsage;
+          if ((stash.llmRounds ?? 0) > 1 && !hasPartialStashUsage(stash)) {
+            lastMeta.amsgUsageComplete = true;
           }
         }
         if (stash.emotionEvalPromise) {
@@ -2910,10 +3128,20 @@ export const amsgHooks = {
             lastMeta.amsgEmotionDone = true;
             if (outcome.raw) lastMeta.amsgEmotionUpdate = outcome.raw;
             else if (outcome.error) lastMeta.amsgEmotionError = outcome.error;
+            if (outcome.usage) lastMeta.amsgEmotionUsage = outcome.usage;
           }
         }
         if (Object.keys(lastMeta).length > 0) {
           payloads = attachMetaAt(payloads, payloads.length - 1, lastMeta);
+        }
+      } else if (!stash.instant && payloads.length > 0) {
+        const stashUsage = readStashUsage(stash);
+        if (stashUsage) {
+          payloads = attachMetaAt(payloads, payloads.length - 1, {
+            amsgUsage: stashUsage,
+            amsgProactiveKind: proactiveKindOf(stash),
+            ...(hasPartialStashUsage(stash) ? { amsgTokensPartial: true } : {}),
+          });
         }
       }
 
@@ -3075,12 +3303,17 @@ export const buildWorkerConfig = (env: Env) => {
     privateKey: env.VAPID_PRIVATE_KEY,
   };
   const nativeFcmReady = isFcmConfigured(env);
-  // 上游在进入发送器前会检查 VAPID 字段非空；纯 FCM 部署用内部占位值通过该检查。
-  // 普通 Web Push endpoint 仍只会走真实 VAPID，没配真实值时配置自检会明确提示。
-  const effectiveVapid = nativeFcmReady && (!vapid.publicKey?.trim() || !vapid.privateKey?.trim())
-    ? { email: vapid.email, publicKey: 'native-fcm', privateKey: 'native-fcm' }
-    : vapid;
-  const webpush = createHybridPushTransport(env, createWebCryptoWebPush(effectiveVapid));
+  const hasRealVapid = Boolean(vapid.publicKey?.trim() && vapid.privateKey?.trim());
+  // 上游在进入发送器前会检查 VAPID 字段非空；纯 FCM 或第三方推送（WxPusher/Bark/MeoW）
+  // 部署用内部占位值通过该检查，而普通 Web Push 仍走真实 vapid。
+  const effectiveVapid = hasRealVapid
+    ? vapid
+    : {
+      email: vapid.email,
+      publicKey: nativeFcmReady ? 'native-fcm' : 'third-party-push',
+      privateKey: nativeFcmReady ? 'native-fcm' : 'third-party-push',
+    };
+  const webpush = traceDiagnosticTransport(createHybridPushTransport(env, createWebCryptoWebPush(vapid)), env);
   // 即时对话终态失败的直发通道拿同一份 transport（见 sendInstantErrorPush）。
   configureInstantErrorPush(env.DB && env.AMSG_MASTER_KEY
     ? { webpush, db: env.DB as unknown as InstantErrorPushDeps['db'], masterKey: env.AMSG_MASTER_KEY }
@@ -3102,7 +3335,7 @@ export const buildWorkerConfig = (env: Env) => {
     // 命名空间下超过天数没更新的条目清掉。角色状态那个命名空间（amsg:char:<id>，
     // 装 fire_pack / tool_pack）不配 TTL——那些是要长期留着的，配了就等于定时把
     // 角色的云端状态抹掉。判据是行本来就有的 updated_at 列，不加列、不动表结构。
-    clientStateTtl: { [INSTANT_INPUT_NAMESPACE]: INSTANT_INPUT_TTL_DAYS, [AMSG_JOB_NAMESPACE]: AMSG_JOB_TTL_DAYS },
+    clientStateTtl: { [INSTANT_INPUT_NAMESPACE]: INSTANT_INPUT_TTL_DAYS, [AMSG_JOB_NAMESPACE]: AMSG_JOB_TTL_DAYS, [DIAGNOSTIC_NAMESPACE]: DIAGNOSTIC_RETENTION_DAYS },
     cloudData: { resolveOwner: resolveSullyCloudOwnership },
     // 满血 fire-time hooks（onBeforeFire 现场填槽 + onLLMOutput 分类 +
     // executeToolCalls 服务端工具循环）；总超时用库默认 240s，轮数由 onBeforeFire 按
@@ -3112,7 +3345,7 @@ export const buildWorkerConfig = (env: Env) => {
     // 用户主动触发的即时对话：生成失败本轮就结束，由用户决定是否重发。
     // 策略由上游在 onBeforeFire 前解析，读取上下文失败也覆盖；整批入箱后仍可补推原文。
     maxGenerationRetries: (task: { metadata?: Record<string, unknown> | null }) =>
-      isInstantChatTask(task.metadata) ? 0 : undefined,
+      isInstantChatTask(task.metadata) || readTaskKind(task.metadata) === 'diagnostic' ? 0 : undefined,
     // 取消通过租约心跳通知执行中的 Worker；1 秒检测一次，TTL 仍由上游管理。
     // 收尾回执 + 过期跳过回执（config 级 hook）。
     // onFireSettled: 无论这次 fire 是发出去了、跳过了还是抛错了都会调一次，self_log
@@ -3669,6 +3902,8 @@ export default {
           // 正常，而门牌永远不更新。报的是**这份代码有没有**，不是版本号：自更新永远由
           // 旧代码执行，版本号对上了不代表新逻辑真的在跑。
           backgroundJobs: true,
+          thirdPartyPush: true,
+          diagnosticReproduction: 1,
           workerVersion: AMSG_BUNDLE_VERSION,
           // 自动更新：有没有这个能力（配没配 CF_API_TOKEN，不回值）+ 最近一次检查的结果。
           // 读的是诊断表，D1 没绑上时读不到就是 null，不影响上面那些照常回答。
@@ -3855,6 +4090,83 @@ export default {
         });
       }
       return handleInstantChat({ request, env, upstream, json: jsonWithCors });
+    }
+
+    // 推送测试：读取当前用户在 push_subscriptions 里登记的订阅（Web Push 或第三方推送 App），
+    // 直接发一条测试通知验证通道是否畅通。
+    if (pathname.endsWith('/test-push')) {
+      if (method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
+      if (method !== 'POST') {
+        return jsonWithCors(405, {
+          success: false,
+          error: { code: 'METHOD_NOT_ALLOWED', message: '/test-push 只接受 POST' },
+        });
+      }
+      const token = env.AMSG_SERVER_TOKEN?.trim() ?? '';
+      const clientToken = request.headers.get('X-Client-Token') ?? '';
+      if (token && (!clientToken || !(await constantTimeEqual(clientToken, token)))) {
+        return jsonWithCors(401, {
+          success: false,
+          error: { code: 'INVALID_CLIENT_TOKEN', message: '共享密钥无效或缺失' },
+        });
+      }
+      try {
+        const reqUserId = request.headers.get('X-User-Id')?.trim() || '';
+        const db = env.DB as unknown as InstantErrorPushDeps['db'];
+        const row = reqUserId
+          ? await db.prepare('SELECT user_id, subscription FROM push_subscriptions WHERE user_id = ? LIMIT 1').bind(reqUserId).first()
+          : await db.prepare('SELECT user_id, subscription FROM push_subscriptions LIMIT 1').first();
+        const stored = row?.subscription;
+        const userId = row?.user_id;
+        if (typeof stored !== 'string' || !stored || typeof userId !== 'string' || !userId) {
+          return jsonWithCors(404, {
+            success: false,
+            error: { code: 'SUBSCRIPTION_NOT_FOUND', message: '云端还没有登记推送订阅，请先保存或登记推送配置。' },
+          });
+        }
+        let subscription: unknown;
+        try {
+          const userKey = await deriveUserEncryptionKey(userId, env.AMSG_MASTER_KEY.trim());
+          subscription = JSON.parse(await decryptFromStorage(stored, userKey));
+        } catch {
+          subscription = JSON.parse(stored);
+        }
+        const payload = {
+          messageKind: 'test-push',
+          messageType: 'instant',
+          messageId: `test_${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          contactName: 'SullyOS 推送测试',
+          message: '如果你在手机通知栏看到这条消息，说明主动消息推送通道已经接通！',
+          notification: {
+            title: 'SullyOS 推送测试',
+            body: '如果你在手机通知栏看到这条消息，说明主动消息推送通道已经接通！',
+            show: 'always',
+            tag: 'sullyos-test-push',
+            renotify: true,
+          },
+        };
+        const cfg = buildWorkerConfig(env);
+        await cfg.webpush.sendNotification(subscription, JSON.stringify(payload));
+        return jsonWithCors(200, {
+          success: true,
+          data: { sent: true },
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return jsonWithCors(502, {
+          success: false,
+          error: { code: 'TEST_PUSH_FAILED', message },
+        });
+      }
+    }
+
+    if (pathname.endsWith('/vapid-public-key') && (!env.VAPID_PUBLIC_KEY?.trim() || !env.VAPID_PRIVATE_KEY?.trim())) {
+      if (method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
+      return jsonWithCors(503, {
+        success: false,
+        error: { code: 'VAPID_NOT_CONFIGURED', message: 'Worker 未配置 VAPID 密钥对，浏览器 Web Push 不可用（可使用第三方推送 App）。' },
+      });
     }
 
     return upstream.fetch(request, env);

@@ -10,11 +10,8 @@
 //   2. add a row to WORKERS below
 //   3. that's it — `pnpm run build` (which chains to build:workers) picks it up
 //
-// Why a manifest array instead of auto-discover: worker/proactive-push/ has
-// src/index.ts + wrangler.toml too, but its worker.bundle.js is hand-written
-// (not an esbuild artifact). A naive scan of worker/*/src/index.ts would
-// silently overwrite it. The manifest is explicit about which workers go
-// through this pipeline.
+// Why a manifest array instead of auto-discover: the manifest is explicit
+// about which workers go through this pipeline.
 
 import { build } from 'esbuild';
 import { existsSync, statSync, copyFileSync } from 'fs';
@@ -44,6 +41,7 @@ const WORKERS = [
     name: 'post-office',
     skipPublicOut: true,
   },
+  { name: 'bifang', skipPublicOut: true },
   // amsg = 主动消息 2.0 的单用户 worker（amsg-server/cloudflare, D1 + Cron Trigger）。
   // public/ 副本给设置页「复制 Worker 代码」按钮 fetch。amsg-server 2.6.0-next.2 起
   // 全 Web Crypto，免 nodejs_compat flag。

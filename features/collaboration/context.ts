@@ -246,6 +246,7 @@ export const buildLiveCollaborationChatContext = async ({
         : `### ChatApp 实时聊天衔接\n最近 ${history.length} 条聊天会在每次生成时重新读取而非冻结。\n\n`,
       COLLABORATION_PROTOCOL,
       collaborationRichOutputPrompt(char, emojis, categories),
+      collaborationThinkingPrompt(char, user),
     ].join(''),
     chatContextSnapshot: [
       { role: 'system', content: history.length > 0

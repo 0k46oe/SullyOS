@@ -126,9 +126,81 @@ export const parseChatFailRecord = (value: string | null | undefined): AmsgChatF
  */
 const GZIP_VALUE_PREFIX = 'gz1:';
 
-/** 运行时有没有压缩能力（老 Safari 没有 CompressionStream）。 */
-const canCompress = (): boolean =>
-  typeof CompressionStream === 'function' && typeof DecompressionStream === 'function';
+/**
+ * 合法单成员 gzip 帧的最小长度：10 字节头 + 至少 2 字节 DEFLATE 结束块 + 8 字节尾部（CRC32 + ISIZE）。
+ * 原文字节数不超过这一行加上前缀与 base64 膨胀（gz1: + 28 字符 = 32 字节）时，压完绝不可能比原文短。
+ */
+const GZIP_MIN_FRAME_BYTES = 20;
+const MIN_WORTH_PACKING_BYTES = 32;
+
+export type GzipFallbackCompressor = (
+  rawBytes: Uint8Array,
+) => Promise<Uint8Array | null> | Uint8Array | null;
+
+// 记录已确认异常的原生 CompressionStream 构造器引用：生产环境里页面生命周期内构造器恒定，
+// 一旦触发熔断本页后续不再调它；单测替换并还原 globalThis.CompressionStream 时自动恢复隔离。
+let brokenCompressionStreamCtor: unknown = null;
+let gzipFallbackCompressor: GzipFallbackCompressor | null = null;
+
+/**
+ * 注册前端按需纯 JS gzip 压缩器（如懒加载 fflate）。
+ * 本模块被 Worker bundle 直接引用，保持零外部依赖；纯 JS 兜底由前端入口注入。
+ * 返回先前的处理器便于单测临时替换后还原。
+ */
+export const registerGzipFallbackCompressor = (
+  compressor: GzipFallbackCompressor | null,
+): GzipFallbackCompressor | null => {
+  const prev = gzipFallbackCompressor;
+  gzipFallbackCompressor = compressor;
+  return prev;
+};
+
+/** 单测重置压缩熔断状态用。 */
+export const resetGzipCompressionStateForTests = (): void => {
+  brokenCompressionStreamCtor = null;
+};
+
+let crc32Table: Uint32Array | null = null;
+
+const getCrc32Table = (): Uint32Array => {
+  if (crc32Table) return crc32Table;
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let k = 0; k < 8; k += 1) {
+      c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    table[i] = c >>> 0;
+  }
+  crc32Table = table;
+  return table;
+};
+
+const computeCrc32 = (bytes: Uint8Array): number => {
+  const table = getCrc32Table();
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.byteLength; i += 1) {
+    crc = table[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+};
+
+/**
+ * 核对压缩产物是否为对应输入字节的完整 gzip 帧（RFC 1952）。
+ *
+ * 部分移动端 WebKit 的 CompressionStream 在压缩较大缓冲或切后台时不会抛异常，而是静默返回
+ * 未刷完尾部的半截字节流；单看是否抛错或字节变短无法识别，读侧解压会报 incomplete data。
+ * 核对魔数与末尾 8 字节（CRC32 + 原始长度 ISIZE）可在微秒~亚毫秒级拦截截断产物，且不依赖
+ * 同一内核的 DecompressionStream。
+ */
+export const isValidGzipForInput = (rawBytes: Uint8Array, gz: Uint8Array): boolean => {
+  if (gz.byteLength < GZIP_MIN_FRAME_BYTES) return false;
+  if (gz[0] !== 0x1f || gz[1] !== 0x8b || gz[2] !== 0x08) return false;
+  const view = new DataView(gz.buffer, gz.byteOffset, gz.byteLength);
+  const expectedSize = rawBytes.byteLength >>> 0;
+  if (view.getUint32(gz.byteLength - 4, true) !== expectedSize) return false;
+  return view.getUint32(gz.byteLength - 8, true) === computeCrc32(rawBytes);
+};
 
 // btoa/atob 只吃 latin1 字符串，二进制要一个字节一个字符地喂。整段 apply 展开会在大数据上
 // 爆调用栈，按块拼。
@@ -149,20 +221,69 @@ const base64ToBytes = (base64: string): Uint8Array => {
   return bytes;
 };
 
-const streamThrough = async (data: Uint8Array, transform: TransformStream): Promise<Uint8Array> => {
-  const stream = new Blob([data as BlobPart]).stream().pipeThrough(transform);
-  return new Uint8Array(await new Response(stream).arrayBuffer());
+// 直接向 TransformStream.writable 写入，不经过 Blob.stream()（规避 Safari 读取临时 Blob 流时的
+// I/O 异常）；同时传入独立切片，避免部分流实现转移底层 ArrayBuffer 影响后续长度/CRC32 核对与兜底压缩。
+const streamThrough = async (
+  data: Uint8Array,
+  transform: { readable: ReadableStream<Uint8Array>; writable: WritableStream<BufferSource> },
+): Promise<Uint8Array> => {
+  const readablePromise = new Response(transform.readable).arrayBuffer();
+  const writer = transform.writable.getWriter();
+  const writePromise = writer.write(data.slice())
+    .then(() => writer.close())
+    .catch(async (error) => {
+      try { await writer.abort(error); } catch { /* ignore */ }
+      throw error;
+    });
+  const [buffer] = await Promise.all([readablePromise, writePromise]);
+  return new Uint8Array(buffer);
 };
 
 /**
- * 上传前把值压掉。压不动或运行时不支持时原样返回 —— 这个函数永远不该让同步失败，
+ * 将字节压成经完整性核对的 gzip：优先走健康的原生 CompressionStream；原生缺失、抛错或
+ * 输出截断时熔断本页原生压缩并切换已注册的纯 JS 压缩器；两边都不可用时返回 null 由调用方退回明文。
+ */
+export const compressGzipBytes = async (rawBytes: Uint8Array): Promise<Uint8Array | null> => {
+  if (typeof CompressionStream === 'function' && CompressionStream !== brokenCompressionStreamCtor) {
+    const ctor = CompressionStream;
+    try {
+      const gz = await streamThrough(rawBytes, new CompressionStream('gzip'));
+      if (isValidGzipForInput(rawBytes, gz)) {
+        return gz;
+      }
+      brokenCompressionStreamCtor = ctor;
+      console.warn('[AmsgGzip] 原生 CompressionStream 输出的 gzip 头尾不完整，切换备用压缩通道');
+    } catch (error) {
+      brokenCompressionStreamCtor = ctor;
+      console.warn('[AmsgGzip] 原生 CompressionStream 压缩失败，切换备用压缩通道', error);
+    }
+  }
+  if (gzipFallbackCompressor) {
+    try {
+      const fallbackGz = await gzipFallbackCompressor(rawBytes);
+      if (fallbackGz && isValidGzipForInput(rawBytes, fallbackGz)) {
+        return fallbackGz;
+      }
+    } catch {
+      // 备用压缩也不可用（例如离线且懒加载分包尚未缓存）时回退明文。
+    }
+  }
+  return null;
+};
+
+/**
+ * 上传前把值压掉。压不动或压缩通道均不可用时原样返回 —— 这个函数永远不该让同步失败，
  * 云端那份 fire_pack 是角色到点时唯一的上下文来源，为了省流量把它弄丢是本末倒置。
  */
 export const packStateValue = async (json: string): Promise<string> => {
-  if (!canCompress()) return json;
+  const nativeAvailable =
+    typeof CompressionStream === 'function' && CompressionStream !== brokenCompressionStreamCtor;
+  if (!nativeAvailable && !gzipFallbackCompressor) return json;
   try {
     const rawBytes = new TextEncoder().encode(json);
-    const gz = await streamThrough(rawBytes, new CompressionStream('gzip'));
+    if (rawBytes.byteLength <= MIN_WORTH_PACKING_BYTES) return json;
+    const gz = await compressGzipBytes(rawBytes);
+    if (!gz) return json;
     const packed = `${GZIP_VALUE_PREFIX}${bytesToBase64(gz)}`;
     // 划算不划算按**字节**比，不能用 .length。fire_pack 几乎全是中文，一个字符占 3 个
     // UTF-8 字节，而压完的 base64 全是 ASCII（1 字符 = 1 字节）——拿字符数比的话，
@@ -207,6 +328,8 @@ export const LAST_SKIP_REASONS = [
   'min-gap',
   'recurring-unanswered',
   'daily-limit',
+  'chat-overlap',
+  'in-person',
 ] as const;
 
 export interface AmsgLastSkip {
@@ -225,6 +348,8 @@ export interface AmsgLastSkip {
    * min-gap               角色自排的任务到点时，离它上一条主动消息还没隔够用户设的间隔
    * recurring-unanswered  重复的任务到点时，用户已经连续几次没回它了（回话后恢复）
    * daily-limit           今天主动发的次数已到用户设的每日上限
+   * chat-overlap          写到一半用户开口聊上了，这句没看到新对话，推送前拦下
+   * in-person             到点时用户正在和这个角色见面，人就在面前，不发手机消息
    */
   reason: (typeof LAST_SKIP_REASONS)[number];
   skippedAt: number;
@@ -291,6 +416,10 @@ export const describeLastSkip = (skip: AmsgLastSkip, formatTime: (ms: number) =>
       return `${when} 那条重复消息这次没发——你已经连续几次没回它了，先停一停；你回一句话，它就照常恢复。`;
     case 'daily-limit':
       return `${when} 那次主动消息没发——今天 ta 主动找你的次数已经到了你设的每日上限，跳过的这次不会补发，明天重新计数。`;
+    case 'chat-overlap':
+      return `${when} 那次主动消息没发——ta 写好的时候你们正好聊上了，那句话没看到你刚说的，就没发出去。`;
+    case 'in-person':
+      return `${when} 那次主动消息没发——当时你们正在见面，人就在面前，就没再发消息；这次不会补发。`;
   }
 };
 
@@ -409,6 +538,12 @@ export interface AmsgFirePackChat {
   messages: { role: string; content: AmsgFirePackChatContent }[];
   /** 这份对话消息打包的时刻（epoch ms）。 */
   builtAt: number;
+  /**
+   * worker 时效块（时钟、实时世界、排程清单等）插在 messages 的这个下标前，
+   * 即本地「实时状态」段所在的位置，和本地路径一样把「回到你自己」留在最后。
+   * 缺省或越界时追加到末尾。
+   */
+  timelyInsertAt?: number;
 }
 
 export interface AmsgFirePack {
@@ -419,6 +554,11 @@ export interface AmsgFirePack {
   template: string;
   /** 用户上次真实主动发消息的时间（epoch ms）；没有聊天记录时为 null。 */
   lastUserMessageAt: number | null;
+  /**
+   * 离开后消息计时起点（epoch ms）：用户上次真实发言，或最近一条线下见面 / 实时通话记录
+   * （见 utils/awayMessageCore.ts）。可选字段，不改 FIRE_PACK_VERSION，旧包缺省退回 lastUserMessageAt。
+   */
+  lastAwayAnchorAt?: number | null;
   /**
    * 角色的 IANA 时区 id（角色开了自定义时区用角色的，没开用打包设备的）。
    * worker 渲染一切给角色看的时间都以它为参照系（Intl 处理夏令时）。必填：
@@ -907,6 +1047,8 @@ export const renderFirePack = (
      * 传进来；不传用包里那份。
      */
     lastUserMessageAt?: number | null;
+    /** 到点必发、不给角色选择不说（离开后消息）：模板里【开口之前】那段整个拿掉。 */
+    mustSpeak?: boolean;
   },
 ): string => {
   const tz: AmsgTzRef = { tzId: pack.tzId };
@@ -921,6 +1063,7 @@ export const renderFirePack = (
   const awayHint = buildAwayHint(pack.targetName, timeSinceUser);
 
   let out = pack.template;
+  if (extras?.mustSpeak) out = out.split(`${BEFORE_SPEAK_LINES.join('\n')}\n`).join('');
   out = fillSlot(out, AMSG_SLOT_CURRENT_TIME, currentTime);
   // 对方那边的钟：跟上面那行是两个主体各自的时间，文案里各自写清主语（见 buildUserClockHint）。
   out = fillSlot(out, AMSG_SLOT_USER_CLOCK, buildUserClockHint(nowMs, tz, { tzId: pack.userTzId }, pack.targetName));
@@ -951,14 +1094,8 @@ export const renderFirePack = (
  */
 export const FIRE_PACK_VERSION = 7;
 
-/**
- * 即时对话任务行的 messageSubtype 标签。上游只当自由文本原样透传；客户端两处都认它：
- * 排程时写（activeMsgClient.sendInstantChat）、面板对账时滤（amsg2Tasks 的
- * reconcileTasksWithRemote——即时对话的行不补进任务清单，不然用户正等着的一轮会显示
- * 成「待触发」，还可能被「取消全部」顺手掐掉）。写读两侧靠这一个常量绑死：它是
- * GET /messages 明文投影里唯一可查的即时对话标记，producer 改个说法 filter 就瞎了。
- */
-export const AMSG_INSTANT_CHAT_SUBTYPE = 'instant-chat';
+/** 即时对话任务行的 messageSubtype；定义和分类规则在 amsgTaskKinds。 */
+export { AMSG_INSTANT_CHAT_SUBTYPE } from './amsgTaskKinds';
 
 /**
  * 解析失败时给人看的一句原因。
@@ -975,7 +1112,7 @@ export const describeFirePackVersion = (value: string): string => {
     return `包是 v${v}、worker 要 v${FIRE_PACK_VERSION} —— 前端比 worker 旧，打开一次网页让它重新上传`;
   }
   if (typeof v === 'number') {
-    return `包是 v${v}、worker 只认 v${FIRE_PACK_VERSION} —— worker bundle 是旧的，去设置页重新粘贴部署`;
+    return `包是 v${v}、worker 只认 v${FIRE_PACK_VERSION} —— worker bundle 是旧的，去「设置 → 主动消息 2.0」点一下「更新 Worker」`;
   }
   return '包里没有版本号（数据损坏）';
 };
@@ -997,8 +1134,9 @@ const chatContentOk = (content: unknown): boolean => {
 const chatFieldOk = (chat: unknown): boolean => {
   if (chat === undefined) return true;
   if (!chat || typeof chat !== 'object' || Array.isArray(chat)) return false;
-  const { messages, builtAt } = chat as Partial<AmsgFirePackChat>;
+  const { messages, builtAt, timelyInsertAt } = chat as Partial<AmsgFirePackChat>;
   return typeof builtAt === 'number'
+    && (timelyInsertAt === undefined || Number.isInteger(timelyInsertAt))
     && Array.isArray(messages) && messages.length > 0
     && messages.every((m) => !!m && typeof m === 'object'
       && typeof (m as { role?: unknown }).role === 'string'
@@ -1015,6 +1153,7 @@ export const parseFirePack = (value: string): AmsgFirePack | null => {
       chatFieldOk(parsed.chat) &&
       typeof parsed.template === 'string' && parsed.template.length > 0 &&
       (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === 'number') &&
+      (parsed.lastAwayAnchorAt === undefined || parsed.lastAwayAnchorAt === null || typeof parsed.lastAwayAnchorAt === 'number') &&
       typeof parsed.tzId === 'string' && parsed.tzId.length > 0 &&
       typeof parsed.userTzId === 'string' && parsed.userTzId.length > 0 &&
       typeof parsed.targetName === 'string' &&

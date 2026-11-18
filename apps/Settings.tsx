@@ -4943,6 +4943,7 @@ const Settings: React.FC = () => {
       <PushVapidSettingsModal
         open={showVapidModal}
         onClose={() => { setShowVapidModal(false); setVapidReadyTick((n) => n + 1); }}
+        addToast={addToast}
       />
       <ActiveMsgGlobalSettingsModal
         isOpen={showAmsg2Modal}

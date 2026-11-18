@@ -6,6 +6,7 @@ import { isPaperWallpaper, useOS } from '../../context/OSContext';
 import { useBlobRefUrl } from '../../utils/blobRef';
 import { getAcnhIcon } from './acnhIcons';
 import { preloadApp } from './appPreload';
+import { isReducedBlurActive } from '../../utils/blurPolicy';
 
 interface AppIconProps {
   app: AppConfig;
@@ -13,6 +14,7 @@ interface AppIconProps {
   size?: 'sm' | 'md' | 'lg';
   hideLabel?: boolean;
   variant?: 'default' | 'minimal' | 'dock';
+  contentColorOverride?: string;
 }
 
 // 动森（NookPhone）风格瓦片配色 —— 直接用 animal-island-ui 的应用色板（精确 hex）。
@@ -23,15 +25,16 @@ const NOOK_TILE_COLORS: Record<string, string> = {
   cyan: '#82D5BB', blue: '#889DF0', slate: '#9A835A',
 };
 
-const AppIcon: React.FC<AppIconProps> = React.memo(({ app, onClick, size = 'md', hideLabel = false, variant = 'default' }) => {
+const AppIcon: React.FC<AppIconProps> = React.memo(({ app, onClick, size = 'md', hideLabel = false, variant = 'default', contentColorOverride }) => {
   const { customIcons, theme } = useOS();
+  const reducedBlur = isReducedBlurActive();
   const IconComponent = Icons[app.icon] || Icons.Settings;
   const customIconUrl = useBlobRefUrl(customIcons[app.id]);
   const isNook = theme.skin === 'animalcrossing';
   const isPaperDesktop = theme.skin !== 'animalcrossing' && theme.skin !== 'mobilegame' && theme.skin !== 'tamagotchi' && isPaperWallpaper(theme.wallpaper);
   const preserveCustomOutline = !!customIconUrl && theme.preserveCustomIconOutlines === true;
-  // 动森皮肤下标签用深棕色，普通皮肤沿用主题 contentColor。
-  const contentColor = isNook ? '#725d42' : (theme.contentColor || '#ffffff');
+  // 动森皮肤下标签用深棕色，其余优先采用宿主皮肤传入的 contentColorOverride，其次沿用主题 contentColor。
+  const contentColor = contentColorOverride ?? (isNook ? '#725d42' : (theme.contentColor || '#ffffff'));
 
   // Standard sizes
   const sizeClasses =
@@ -107,7 +110,9 @@ const AppIcon: React.FC<AppIconProps> = React.memo(({ app, onClick, size = 'md',
             <div 
                 className={isPaperDesktop
                   ? 'w-[47%] h-[47%] opacity-80'
-                  : 'w-[50%] h-[50%] drop-shadow-[0_2px_5px_rgba(0,0,0,0.3)] opacity-90'}
+                  : reducedBlur
+                    ? 'w-[50%] h-[50%] opacity-90'
+                    : 'w-[50%] h-[50%] drop-shadow-[0_2px_5px_rgba(0,0,0,0.3)] opacity-90'}
                 style={{ color: contentColor }}
             >
                  <IconComponent className="w-full h-full" />
@@ -131,7 +136,8 @@ const AppIcon: React.FC<AppIconProps> = React.memo(({ app, onClick, size = 'md',
     return prev.app.id === next.app.id && 
            prev.size === next.size && 
            prev.hideLabel === next.hideLabel &&
-           prev.variant === next.variant;
+           prev.variant === next.variant &&
+           prev.contentColorOverride === next.contentColorOverride;
 });
 
 export default AppIcon;

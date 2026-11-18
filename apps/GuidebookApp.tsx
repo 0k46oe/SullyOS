@@ -30,12 +30,17 @@ import {
     Cards,
 } from '@phosphor-icons/react';
 import TokenImg from '../components/os/TokenImg';
+import type { ApiCallMeta } from '../utils/apiCallLog';
 
 // --- Helper: Generate ID ---
 const genId = () => Math.random().toString(36).slice(2, 10);
 
 // --- Helper: API Call ---
-async function callAPI(apiConfig: { baseUrl: string; apiKey: string; model: string }, messages: ContextMessage[]): Promise<string> {
+async function callAPI(
+    apiConfig: { baseUrl: string; apiKey: string; model: string },
+    messages: ContextMessage[],
+    meta: ApiCallMeta,
+): Promise<string> {
     const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
@@ -46,7 +51,8 @@ async function callAPI(apiConfig: { baseUrl: string; apiKey: string; model: stri
             max_tokens: 4000,
             stream: false,
         }),
-    });
+        __sullyMeta: { appId: 'guidebook', appName: '攻略本', ...meta },
+    } as RequestInit);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const text = await response.text();
     let json: any;
@@ -641,6 +647,7 @@ const GuidebookApp: React.FC = () => {
 
     // End card / warnings
     const [showEndCard, setShowEndCard] = useState(false);
+    const sendingToChat = useRef(false);
     const [showExceedWarning, setShowExceedWarning] = useState(false);
 
     // Round context menu
@@ -712,7 +719,11 @@ const GuidebookApp: React.FC = () => {
         try {
             await injectMemoryPalace(char, undefined, scenarioHint || undefined);
             const prompt = buildOpeningPrompt(char, userProfile, initialAffinity, scenarioHint, 'manual', recentMsgs, char.guidebookInsights);
-            const raw = await callAPI(apiConfig, (await ContextBuilder.buildCharacterRequest({ char, user: userProfile }, [{ role: 'user', content: prompt }])));
+            const raw = await callAPI(
+                apiConfig,
+                (await ContextBuilder.buildCharacterRequest({ char, user: userProfile }, [{ role: 'user', content: prompt }])),
+                { charId: char.id, charName: char.name, purpose: '攻略本开篇' },
+            );
             let data = extractJson(raw);
 
             // Flexible segment extraction: try multiple paths
@@ -787,7 +798,11 @@ const GuidebookApp: React.FC = () => {
                 session.currentRound + 1, session.rounds, session.scenarioHint || '',
                 cachedRecentMsgs, wc, nextDirectionHint || undefined
             );
-            const raw = await callAPI(apiConfig, (await ContextBuilder.buildCharacterRequest({ char: selectedChar, user: userProfile }, [{ role: 'user', content: prompt }])));
+            const raw = await callAPI(
+                apiConfig,
+                (await ContextBuilder.buildCharacterRequest({ char: selectedChar, user: userProfile }, [{ role: 'user', content: prompt }])),
+                { charId: selectedChar.id, charName: selectedChar.name, purpose: '攻略本灵感建议' },
+            );
             const data = extractJson(raw);
             // Flexible: try data.options, or any array field with 3+ items that have text
             let opts: any[] | null = null;
@@ -885,7 +900,11 @@ const GuidebookApp: React.FC = () => {
                 roundNum, session.maxRounds, options, session.rounds, session.scenarioHint || '',
                 cachedRecentMsgs, wc, nextDirectionHint || undefined, roundScenario || undefined
             );
-            const raw = await callAPI(apiConfig, (await ContextBuilder.buildCharacterRequest({ char: selectedChar, user: userProfile }, [{ role: 'user', content: prompt }])));
+            const raw = await callAPI(
+                apiConfig,
+                (await ContextBuilder.buildCharacterRequest({ char: selectedChar, user: userProfile }, [{ role: 'user', content: prompt }])),
+                { charId: selectedChar.id, charName: selectedChar.name, purpose: '攻略本剧情推进' },
+            );
             const data = extractJson(raw);
             const choice = data?.choice;
             // Accept number, string number, or letter A/B/C
@@ -964,7 +983,11 @@ const GuidebookApp: React.FC = () => {
                 session.initialAffinity, session.currentAffinity, session.rounds,
                 cachedRecentMsgs
             );
-            const raw = await callAPI(apiConfig, (await ContextBuilder.buildCharacterRequest({ char: selectedChar, user: userProfile }, [{ role: 'user', content: prompt }])));
+            const raw = await callAPI(
+                apiConfig,
+                (await ContextBuilder.buildCharacterRequest({ char: selectedChar, user: userProfile }, [{ role: 'user', content: prompt }])),
+                { charId: selectedChar.id, charName: selectedChar.name, purpose: '攻略本结局结算' },
+            );
             const data = extractJson(raw);
 
             if (data) {
@@ -1003,7 +1026,12 @@ const GuidebookApp: React.FC = () => {
 
     // --- Send to Chat ---
     const handleSendToChat = async () => {
-        if (!session?.endCard || !selectedChar) return;
+        if (!session?.endCard || sendingToChat.current) return;
+        if (!selectedChar || selectedChar.id !== session.charId) {
+            addToast('这份存档的角色已不存在，无法发送到聊天', 'error');
+            return;
+        }
+        sendingToChat.current = true;
         const card = session.endCard;
 
         const cardData = {
@@ -1030,6 +1058,7 @@ const GuidebookApp: React.FC = () => {
             addToast('已发送到聊天', 'success');
             setShowEndCard(false);
         } catch (e: any) { addToast('发送失败: ' + e.message, 'error'); }
+        finally { sendingToChat.current = false; }
     };
 
     // --- Delete Session ---
@@ -1711,7 +1740,14 @@ const GuidebookApp: React.FC = () => {
 
             {/* Replay footer */}
             {isReplay && (
-                <div className="shrink-0 p-3" style={{ background: 'linear-gradient(0deg, rgba(236,230,233,0.9) 0%, transparent 100%)' }}>
+                <div className="shrink-0 p-3 space-y-2" style={{ background: 'linear-gradient(0deg, rgba(236,230,233,0.9) 0%, transparent 100%)' }}>
+                    {session?.endCard && (
+                        <button onClick={() => selectedChar ? setShowEndCard(true) : addToast('这份存档的角色已不存在，无法发送到聊天', 'error')}
+                            className="w-full py-2.5 text-white text-sm font-bold rounded-xl active:scale-95 transition-transform shadow-sm"
+                            style={{ background: 'linear-gradient(135deg, #b8909a, #a07880)' }}>
+                            查看结算 · 发送到聊天
+                        </button>
+                    )}
                     <button onClick={backToLobby}
                         className="w-full py-2.5 bg-white/70 text-sm font-bold rounded-xl active:scale-95 transition-transform shadow-sm" style={{ color: '#8b7a7e', border: '1px solid rgba(200,185,190,0.3)' }}>
                         返回列表

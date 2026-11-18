@@ -3,15 +3,22 @@ import { paperStyle } from '../utils/paperStyle';
 import { getActiveTavernStoryTime } from '../utils/tavernStoryTime';
 import {avatarFrameLayer} from '../utils/avatarFrameTarget';
 import ChatRuntimeStyle from '../components/chat/ChatRuntimeStyle';
+import { ChatSubtitleLayer } from '../components/chat/ChatSubtitleLayer';
+import { readChatTranslationStyle, readSubtitleSettings, saveSubtitleSettings, type ChatTranslationStyle } from '../utils/chatTranslationStyle';
+import { subscribePageForeground } from '../utils/pageForeground';
 import {homePhoneAppearance,HOME_PHONE_BUBBLES} from './room3d/homePhoneAppearance';
 
 import { publishReplyDisplay, stopReplyRuns } from '../utils/chatReplyCancellation';
 import { stopInstantChat } from '../utils/amsgInstantChat';
 import {resolvePsycheAppearance} from '../utils/psycheAppearance';
-import { startsNewMessageGroup } from '../utils/chatMessageGrouping';
+import { translateThinkingMessage } from '../utils/thinkingTranslation';
+import { resolveDialogueApi } from '../utils/characterApi';
+import { computeTimeSegmentStarts, startsNewMessageGroup, startsNewTimeSegment } from '../utils/chatMessageGrouping';
 import EmojiExportDialog from '../components/chat/EmojiExportDialog';
 import BlobRefStyle from '../components/chat/BlobRefStyle';
-import React, { useState, useEffect, useRef, useLayoutEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useLayoutEffect, useMemo, useCallback, useSyncExternalStore } from 'react';
+import ChatSendProgress from '../components/chat/ChatSendProgress';
+import { getChatSendProgress, subscribeChatSendProgress, cancelChatSendProgress } from '../utils/chatSendProgress';
 import { createPortal } from 'react-dom';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
@@ -19,6 +26,7 @@ import { isVisibleChatMessage } from '../utils/chatMessageVisibility';
 import { cleanMeetingHistoryText, formatChatElapsed, meetingHistoryByNextChat } from '../utils/chatMeetingHistory';
 import { nowInTimeZone } from '../utils/timezone';
 import { chatCharacterDisplayName } from '../utils/characterRemark';
+import { useChatViewportAnchor } from '../utils/useChatViewportAnchor';
 import { AppID, Message, MessageType, MemoryFragment, Emoji, EmojiCategory, DailySchedule, ScheduleSlot } from '../types';
 import { processImageToBlob } from '../utils/file';
 import { safeResponseJson, extractContent } from '../utils/safeApi';
@@ -69,6 +77,8 @@ import Modal from '../components/os/Modal';
 import MemoryContextSelfCheck from '../components/chat/MemoryContextSelfCheck';
 import ProactiveSettingsModal from '../components/chat/ProactiveSettingsModal';
 import ActiveMsg2SettingsModal from '../components/chat/ActiveMsg2SettingsModal';
+import AwayMessageSettingsModal from '../components/chat/AwayMessageSettingsModal';
+import { cancelCloudAwayTasks } from '../utils/awayMessage';
 import ThinkingChainSettingsModal from '../components/chat/ThinkingChainSettingsModal';
 import ScheduleChangeNotice from '../components/chat/ScheduleChangeNotice';
 import { useChatAI } from '../hooks/useChatAI';
@@ -91,7 +101,8 @@ import { voiceLanguageAnalyticsValue, voiceLanguagePromptLabel } from '../utils/
 import { fetchBlobForShare, shareOrDownloadBlob } from '../utils/shareExport';
 import { CollaborationStore } from '../features/collaboration/store';
 import { resolveTtsProvider } from '../utils/ttsProvider';
-import { resolveActiveSound, playWhiteboxSound, unlockWhiteboxAudio } from '../utils/whiteboxSound';
+import { unlockWhiteboxAudio } from '../utils/whiteboxSound';
+import { useChatNotificationSound } from '../hooks/useChatNotificationSound';
 import { normalizeTranslationLangLabel, isTranslationLangPreset } from '../utils/translationLang';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent, noteMessageSent, presetOrCustom } from '../utils/analytics';
@@ -165,10 +176,15 @@ function MeetingHistoryBlock({ items, title, charName, userName, timezone, light
     </div>;
 }
 const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
-    const { activeApp, characters, activeCharacterId: osActiveCharacterId, setActiveCharacterId, addCharacter, updateCharacter, updateUserProfile, apiConfig, apiPresets, availableModels, addApiPreset, closeApp, openApp, customThemes, addCustomTheme, removeCustomTheme, addWorldbook, updateTheme, saveAppearancePreset, addToast, showError, userProfile, lastMsgTimestamp, groups, characterGroups, clearUnread, unreadMessages, realtimeConfig, memoryPalaceConfig, updateMemoryPalaceConfig, remoteVectorConfig, syncEmotionApiToAllCharacters, theme: baseOsTheme, proactiveComposingChars, openDateWithChar } = useOS();
+    const playChatNotificationSound = useChatNotificationSound();
+    const { appearancePresets = [] } = useOS();
+    const osAppearanceFonts = useMemo(() => appearancePresets.flatMap(preset => preset.theme.customFont?.startsWith('data:')
+        ? [{ name: preset.name, source: preset.theme.customFont }] : []), [appearancePresets]);
+    const { activeApp, characters, activeCharacterId: osActiveCharacterId, setActiveCharacterId, addCharacter, updateCharacter, updateUserProfile, apiConfig, updateApiConfig, apiPresets, availableModels, addApiPreset, closeApp, openApp, customThemes, addCustomTheme, removeCustomTheme, addWorldbook, updateTheme, saveAppearancePreset, addToast, showError, userProfile, lastMsgTimestamp, groups, characterGroups, clearUnread, unreadMessages, realtimeConfig, memoryPalaceConfig, updateMemoryPalaceConfig, remoteVectorConfig, syncEmotionApiToAllCharacters, theme: baseOsTheme, proactiveComposingChars, openDateWithChar } = useOS();
     const activeCharacterId=homePhone?.characterId??osActiveCharacterId;
-    const osTheme = useMemo(()=>homePhone?homePhoneAppearance(baseOsTheme):resolveDecorationTheme(baseOsTheme,characters.find(c=>c.id===activeCharacterId)||characters[0]),[baseOsTheme,characters,activeCharacterId,!!homePhone]);
     const isProactiveComposing = !!(activeCharacterId && proactiveComposingChars[activeCharacterId]);
+    const sendProgress = useSyncExternalStore(subscribeChatSendProgress, () => getChatSendProgress(activeCharacterId), () => null);
+    const osTheme = useMemo(()=>homePhone?homePhoneAppearance(baseOsTheme):resolveDecorationTheme(baseOsTheme,characters.find(c=>c.id===activeCharacterId)||characters[0]),[baseOsTheme,characters,activeCharacterId,!!homePhone]);
     const localDateKey = useLocalDateKey();
 
     // 记忆宫殿高水位（用于清空聊天时的安全检查）
@@ -312,8 +328,9 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const [editContent, setEditContent] = useState('');
     const [isSummarizing, setIsSummarizing] = useState(false);
     const [archiveProgress, setArchiveProgress] = useState('');
-    const [showProactiveModal, setShowProactiveModal] = useState(false);
     const [showActiveMsg2Modal, setShowActiveMsg2Modal] = useState(false);
+    const [showProactiveModal, setShowProactiveModal] = useState(false);
+    const [showAwayMessageModal, setShowAwayMessageModal] = useState(false);
     const [showThinkingChainModal, setShowThinkingChainModal] = useState(false);
 
     // Archive Prompts State
@@ -348,6 +365,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const [translationExpanded, setTranslationExpanded] = useState(() => {
         try { return JSON.parse(localStorage.getItem(`chat_translate_expanded_${activeCharacterId}`) || 'false'); } catch { return false; }
     });
+    const [translationStyle, setTranslationStyle] = useState<ChatTranslationStyle>(() => readChatTranslationStyle(activeCharacterId));
+    const [subtitleSettings, setSubtitleSettings] = useState(() => readSubtitleSettings(activeCharacterId));
     // Which messages are currently showing "译" version (toggle state only, no API calls)
     const [showingTargetIds, setShowingTargetIds] = useState<Set<number>>(new Set());
 
@@ -658,7 +677,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                     messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: text }],
                     temperature: 0.3,
                 }),
-            });
+                __sullyMeta: { appId: 'chat', appName: '消息', charId: char?.id, charName: char?.name, purpose: '语音字幕翻译' },
+            } as RequestInit);
             if (!res.ok) throw new Error(`translate http ${res.status}`);
             const data = await res.json();
             return data?.choices?.[0]?.message?.content?.trim() || '';
@@ -1213,6 +1233,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             try {
                 setTranslationExpanded(JSON.parse(localStorage.getItem(`chat_translate_expanded_${activeCharacterId}`) || 'false'));
             } catch { setTranslationExpanded(false); }
+            setTranslationStyle(readChatTranslationStyle(activeCharacterId));
+            setSubtitleSettings(readSubtitleSettings(activeCharacterId));
             setVisibleCount(30);
             visibleCountRef.current = 30;
             lastMsgIdRef.current = null;
@@ -1349,6 +1371,16 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         return () => window.removeEventListener('storage', onStorage);
     }, [reloadMessages]);
 
+    // Resume in the same mounted chat: another page may already have persisted the reply
+    // and consumed its inbox event. Read the current records without re-entering the app.
+    useEffect(() => {
+        if (!activeCharacterId || (activeApp !== AppID.Chat && !homePhone)) return;
+        return subscribePageForeground(() => {
+            setInstantChatPending(!!getInstantChatPending(activeCharacterId));
+            if (!historyWindowRangeRef.current) void reloadMessages(visibleCountRef.current);
+        });
+    }, [activeCharacterId, activeApp, homePhone, reloadMessages]);
+
     useEffect(() => {
         visibleCountRef.current = visibleCount;
     }, [visibleCount]);
@@ -1382,6 +1414,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             lastMsgIdRef.current = currentLastId;
         }
     }, [messages, activeCharacterId, selectionMode, windowedFocusMsgId]);
+
+    useChatViewportAnchor(scrollRef, activeCharacterId, !!char && !selectionMode && windowedFocusMsgId === null);
 
     const extendHistoryWindow = useCallback((direction: 'older' | 'newer') => {
         const scroller = scrollRef.current;
@@ -1476,7 +1510,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 // 回合首条即响：距上一条气泡 >3s 视为新回合，立刻响一次；同一轮后续气泡只刷新计时、不再响。
                 const now = Date.now();
                 if (sync.lastAt == null || now - sync.lastAt > SOUND_ROUND_GAP_MS) {
-                    !homePhone && playWhiteboxSound(resolveActiveSound(char?.chromeCustomCss, char?.chatSound, osTheme.chatChromeCustomCss, osTheme.chatSound));
+                    !homePhone && char && playChatNotificationSound('character', char.id);
                 }
                 sync.lastAt = now;
             }
@@ -1606,6 +1640,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             if ((xhsFullNoteId || xhsShortUrl) && await decideLinkCard('xhsCards')) {
                 let noteId = xhsFullNoteId || '';
                 let xsecToken = xhsFullNote?.xsecToken;
+                let sourceLink = xhsFullNote;
                 let shortLinkError = '';
                 // 短链（xhslink.com / xhslink.cn）不含 id/token —— 先经 sfworker 展开成真实链接再提取。
                 if (!noteId && xhsShortUrl) {
@@ -1614,6 +1649,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                         const expandedNote = extractXhsNoteLink(finalUrl);
                         noteId = expandedNote?.noteId || '';
                         xsecToken = expandedNote?.xsecToken;
+                        sourceLink = expandedNote;
                         if (!noteId) shortLinkError = '短链返回的页面中未找到笔记地址';
                         if (isDevDebugAvailable()) console.log('[卡片调试] 小红书短链展开 →', finalUrl, '| noteId =', noteId);
                     } catch (e) {
@@ -1631,14 +1667,14 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                     // 基础卡数据来自分享文案，零后端依赖。
                     let note: any = {
                         noteId, title: titleFromText || '', desc: '', author: '',
-                        authorId: '', likes: 0, xsecToken,
+                        authorId: '', likes: 0, xsecToken, url: sourceLink?.url, xsecSource: sourceLink?.xsecSource,
                     };
 
                     // 有小红书 MCP/Lite 才抓详情补全（正文/封面/作者/赞数）。
                     const mcpUrl = realtimeConfig?.xhsMcpConfig?.serverUrl;
                     if (mcpUrl && realtimeConfig?.xhsMcpConfig?.enabled) {
                         try {
-                            const noteUrl = `https://www.xiaohongshu.com/explore/${noteId}${xsecToken ? `?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=pc_share` : ''}`;
+                            const noteUrl = sourceLink?.url || `https://www.xiaohongshu.com/explore/${noteId}${xsecToken ? `?xsec_token=${encodeURIComponent(xsecToken)}&xsec_source=pc_share` : ''}`;
                             // loadAllComments：和角色自己浏览笔记 (XHS_DETAIL) 一致地把评论区也抓回来，
                             // 否则 user 分享的笔记只有标题/正文，角色读不到评论（char 分享给 user 的却能看到）。
                             const result = await XhsMcpClient.getNoteDetail(mcpUrl, noteUrl, xsecToken, { loadAllComments: true });
@@ -1646,7 +1682,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                             if (result.success && result.data) {
                                 const fetched = normalizeXhsLiteDetail(result.data);
                                 // 抓到的字段补全基础卡；id/标题/token 保底，标题优先文案标题（更完整可读）。
-                                note = { ...note, ...fetched, noteId: fetched.noteId || note.noteId, title: titleFromText || fetched.title || note.title, xsecToken: fetched.xsecToken || xsecToken };
+                                note = { ...note, ...fetched, noteId: fetched.noteId || note.noteId, title: titleFromText || fetched.title || note.title, xsecToken: fetched.xsecToken || xsecToken,
+                                    url: sourceLink?.url || fetched.url, xsecSource: sourceLink?.xsecSource || fetched.xsecSource };
                             } else if (!result.success) {
                                 // 基础卡仍然可以发送，只提示详情读取失败，避免误以为整次分享失败。
                                 addToast(`小红书正文读取失败，已发送基础卡片。请尝试开启/关闭科学上网、切换 Wi‑Fi/流量，或检查 Lite 配置。${result.error ? `（${result.error}）` : ''}`, 'info');
@@ -1787,6 +1824,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const handleManualTrigger = () => {
         autoReply.cancel();
         if (isTyping || instantChatPending) {
+            cancelChatSendProgress(char.id);
             stopReplyRuns(char.id);
             void stopInstantChat(char.id).catch(error => {
                 console.warn('[Chat] remote stop failed', error);
@@ -1896,7 +1934,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         // 选表情、选分类之类的动作不上报。
         if ([
             'transfer', 'archive', 'settings', 'chrome-css', 'chrome-sound', 'fine-tune',
-            'meetup', 'proactive', 'active-msg-2', 'schedule', 'mcd-request', 'luckin-request',
+            'meetup', 'active-msg-2', 'away-message', 'schedule', 'mcd-request', 'luckin-request',
             'html-mode-toggle', 'html-mode-settings', 'thinking-settings', 'favorites', 'collaboration',
             // 独立小功能：点一下就是用了一次，跟「打开某个面板」同一性质。
             // send-emoji / select-category 这些是「挑哪一个」，不进名单。
@@ -1927,8 +1965,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             case 'category-options': setSelectedCategory(payload); setModalType('category-options'); break;
             case 'delete-category-req': setSelectedCategory(payload); setModalType('delete-category'); break;
             case 'meetup': if (char) { setShowPanel('none'); openDateWithChar(char.id); } break;
-            case 'proactive': setShowProactiveModal(true); break;
             case 'active-msg-2': setShowActiveMsg2Modal(true); break;
+            case 'away-message': setShowAwayMessageModal(true); break;
             case 'emotion': setModalType('schedule'); break; // 情绪已并入日程，打开同一 modal
             case 'schedule': setModalType('schedule'); break;
             case 'mcd-not-configured':
@@ -2980,8 +3018,9 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                         messages: [{ role: "user", content: prompt }],
                         temperature: 0.5,
                         max_tokens: 8000 
-                    })
-                });
+                    }),
+                    __sullyMeta: { appId: 'chat', appName: '消息', charId: char?.id, charName: char?.name, purpose: '单日记忆归档' },
+                } as RequestInit);
 
                 if (!response.ok) throw new Error(`API Error on ${dateStr}`);
                 const data = await safeResponseJson(response);
@@ -3101,12 +3140,13 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     };
 
     const handleQuickReply = useCallback((message: Message) => {
+        if (!char) return;
         setReplyTarget({
             ...message,
             metadata: { ...message.metadata, senderName: message.role === 'user' ? '我' : char.name }
         });
         trackEvent('引用回复一条消息');
-    }, [char.name]);
+    }, [char?.name]);
 
     const handleReplyMessage = () => {
         if (!selectedMessage) return;
@@ -3608,6 +3648,17 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         return displayMessages.filter(message => !pending.has(message.id));
     }, [displayMessages, streamingBubbles, streamingThinking, streamingHandoverIds, selectionMode]);
 
+    const timeSegmentStarts = useMemo(() => computeTimeSegmentStarts(renderedMessages), [renderedMessages]);
+    const lastNonSystemRenderedMessage = useMemo(() => {
+        for (let i = renderedMessages.length - 1; i >= 0; i--) {
+            if (renderedMessages[i].role !== 'system') return renderedMessages[i];
+        }
+        return null;
+    }, [renderedMessages]);
+
+    const sendProgressInList = sendProgress?.messageId != null
+        && renderedMessages.some(message => message.id === sendProgress.messageId && message.role === 'user');
+
     useLayoutEffect(() => {
         publishReplyDisplay(activeCharacterId, renderedMessages.map(message => message.id), streamingBubbles);
     }, [activeCharacterId, renderedMessages, streamingBubbles]);
@@ -3643,16 +3694,32 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         }
     }, [displayMessages]);
 
-    // 稳定的思维链配置对象：只在角色/样式变化时重建，避免每次渲染新建对象击穿 MessageItem.memo。
+    const handleTranslateThinking = useCallback(async (message: Message) => {
+        if (!apiConfig.thinkingTranslationApi && !message.metadata?.thinkingChainTranslation) {
+            setShowThinkingChainModal(true);
+            throw new Error('请先配置翻译 API，然后再长按翻译。');
+        }
+        const translation = await translateThinkingMessage(message, apiConfig.thinkingTranslationApi, char?.name);
+        const source = String(message.metadata?.thinkingChain || '').trim();
+        setMessages(previous => previous.map(row => row.id === message.id && row.charId === message.charId
+            && String(row.metadata?.thinkingChain || '').trim() === source
+            ? { ...row, metadata: { ...row.metadata, thinkingChainTranslation: translation } } : row));
+        return translation;
+    }, [apiConfig.thinkingTranslationApi, char?.name]);
+
+    // Stable options preserve MessageItem memoization while typing or streaming.
     const thinkingChainOptions = useMemo(() => ({
         ...resolvePsycheAppearance(osTheme, char),
         onOpenSettings: () => setShowThinkingChainModal(true),
-    }), [char?.thinkingChainStyle, char?.thinkingChainCustomColors, osTheme.chatPsyche]);
+        onTranslate: handleTranslateThinking,
+    }), [char?.thinkingChainStyle, char?.thinkingChainCustomColors, osTheme.chatPsyche, handleTranslateThinking]);
 
     // 工具痕迹那行灰字要贴着气泡走，所以把气泡自带的组间距（MessageItem 里那组
     // mb-3 / mb-6 / mb-8）抵掉大半。组内的气泡本来就挨着，不用抵。
+    const topCenterTimestamp = osTheme.chatTimestampPosition === 'top_center';
     const toolTracePullClass = osTheme.chatMessageSpacing === 'compact' ? '-mt-2'
-        : osTheme.chatMessageSpacing === 'spacious' ? '-mt-6' : '-mt-5';
+        : osTheme.chatMessageSpacing === 'spacious' ? (topCenterTimestamp ? '-mt-5' : '-mt-6')
+        : (topCenterTimestamp ? '-mt-2.5' : '-mt-5');
 
     // Reset active category if it becomes invisible for the current character
     useEffect(() => {
@@ -3678,24 +3745,26 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             || selectionMode || isSummarizing || collaborationOpen || memoryRepairOpen || favoritesOpen
             || showChatExport || showChatSearch || showProactiveModal || showActiveMsg2Modal || showThinkingChainModal
             || mcdAppOpen || luckinAppOpen || showForwardModal,
-        generating: isTyping || instantChatPending || isProactiveComposing,
+        generating: isTyping || instantChatPending,
         onGenerate: handleManualTrigger,
     });
     // 角色自定义聊天背景：字段值可能是 blobref 令牌（二进制在 IndexedDB），这里解析成能直接
     // 喂进 CSS url() 的地址；data: / http(s) 之类的非令牌值渲染期原样透传。
     // hook 必须在下面的空态早退之前调用，所以用可选链读 char。
     const resolvedChatBackground = useBlobRefUrl(homePhone?undefined:char?.chatBackground ?? osTheme.chatBackground);
-    // 兜底：正常情况下 OSContext 启动时一定会保底一个角色，char 不该为空。
-    // 但若 init 期间某个 store 读取失败（数据其实还在 IndexedDB 里），characters 可能暂时为空，
-    // 此时下面读 char 上的字段会直接抛 "undefined is not an object" 把整个 App 崩到错误页。
-    // 这里给个温和空态，避免硬崩，也好让用户能退回桌面/重启恢复。
+    // Empty spaces are valid. Keep every hook above the empty return so adding or
+    // deleting the last character does not change React's hook order.
+    const mergedFineTune = useMemo(() => mergeChatFineTune(osTheme, homePhone?undefined:char?.chatFineTune), [osTheme, char?.chatFineTune,!!homePhone]);
+    const chatFineTuneCss = useMemo(() => buildChatFineTuneCss(mergedFineTune), [mergedFineTune]);
+    const selectedAvatarFrameCss=useMemo(()=>avatarFrameLayer([osTheme.chatChromeCustomCss,char?.chromeCustomCss].filter(Boolean).join('\n')),[osTheme.chatChromeCustomCss,char?.chromeCustomCss]);
     if (!char) {
         return (
             <div className="flex flex-col items-center justify-center h-full bg-[#f1f5f9] text-center px-8 gap-3">
                 <div className="text-4xl">💤</div>
                 <div className="text-slate-600 text-sm font-medium">暂时没有可用的角色</div>
-                <div className="text-slate-400 text-xs leading-relaxed">数据可能未加载完成。请退回桌面后重新进入；若仍为空，重启应用即可恢复。</div>
-                <button onClick={closeApp} className="mt-2 px-4 py-2 rounded-full bg-slate-800 text-white text-xs">返回桌面</button>
+                <div className="text-slate-400 text-xs leading-relaxed">当前用户空间还没有角色，可以前往神经链接创建、导入或继承角色。</div>
+                <button onClick={() => openApp(AppID.Character)} className="mt-2 px-4 py-2 rounded-full bg-slate-800 text-white text-xs">前往神经链接</button>
+                <button onClick={homePhone?.onBack ?? closeApp} className="px-4 py-2 text-slate-500 text-xs">{homePhone ? '返回' : '返回桌面'}</button>
             </div>
         );
     }
@@ -3752,11 +3821,6 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     // 动森下强制覆盖角色自定义聊天背景，保证整机一致的彩蛋观感
     // 进入/切换的过场由 CharacterEntryTransition 覆盖层负责，根容器不再自己做淡入。
     const finalRootStyle = acnh ? acnhRootStyle : chatRootStyle;
-    // 聊天细节微调（外观 → 聊天细节，全局打底；角色开了「聊天装扮」时逐字段覆盖）：
-    // CSS 全默认时为空串不注入；chatModuleAlign 不走 CSS，作为布局属性传给 MessageItem。
-    const mergedFineTune = useMemo(() => mergeChatFineTune(osTheme, homePhone?undefined:char?.chatFineTune), [osTheme, char?.chatFineTune,!!homePhone]);
-    const chatFineTuneCss = useMemo(() => buildChatFineTuneCss(mergedFineTune), [mergedFineTune]);
-    const selectedAvatarFrameCss=useMemo(()=>avatarFrameLayer([osTheme.chatChromeCustomCss,char?.chromeCustomCss].filter(Boolean).join('\n')),[osTheme.chatChromeCustomCss,char?.chromeCustomCss]);
     const chatAvatarSizeClass = osTheme.chatAvatarSize === 'small' ? 'w-7 h-7' : osTheme.chatAvatarSize === 'large' ? 'w-12 h-12' : 'w-9 h-9';
     const chatAvatarRadiusClass = osTheme.chatAvatarShape === 'square' ? 'rounded-sm' : osTheme.chatAvatarShape === 'rounded' ? 'rounded-xl' : 'rounded-full';
     const chatPendingAvatarClass = `${chatAvatarSizeClass} ${chatAvatarRadiusClass} object-cover`;
@@ -3992,8 +4056,451 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                  </div>
              )}
 
-             {showHistoryCleanup && <ChatHistoryCleanupModal key={`history-cleanup:${char.id}`} character={char} onClose={() => setShowHistoryCleanup(false)} onDeleted={handleHistoryCleanupDone} />}
-             {emojiExport && <EmojiExportDialog {...emojiExport} onClose={() => setEmojiExport(null)} />}
+            <StreamingVoiceBar state={streamingVoice.state} onStop={stopStreamingVoice} />
+            <div ref={scrollRef} onScroll={handleChatScroll} onClick={() => setShowPanel('none')} className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain pt-6 pb-6 no-scrollbar" style={{ backgroundImage: activeTheme.type === 'custom' && activeTheme.user.backgroundImage ? 'none' : undefined }}>
+                <ChatSubtitleLayer enabled={translationEnabled && translationExpanded && translationStyle === 'subtitle'} settings={subtitleSettings}>
+                {windowedFocusMsgId !== null && (
+                    <div className="sticky top-0 z-20 flex justify-center pb-2 pointer-events-none">
+                        <button onClick={handleBackToCurrent} className="pointer-events-auto px-4 py-2 bg-primary text-white rounded-full text-xs font-bold shadow-lg active:scale-95 transition-transform flex items-center gap-1.5">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.2} stroke="currentColor" className="w-3.5 h-3.5"><path strokeLinecap="round" strokeLinejoin="round" d="M19.5 13.5 12 21m0 0-7.5-7.5M12 21V3" /></svg>
+                            回到当前聊天
+                        </button>
+                    </div>
+                )}
+                {collapsedCount > 0 && windowedFocusMsgId === null && (
+                    <div className="flex justify-center mb-6">
+                        <button onClick={async () => {
+                            const nextVisibleCount = visibleCount + LOAD_BATCH_SIZE;
+                            visibleCountRef.current = nextVisibleCount;
+                            setVisibleCount(nextVisibleCount);
+                            await reloadMessages(nextVisibleCount);
+                        }} className="sully-chat-history-load px-4 py-2 bg-white/60 bg-white/50 backdrop-blur-sm rounded-full text-xs text-slate-500 shadow-sm border border-white hover:bg-white transition-colors">加载历史消息 ({collapsedCount})</button>
+                    </div>
+                )}
+                {windowedFocusMsgId !== null && (
+                    <div className="flex justify-center mb-4 px-4">
+                        {hasOlderHistoryWindow ? (
+                            <button
+                                onClick={() => extendHistoryWindow('older')}
+                                className="sully-chat-history-load sully-chat-history-older px-3 py-1.5 bg-white/60 backdrop-blur-sm rounded-full text-[11px] text-slate-500 shadow-sm border border-white hover:bg-white transition-colors"
+                            >
+                                向上滑继续看更早消息
+                            </button>
+                        ) : (
+                            <span className="text-[11px] text-slate-400">已到最早一条消息</span>
+                        )}
+                    </div>
+                )}
+
+                {renderedMessages.map((m, i) => {
+                    const prevMessage = i > 0 ? renderedMessages[i - 1] : null;
+                    const nextMessage = i < renderedMessages.length - 1 ? renderedMessages[i + 1] : null;
+                    const breaksWithPrevious = startsNewMessageGroup(prevMessage, m);
+                    const breaksWithNext = !nextMessage || startsNewMessageGroup(m, nextMessage);
+                    const suppressEntranceAnimation = streamPreviewHandoverIdsRef.current.has(m.id);
+                    // 这一轮在云端跑过哪些工具（即时对话才有，worker 挂在最后一条推送上）。
+                    // 一条推送拆出的每条气泡都继承了同一份（metadata 是整份往下铺的，见
+                    // activeMsgRuntime 的 mcdInheritMeta），所以只在这条推送的最后一条底下画，
+                    // 不然一句回复底下能排出三行一模一样的字。
+                    // 多选状态下不画：跟旁边那两块浮层一样，让位给选择框。
+                    const toolTraceText = selectionMode
+                        ? '' : formatAmsgToolTrace((m.metadata as any)?.amsgToolTrace);
+                    const pushMessageId = (m.metadata as any)?.activeMsg2?.messageId;
+                    const showToolTrace = !!toolTraceText
+                        && !(pushMessageId && (nextMessage?.metadata as any)?.activeMsg2?.messageId === pushMessageId);
+                    return (
+                        <div
+                            key={m.id || i}
+                            id={`chat-msg-${m.id}`}
+                            className={[
+                                flashMsgId === m.id ? 'ring-2 ring-yellow-300 bg-yellow-50/40 rounded-2xl mx-2' : '',
+                                animatingIds.has(m.id) && !suppressEntranceAnimation ? 'animate-fade-in' : '',
+                                'transition-all duration-300',
+                            ].filter(Boolean).join(' ')}
+                            onAnimationEnd={(e) => {
+                                if (e.target !== e.currentTarget) return;
+                                if (animatingIds.has(m.id)) setAnimatingIds(prev => { const next = new Set(prev); next.delete(m.id); return next; });
+                            }}
+                        >
+                        <MessageItem
+                            msg={m}
+                            isFirstInGroup={breaksWithPrevious}
+                            isLastInGroup={breaksWithNext}
+                            activeTheme={activeTheme}
+                            charAvatar={char.avatar}
+                            charName={char.name}
+                            userAvatar={userProfile.perCharAvatars?.[char.id] || userProfile.avatar}
+                            isLatestMessage={!nextMessage}
+                            onMediaLoad={handleMessageMediaLoad}
+                            moduleAlign={mergedFineTune.chatModuleAlign || 'center'}
+                            onLongPress={handleMessageLongPress}
+                            onReply={handleQuickReply}
+                            selectionMode={selectionMode}
+                            isSelected={selectedMsgIds.has(m.id)}
+                            onToggleSelect={toggleMessageSelection}
+                            isThinkingSelected={selectedThinkingMsgIds.has(m.id)}
+                            onToggleThinkingSelect={toggleThinkingSelection}
+                            translationEnabled={translationEnabled && m.type === 'text' && m.role === 'assistant'}
+                            translationExpanded={translationExpanded}
+                            translationStyle={translationStyle}
+                            isShowingTarget={showingTargetIds.has(m.id)}
+                            onTranslateToggle={handleTranslateToggle}
+                            voiceData={voiceDataMap[m.id]}
+                            voiceLoading={voiceLoading.has(m.id)}
+                            isVoicePlaying={playingMsgId === m.id}
+                            onPlayVoice={onPlayVoiceStable}
+                            avatarShape={osTheme.chatAvatarShape}
+                            avatarSize={osTheme.chatAvatarSize}
+                            avatarMode={osTheme.chatAvatarMode}
+                            bubbleVariant={osTheme.chatBubbleStyle}
+                            messageSpacing={osTheme.chatMessageSpacing}
+                            showTimestamp={osTheme.chatShowTimestamp}
+                            timestampPosition={osTheme.chatTimestampPosition}
+                            startsTimeSegment={timeSegmentStarts[i]}
+                            suppressEntranceAnimation={suppressEntranceAnimation}
+                            onMcdSendCart={handleMcdSendCart}
+                            onMcdCandidate={handleMcdCandidate}
+                            onResolveTransfer={handleResolveTransfer}
+                            onResolveLifeRecord={handleResolveLifeRecord}
+                            onOpenCollaborationFile={handleOpenCollaborationFile}
+                            thinkingChainOptions={thinkingChainOptions}
+                            sendPhase={m.role === 'user' && sendProgress?.messageId === m.id ? sendProgress.phase : undefined}
+                        />
+                        {showToolTrace && (
+                            <div className={`px-3 mb-4 ${breaksWithNext ? toolTracePullClass : ''}`}>
+                                <div className="ml-12 text-[10px] leading-relaxed text-slate-400">
+                                    调用了工具：{toolTraceText}
+                                </div>
+                            </div>
+                        )}
+                        </div>
+                    );
+                })}
+                {windowedFocusMsgId !== null && (
+                    <div className="flex justify-center mt-2 mb-4 px-4">
+                        {hasNewerHistoryWindow ? (
+                            <button
+                                onClick={() => extendHistoryWindow('newer')}
+                                className="sully-chat-history-load sully-chat-history-newer px-3 py-1.5 bg-white/60 backdrop-blur-sm rounded-full text-[11px] text-slate-500 shadow-sm border border-white hover:bg-white transition-colors"
+                            >
+                                向下滑继续看较新消息
+                            </button>
+                        ) : (
+                            <span className="text-[11px] text-slate-400">已到当前最新消息</span>
+                        )}
+                    </div>
+                )}
+
+                {/* 渠道确实发送 reasoning 增量时，先用正式心象卡实时展示；落库后同帧交给正式消息。 */}
+                {streamingThinking && !selectionMode && (
+                    <div className="group flex items-end justify-start relative px-3 mb-1.5 animate-fade-in">
+                        <div className="relative max-w-[72%] min-w-0 ml-12">
+                            <ThinkingChainBlock
+                                chain={streamingThinking}
+                                styleId={thinkingChainOptions.styleId}
+                                customColors={thinkingChainOptions.customColors}
+                                onOpenSettings={thinkingChainOptions.onOpenSettings}
+                            />
+                        </div>
+                    </div>
+                )}
+
+                {/* 流式预览直接复用正式 MessageItem：气泡变体、主题背景图/装饰、头像框、
+                    grouped/every_message、消息间距、时间戳、Markdown 与所有自定义 CSS 天然一致。
+                    整轮落库完成后一起交接，已登记接棒 id 的正式消息首帧不再重播 fade-in。 */}
+                {streamingBubbles.length > 0 && !selectionMode && (
+                    <>
+                        {streamingBubbles.map((bubble, i) => (
+                            <div key={`stream-preview-${i}`} data-stream-preview={i} className="transition-all duration-300">
+                                <MessageItem
+                                    msg={{
+                                        id: -(i + 1),
+                                        charId: char.id,
+                                        role: 'assistant',
+                                        type: 'text',
+                                        content: bubble,
+                                        timestamp: Date.now(),
+                                    }}
+                                    isFirstInGroup={i === 0}
+                                    isLastInGroup={i === streamingBubbles.length - 1}
+                                    activeTheme={activeTheme}
+                                    charAvatar={char.avatar}
+                                    charName={char.name}
+                                    userAvatar={userProfile.perCharAvatars?.[char.id] || userProfile.avatar}
+                                    onLongPress={() => {}}
+                                    onReply={() => {}}
+                                    selectionMode={false}
+                                    isSelected={false}
+                                    onToggleSelect={() => {}}
+                                    avatarShape={osTheme.chatAvatarShape}
+                                    avatarSize={osTheme.chatAvatarSize}
+                                    avatarMode={osTheme.chatAvatarMode}
+                                    bubbleVariant={osTheme.chatBubbleStyle}
+                                    messageSpacing={osTheme.chatMessageSpacing}
+                                    showTimestamp={osTheme.chatShowTimestamp}
+                                    timestampPosition={osTheme.chatTimestampPosition}
+                                    startsTimeSegment={i === 0 && startsNewTimeSegment(lastNonSystemRenderedMessage, { timestamp: Date.now() })}
+                                    thinkingChainOptions={thinkingChainOptions}
+                                />
+                            </div>
+                        ))}
+                    </>
+                )}
+                {/* instantChatPending：这一轮在云端跑，本机可以关页面，指示灯靠落盘记录活着。 */}
+                {(isTyping || instantChatPending || recallStatus || searchStatus || diaryStatus) && !selectionMode && (
+                    <div className="flex items-end gap-3 px-3 mb-6 animate-fade-in">
+                        <TokenImg value={char.avatar} className={chatPendingAvatarClass} />
+                        <div className="bg-white px-4 py-3 rounded-2xl shadow-sm">
+                            {inboxStatus ? (
+                                <div role="status" className="flex items-center gap-2 text-xs text-slate-500 font-medium">
+                                    <span className="h-3 w-3 shrink-0 rounded-full border-2 border-slate-300 border-t-slate-500 animate-spin" aria-hidden="true" />
+                                    {inboxStatus}
+                                </div>
+                            ) : searchStatus ? (
+                                <div className="flex items-center gap-2 text-xs text-emerald-500 font-medium">
+                                    <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                    🔍 {searchStatus}
+                                </div>
+                            ) : recallStatus ? (
+                                <div className="flex items-center gap-2 text-xs text-indigo-500 font-medium">
+                                    <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                    {recallStatus}
+                                </div>
+                            ) : diaryStatus ? (
+                                <div className="flex items-center gap-2 text-xs text-amber-600 font-medium">
+                                    <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                    📖 {diaryStatus}
+                                </div>
+                            ) : (
+                                <div className="flex gap-1"><div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce"></div><div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce delay-75"></div><div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce delay-150"></div></div>
+                            )}
+                        </div>
+                    </div>
+                )}
+                </ChatSubtitleLayer>
+            </div>
+
+            <div className="relative z-40">
+                {mcdActivated && (
+                    <div className="flex items-center justify-between px-4 py-1.5 bg-yellow-50 border-b border-yellow-200 text-xs">
+                        <div className="flex items-center gap-1.5 text-yellow-700 font-bold">
+                            <span className="inline-block w-1.5 h-1.5 rounded-full bg-yellow-500 animate-pulse"/>
+                            🍔 麦请求进行中
+                        </div>
+                        <button
+                          onClick={() => handleSendText(MCD_DEACTIVATE_TRIGGER, 'text', { mcdDeactivate: true })}
+                          className="px-2.5 py-0.5 bg-yellow-200/80 text-yellow-800 rounded-full text-[11px] font-bold active:scale-95"
+                        >
+                          结束
+                        </button>
+                    </div>
+                )}
+                {luckinActivated && (
+                    <div className="flex items-center justify-between px-4 py-1.5 bg-[#eef3fa]/95 backdrop-blur-sm border-b border-[#0B1F3A]/15 text-[#0B1F3A] text-xs">
+                        <div className="flex items-center gap-1.5 text-[#0B1F3A] font-bold">
+                            <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#C6A15B] animate-pulse"/>
+                            🦌 瑞一杯进行中
+                            {luckinChatRef.current?.cityName && <span className="font-normal text-[#0B1F3A]/60">· {luckinChatRef.current.cityName}</span>}
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => setShowLuckinHelp(true)}
+                              title="瑞一杯怎么用"
+                              className="w-5 h-5 flex items-center justify-center bg-[#0B1F3A]/10 text-[#0B1F3A] rounded-full text-[11px] font-bold active:scale-95"
+                            >
+                              ?
+                            </button>
+                            <button
+                              onClick={() => setShowLuckinLoc(true)}
+                              className="px-2.5 py-0.5 bg-[#0B1F3A]/10 text-[#0B1F3A] rounded-full text-[11px] font-bold active:scale-95"
+                            >
+                              📍 改定位
+                            </button>
+                            <button
+                              onClick={deactivateLuckin}
+                              className="px-2.5 py-0.5 bg-[#0B1F3A]/10 text-[#0B1F3A] rounded-full text-[11px] font-bold active:scale-95"
+                            >
+                              结束
+                            </button>
+                        </div>
+                    </div>
+                )}
+                {replyTarget && (
+                    <div className="flex items-center justify-between px-4 py-2 bg-slate-50 border-b border-slate-200 text-xs text-slate-500">
+                        {/* 引用的是图片 / 表情时这里显示占位符，跟落库的快照同一口径 */}
+                        <div className="flex items-center gap-2 truncate"><span className="font-bold text-slate-700">正在回复:</span><span className="truncate max-w-[200px]">{buildReplySnapshotContent(replyTarget)}</span></div>
+                        <button onClick={() => setReplyTarget(null)} className="p-1 text-slate-400 hover:text-slate-600">×</button>
+                    </div>
+                )}
+
+                {/* 开关写着「已开启」、这一轮却在本地生成时，把原因说给用户听 */}
+                <InstantChatRouteNotice charId={activeCharacterId} />
+
+                {/* 续答没有新的用户气泡，才在输入栏上沿显示同一个紧凑状态。 */}
+                {!selectionMode && !sendProgressInList && sendProgress && !['accepted', 'cancelled'].includes(sendProgress.phase) &&
+                    <div className="text-right px-4 text-[10px] text-slate-400"><ChatSendProgress phase={sendProgress.phase} /></div>}
+
+                <ChatInputArea
+                    compactHome={!!homePhone}
+                    awayMessageOn={!!char?.awayMessage?.enabled}
+                    input={input} setInput={handleInputChange}
+                    isTyping={isTyping || instantChatPending} selectionMode={selectionMode}
+                    showPanel={showPanel} setShowPanel={setShowPanel}
+                    onSend={handleSendCallback}
+                    onGenerate={handleManualTrigger}
+                    sendButtonGenerates={inputPreferences.sendButtonGenerates}
+                    enterToSend={inputPreferences.enterToSend}
+                    autoReplyEnabled={inputPreferences.autoReply}
+                    autoReplySeconds={autoReply.seconds}
+                    onCancelAutoReply={autoReply.cancel}
+                    onInputFocusChange={setIsInputFocused}
+                    onDeleteSelected={handleBatchDelete}
+                    onForwardSelected={handleForwardSelected}
+                    onFavoriteSelected={handleFavoriteSelected}
+                    favoriteSelectedCount={messages.filter(message => message.charId === char?.id && selectedMsgIds.has(message.id)).length}
+                    selectedCount={selectedMsgIds.size + Array.from(selectedThinkingMsgIds).filter(id => !selectedMsgIds.has(id)).length}
+                    emojis={filteredEmojis}
+                    emojiSuggestionsEnabled={inputPreferences.emojiSuggestions}
+                    suggestionEmojis={aiVisibleEmojis}
+                    characters={characters} activeCharacterId={activeCharacterId}
+                    onCharSelect={handleCharSelectCallback}
+                    unreadMessages={unreadMessages}
+                    customThemes={customThemes} onUpdateTheme={(id) => updateCharacter(char.id, { bubbleStyle: id })}
+                    onRemoveTheme={removeCustomTheme} activeThemeId={currentThemeId}
+                    onPanelAction={handlePanelAction}
+                    onImageSelect={handleImageSelect}
+                    isSummarizing={isSummarizing}
+                    categories={visibleCategories}
+                    activeCategory={activeCategory}
+                    onReroll={handleReroll}
+                    canReroll={canReroll}
+                    mcdConfigured={mcdConfiguredFlag}
+                    mcdActivated={mcdActivated}
+                    luckinConfigured={luckinConfiguredFlag}
+                    luckinActivated={luckinActivated}
+                    htmlModeEnabled={!!(char as any).htmlModeEnabled}
+                    showThinkingChain={!!(char as any).showThinkingChain}
+                    inputStyle={osTheme.chatInputStyle}
+                    sendButtonStyle={osTheme.chatSendButtonStyle}
+                    chromeStyle={osTheme.chatChromeStyle}
+                    acnh={acnh}
+                />
+            </div>
+            {/* .sully-chat-root 仅包裹聊天舞台；系统弹窗、迷你应用与底部面板挂载在舞台外，避免白框顶层颜色/字体规则向表单和对话框继承。 */}
+
+            {/* 记忆整理结果 — 弹窗（高级感） */}
+            {memoryPalaceResult && (
+                <div
+                    className="absolute inset-0 z-[200] flex items-center justify-center p-4 animate-fade-in"
+                    style={{
+                        pointerEvents: 'all',
+                        background: 'rgba(15,23,42,0.55)',
+                    }}
+                    onClick={() => setMemoryPalaceResult(null)}
+                >
+                    <div
+                        className="w-full max-w-sm max-h-[82vh] overflow-hidden flex flex-col relative text-slate-800"
+                        style={{
+                            background: 'linear-gradient(160deg, #ffffff 0%, #f8fafc 100%)',
+                            borderRadius: 28,
+                            border: '1px solid rgba(148,163,184,0.18)',
+                            boxShadow: '0 20px 50px -20px rgba(15,23,42,0.35)',
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div
+                            className="absolute top-0 left-0 right-0 h-[2px] pointer-events-none"
+                            style={{ background: 'linear-gradient(90deg, transparent, #6366f1, #a5b4fc, #6366f1, transparent)' }}
+                        />
+                        <div className="px-6 pt-7 pb-4 text-center">
+                            <div
+                                className="w-14 h-14 mx-auto rounded-2xl flex items-center justify-center mb-3"
+                                style={{
+                                    background: 'linear-gradient(135deg, rgba(99,102,241,0.12), rgba(129,140,248,0.06))',
+                                    border: '1px solid rgba(99,102,241,0.15)',
+                                }}
+                            >
+                                <span style={{ fontSize: 26 }}>🗂️</span>
+                            </div>
+                            <div className="text-[10px] tracking-[0.25em] uppercase font-semibold" style={{ color: '#6366f1' }}>Memory Palace</div>
+                            <p className="text-[17px] font-bold mt-1" style={{ color: '#0f172a' }}>记忆整理完成</p>
+                            <p className="text-[11px] text-slate-400 mt-1">
+                                新增 {memoryPalaceResult.stored} 条 · 去重跳过 {memoryPalaceResult.skipped} 条
+                                {memoryPalaceResult.batches.length > 1 && ` · ${memoryPalaceResult.batches.length} 批`}
+                            </p>
+                            {memoryPalaceResult.batches.some(b => !b.ok) && (
+                                <p className="text-[10px] text-red-500 mt-1">
+                                    {memoryPalaceResult.batches.filter(b => !b.ok).map(b => `batch ${b.index} 失败`).join(', ')}
+                                </p>
+                            )}
+                        </div>
+                        <div className="flex-1 overflow-y-auto px-5 pb-4 space-y-2 no-scrollbar">
+                            {memoryPalaceResult.memories.map((m, i) => {
+                                const roomMeta: Record<string, { label: string; color: string }> = {
+                                    living_room: { label: '客厅', color: '#f59e0b' },
+                                    bedroom: { label: '卧室', color: '#8b5cf6' },
+                                    study: { label: '书房', color: '#0ea5e9' },
+                                    user_room: { label: '用户房间', color: '#ec4899' },
+                                    self_room: { label: '自我房间', color: '#10b981' },
+                                    attic: { label: '阁楼', color: '#6366f1' },
+                                    windowsill: { label: '窗台', color: '#14b8a6' },
+                                };
+                                const meta = roomMeta[m.room] || { label: m.room, color: '#64748b' };
+                                const roomLabel = getRoomLabel(m.room as any, userProfile?.name) || meta.label;
+                                return (
+                                    <div
+                                        key={i}
+                                        className="p-3 rounded-2xl"
+                                        style={{
+                                            background: 'rgba(255,255,255,0.75)',
+                                            border: `1px solid ${meta.color}22`,
+                                            boxShadow: `0 2px 8px ${meta.color}14, inset 0 1px 0 rgba(255,255,255,0.8)`,
+                                        }}
+                                    >
+                                        <div className="flex items-center gap-2 mb-1.5">
+                                            <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold"
+                                                style={{ background: `${meta.color}18`, color: meta.color }}
+                                            >
+                                                {roomLabel}
+                                            </span>
+                                            <span className="text-[10px] text-slate-400">{m.mood}</span>
+                                            <span className="text-[10px] font-bold ml-auto" style={{ color: '#f59e0b' }}>{'★'.repeat(Math.min(m.importance, 5))}</span>
+                                        </div>
+                                        <p className="text-[12px] text-slate-700 leading-relaxed">{m.content}</p>
+                                        {m.tags.length > 0 && (
+                                            <div className="flex gap-1 mt-2 flex-wrap">
+                                                {m.tags.map((t, j) => (
+                                                    <span key={j} className="text-[9px] px-1.5 py-0.5 rounded-full"
+                                                        style={{ background: 'rgba(148,163,184,0.15)', color: '#64748b' }}
+                                                    >{t}</span>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                            {memoryPalaceResult.memories.length === 0 && (
+                                <p className="text-center text-xs text-slate-400 py-4">本次未提取到新记忆</p>
+                            )}
+                        </div>
+                        <div className="px-6 pb-6 pt-2">
+                            <button
+                                onClick={() => setMemoryPalaceResult(null)}
+                                className="w-full py-3 text-white text-[13px] font-bold rounded-2xl active:scale-[0.98] transition-transform"
+                                style={{
+                                    background: 'linear-gradient(135deg, #6366f1, #4f46e5)',
+                                    boxShadow: '0 6px 18px -6px rgba(79,70,229,0.5)',
+                                }}
+                            >
+                                确认
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {showHistoryCleanup && <ChatHistoryCleanupModal key={`history-cleanup:${char.id}`} character={char} onClose={() => setShowHistoryCleanup(false)} onDeleted={handleHistoryCleanupDone} />}
+            {emojiExport && <EmojiExportDialog {...emojiExport} onClose={() => setEmojiExport(null)} />}
             <ConfirmDialog isOpen={linkCardQuestion !== null}
                 title={linkCardQuestion === 'xhsCards' ? '小红书链接解析' : '分享链接解析'}
                 message="检测到分享链接，要关闭自动转卡片吗？关闭后，本条及之后的链接会按原文发送，方便角色用你配置的 MCP 读取。保留卡片也会带上原链接。两类解析可在加号 → 设置中分别调整。"
@@ -4022,7 +4529,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 selectedMessage={selectedMessage} selectedEmoji={selectedEmoji} activeCharacter={char} messages={messages}
                 allHistoryMessages={allHistoryMessages}
                 contextRangeSnapshot={historyContextRange}
-                
+
                 newCategoryName={newCategoryName} setNewCategoryName={setNewCategoryName} onAddCategory={handleAddCategory}
                 newEmojiName={newEmojiName} setNewEmojiName={setNewEmojiName} onRenameEmoji={handleRenameEmoji}
                 onEmojiLibraryChanged={() => { void loadEmojiData(); setSelectedEmoji(null); }}
@@ -4055,9 +4562,20 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 translateSourceLang={translateSourceLang}
                 translateTargetLang={translateTargetLang}
                 translationExpanded={translationExpanded}
-                onToggleTranslationExpanded={() => {
-                    const next = !translationExpanded;
+                translationStyle={translationStyle}
+                subtitleSettings={subtitleSettings}
+                appearanceFonts={osAppearanceFonts}
+                onSetSubtitleSettings={settings => {
+                    if (!activeCharacterId) return;
+                    saveSubtitleSettings(activeCharacterId, settings);
+                    setSubtitleSettings(settings);
+                }}
+                onSetTranslationMode={mode => {
+                    const next = mode !== 'collapsed';
+                    const style = mode === 'subtitle' ? 'subtitle' : 'bubble';
                     setTranslationExpanded(next);
+                    setTranslationStyle(style);
+                    localStorage.setItem(`chat_translate_style_${activeCharacterId}`, style);
                     localStorage.setItem(`chat_translate_expanded_${activeCharacterId}`, JSON.stringify(next));
                     setShowingTargetIds(new Set());
                     trackEvent('切换翻译展开模式', { enabled: next ? 'on' : 'off' });
@@ -4134,10 +4652,10 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                     updateCharacter(char.id, { activeBuffs: [], buffInjection: '' });
                     addToast('情绪状态已清除', 'info');
                 }}
-             />
+            />
 
-             {/* 小剧场播放器：窥视某个日程时段的角色行为演出 */}
-             {theaterSlotIdx !== null && scheduleData && createPortal(
+            {/* 小剧场播放器：窥视某个日程时段的角色行为演出 */}
+            {theaterSlotIdx !== null && scheduleData && createPortal(
                 <TheaterPlayer
                     character={char}
                     slot={scheduleData.slots[theaterSlotIdx] || null}
@@ -4148,41 +4666,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                     onClose={() => setTheaterSlotIdx(null)}
                 />,
                 document.body,
-             )}
-
-             {homePhone?<header className="home-phone-chat-header"><span className="home-phone-chat-avatar" aria-hidden="true">{char.name.slice(0,1)}</span><div><strong>{chatCharacterDisplayName(char)}</strong><small>{isTyping||instantChatPending?'正在输入…':'在家，也想给你发消息'}</small></div><button onClick={handleManualTrigger} disabled={isTyping} aria-label="让对方回复">↗</button></header>:<ChatHeader
-                selectionMode={selectionMode}
-                selectedCount={selectedMsgIds.size + Array.from(selectedThinkingMsgIds).filter(id => !selectedMsgIds.has(id)).length}
-                onCancelSelection={() => { setSelectionMode(false); setSelectedMsgIds(new Set()); setSelectedThinkingMsgIds(new Set()); }}
-                activeCharacter={char}
-                isTyping={isTyping || instantChatPending}
-                isSummarizing={isSummarizing}
-                isEmotionEvaluating={emotionStatus === 'evaluating'}
-                isMemoryPalaceProcessing={!!memoryPalaceStatus}
-                memoryPalaceStatusText={memoryPalaceStatus}
-                lastTokenUsage={lastTokenUsage}
-                tokenBreakdown={tokenBreakdown}
-                onClose={closeApp}
-                onTriggerAI={handleManualTrigger}
-                triggerIcon={isTyping || instantChatPending ? 'stop' : 'lightning'}
-                hideTrigger={inputPreferences.sendButtonGenerates}
-                onShowCharsPanel={() => setShowPanel('chars')}
-                onDeleteBuff={(buffId) => {
-                    const currentBuffs = char.activeBuffs || [];
-                    const newBuffs = currentBuffs.filter(b => b.id !== buffId);
-                    const newInjection = '';
-                    updateCharacter(char.id, { activeBuffs: newBuffs, buffInjection: newInjection });
-                    addToast('已删除该情绪状态', 'info');
-                }}
-                headerStyle={osTheme.chatHeaderStyle}
-                avatarShape={osTheme.chatAvatarShape}
-                headerAlign={osTheme.chatHeaderAlign}
-                headerDensity={osTheme.chatHeaderDensity}
-                statusStyle={osTheme.chatStatusStyle}
-                chromeStyle={osTheme.chatChromeStyle}
-                hideBuffs={osTheme.chatHideHeaderBuffs}
-                acnh={acnh}
-             />}
+            )}
 
             {/* 认知消化结果弹窗 — 全屏玻璃拟态 */}
             {lastDigestResult && (() => {
@@ -4218,7 +4702,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                         onClick={() => setLastDigestResult(null)}
                     >
                         <div
-                            className="w-full max-w-sm max-h-[85vh] overflow-hidden flex flex-col relative"
+                            className="w-full max-w-sm max-h-[85vh] overflow-hidden flex flex-col relative text-slate-800"
                             style={{
                                 background: 'linear-gradient(160deg, rgba(255,255,255,0.98) 0%, rgba(240,253,250,0.96) 100%)',
                                 borderRadius: 28,
@@ -4691,11 +5175,33 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 />
             )}
 
+            {char && (
+                <AwayMessageSettingsModal
+                    isOpen={showAwayMessageModal}
+                    onClose={() => setShowAwayMessageModal(false)}
+                    char={char}
+                    onSave={(next) => {
+                        const prev = char.awayMessage;
+                        updateCharacter(char.id, { awayMessage: next });
+                        // 关掉或改了等待时长：云端那条按旧设置排的作废，对方下次开口时按新设置重建。
+                        if (prev?.enabled && (!next.enabled || prev.delayMinutes !== next.delayMinutes)) {
+                            void cancelCloudAwayTasks(char, updateCharacter);
+                        }
+                    }}
+                />
+            )}
+
             {/* 思考链设置 Modal — 入口：聊天加号面板「展示思考」按钮长按 / 思考链卡片右上齿轮 */}
             {char && (
                 <ThinkingChainSettingsModal
+                    key={char.id}
                     isOpen={showThinkingChainModal}
                     onClose={() => setShowThinkingChainModal(false)}
+                    translationApi={apiConfig.thinkingTranslationApi}
+                    dialogueApi={resolveDialogueApi(apiConfig, char)}
+                    apiPresets={apiPresets}
+                    onChangeTranslationApi={thinkingTranslationApi => updateApiConfig({ thinkingTranslationApi })}
+                    onAddApiPreset={(name, config) => addApiPreset(name, config, '心象翻译')}
                     value={{
                         enabled: !!(char as any).showThinkingChain,
                         styleId: ((char as any).thinkingChainStyle as any) || 'echo',

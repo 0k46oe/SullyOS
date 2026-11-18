@@ -631,6 +631,9 @@ const renderCoreContext = async (
         context += buildHomeDefinitionContext(char.homeDefinition, user.name);
         context += buildHomePetContext(char.home3D);
 
+        if (groupOptions?.skipUserProfile && char.userPersona) {
+            context += `### 我所认识的同一个用户\n称呼：${user.name}\n${user.bio}\n\n`;
+        }
         // 4. [NEW] 印象档案 (Private Impression)
         // 这是角色对用户的私密看法，只有角色知道
         const imp = normalizeUserImpression(char.impression);

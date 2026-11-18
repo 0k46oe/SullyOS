@@ -97,7 +97,7 @@ describe('useChatAI 的分流接缝', () => {
     // 也不许给 char-disabled 单开留痕分支：那是用户的主动选择，和「全局没开」同一待遇，
     // 每条消息刷一遍 warn 就成骚扰了。查的是带引号的字面量——真要按它分支绕不开这个比较；
     // 注释里提一嘴不算。
-    expect(routing).not.toContain("'char-disabled'");
+    expect(routing).not.toMatch(/(?:if|else if)\s*\(instantChatReadiness\.reason\s*===\s*'char-disabled'/);
   });
 
   it('上云的判定在构建 prompt 之前就定下来，并作为 timelyByWorker 交给 payload', () => {
@@ -123,6 +123,16 @@ describe('useChatAI 的分流接缝', () => {
       }
     }
     expect(chatAiSrc).not.toContain('cloudGenRoute');
+  });
+
+  it('回执块与 worker 时效块都排在易变尾段之前，不压过「回到你自己」', () => {
+    const branch = branchSrc();
+    expect(branch).toContain('timelyInsertAt: payload.volatileTailIndex');
+    expect(branch).toContain("insertAmsg2TaskContextBlock(fullMessages, { role: 'system', content: amsg2NoticesBlock }, payload.volatileTailIndex)");
+    expect(branch).not.toContain("[...fullMessages, { role: 'system', content: amsg2NoticesBlock }]");
+    // 下标一路带进 fire_pack 的 chat 段
+    expect(read('./amsgInstantChat.ts')).toContain('timelyInsertAt: params.timelyInsertAt');
+    expect(read('./activeMsgClient.ts')).toContain('{ timelyInsertAt: params.timelyInsertAt }');
   });
 
   it('分支只认 instantChatRoute，不拿原料重算一遍', () => {
@@ -189,10 +199,10 @@ describe('useChatAI 的分流接缝', () => {
     expect(branch).not.toContain('safeFetchJson');
   });
 
-  it('云端拿到的就是本地要发的那串消息和那份凭据（回执块只附在末尾，不动原消息）', () => {
-    // 基底永远是 fullMessages；有作废回执时单独成块贴在末尾（云端到点自己渲染排程
+  it('云端拿到的就是本地要发的那串消息和那份凭据（回执块只另插一块，不动原消息）', () => {
+    // 基底永远是 fullMessages；有作废回执时单独成块插进去（云端到点自己渲染排程
     // 清单和能力简介，chat 段只补回执这一样，别和 timely block 撞车）。
-    expect(branchSrc()).toMatch(/\[\.\.\.fullMessages, \{ role: 'system', content: amsg2NoticesBlock \}\]/);
+    expect(branchSrc()).toMatch(/insertAmsg2TaskContextBlock\(fullMessages, \{ role: 'system', content: amsg2NoticesBlock \}/);
     expect(branchSrc()).toMatch(/:\s*fullMessages\)/);
     expect(branchSrc()).toMatch(/buildAmsg2NoticesText\(/);
     expect(branchSrc()).toMatch(/baseUrl:\s*effectiveApi\.baseUrl/);
@@ -332,7 +342,7 @@ describe('设置页那一道门', () => {
     // 顺序和每道门的文案钉在 amsgDiagnostics.test.ts（resolveInstantChatBlocker 是纯函数，
     // 能直接测）。这里只钉「设置页确实把三个输入都递过去了」——漏一个的话那道门就消失了，
     // 界面上表现为开关能点，点完发一条挂一条。
-    const gate = sliceSrc(settingsSrc, '即时对话开关的置灰理由', 'const instantChatBlocker = resolveInstantChatBlocker(', '\n  const instantChatBlockedReason');
+    const gate = sliceSrc(settingsSrc, '即时对话开关的置灰理由', 'const instantChatBlocker = globallyPaused', '\n  const instantChatBlockedReason');
     expect(gate).toContain('isConnected');
     expect(gate).toContain('pushStatus?.hasSubscription');
     expect(gate).toContain('instantChatSupported');
@@ -350,12 +360,23 @@ describe('设置页那一道门', () => {
     expect(report).toContain('instantChatGateReported');
   });
 
-  it('开关落盘：两个 saveGlobalConfig 调用点都要带上它', () => {
+  it('保存连接时保留即时对话开关；其他独立配置允许局部保存', async () => {
     // 漏一处的话，用户改完 Worker 地址（或点一次「连接」）开关就被冲回默认值。
-    const saves = settingsSrc.match(/ActiveMsgStore\.saveGlobalConfig\(\{[\s\S]{0,220}?\}\)/g) ?? [];
+    const ts = await import('typescript');
+    const source = ts.createSourceFile('settings.tsx', settingsSrc, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const saves: string[][] = [];
+    const visit = (node: import('typescript').Node) => {
+      if (ts.isCallExpression(node) && node.expression.getText(source) === 'ActiveMsgStore.saveGlobalConfig') {
+        const config = node.arguments[0];
+        if (config && ts.isObjectLiteralExpression(config)) {
+          const fields = config.properties.map(property => property.name?.getText(source) || '');
+          if (fields.includes('workerUrl')) saves.push(fields);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(source);
     expect(saves.length).toBeGreaterThanOrEqual(3);
-    for (const save of saves) {
-      expect(save).toContain('instantChatEnabled');
-    }
+    for (const save of saves) expect(save).toContain('instantChatEnabled');
   });
 });

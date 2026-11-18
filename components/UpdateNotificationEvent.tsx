@@ -13,6 +13,9 @@ import { roomLaunch } from '../utils/roomLaunch';
 import NavigationBallNotice, { NAVIGATION_BALL_NOTICE_KEY } from './os/NavigationBallNotice';
 import UserLocationNotice, { USER_LOCATION_NOTICE_KEY } from './os/UserLocationNotice';
 import { requestSettingsFocus } from '../utils/settingsNavigation';
+import UserSpacesUpdatePopup, { USER_SPACES_UPDATE_KEY } from './os/UserSpacesUpdatePopup';
+import { AmsgRecentUpdatePopup, SullySupportNotice } from './os/NovemberUpdatePopups';
+import { AMSG_RECENT_UPDATE_KEY, SULLY_SUPPORT_NOTICE_KEY } from '../utils/novemberNotices';
 /**
  * 全局版本更新提醒。
  *
@@ -627,7 +630,9 @@ const UPDATE_QUEUE: { key: string; render: (props: UpdatePopupProps) => React.Re
     { key: NETWORK_TRANSIT_NOTICE_KEY_2026_08, render: (props) => <NetworkTransitNoticePopup {...props} /> },
 ];
 
-export const shouldShowUpdateNotification = (): boolean => UPDATE_QUEUE.some((entry) => !isUpdateSeen(entry.key));
+const isPending = (entry: (typeof UPDATE_QUEUE)[number]): boolean => !isUpdateSeen(entry.key) && (entry.offered?.() ?? true);
+
+export const shouldShowUpdateNotification = (): boolean => UPDATE_QUEUE.some(isPending);
 
 interface UpdateNotificationControllerProps {
     onClose: () => void;
@@ -636,7 +641,7 @@ interface UpdateNotificationControllerProps {
 export const UpdateNotificationController: React.FC<UpdateNotificationControllerProps> = ({ onClose }) => {
     // 进场时把没看过的挑出来定住。每次渲染重算的话，当前这条一被标记已读就会自己从队列里
     // 消失、直接跳到下一条，用户还没来得及点——推进队列的只能是下面 onDone 那一下。
-    const [pending, setPending] = React.useState(() => UPDATE_QUEUE.filter((entry) => !isUpdateSeen(entry.key)));
+    const [pending, setPending] = React.useState(() => UPDATE_QUEUE.filter(isPending));
     const current = pending[0];
 
     React.useEffect(() => {
