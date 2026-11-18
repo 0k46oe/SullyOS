@@ -473,26 +473,31 @@ const AppLoadingFallback: React.FC<{ onReturn?: () => void; animationEnabled?: b
 const AppEnterStage: React.FC<{
   appId: AppID;
   onSettled: (appId: AppID) => void;
+  animate: boolean;
   children: React.ReactNode;
-}> = ({ appId, onSettled, children }) => {
+}> = ({ appId, onSettled, animate, children }) => {
   useEffect(() => {
     if (appId === AppID.Launcher) {
       onSettled(AppID.Launcher);
       return;
     }
+    if (!animate) {
+      onSettled(appId);
+      return;
+    }
     const timer = window.setTimeout(() => onSettled(appId), 260);
     return () => window.clearTimeout(timer);
-  }, [appId, onSettled]);
+  }, [appId, animate, onSettled]);
 
   return (
     <div
       className="w-full h-full"
-      style={{ animation: 'appEnterFade 200ms ease-out both' }}
+      style={animate ? { animation: 'appEnterFade 200ms ease-out both' } : undefined}
       onAnimationEnd={(e) => {
         if (e.target === e.currentTarget) onSettled(appId);
       }}
     >
-      <style>{`@keyframes appEnterFade{from{opacity:0}to{opacity:1}}`}</style>
+      {animate && <style>{`@keyframes appEnterFade{from{opacity:0}to{opacity:1}}`}</style>}
       {children}
     </div>
   );
@@ -1127,13 +1132,21 @@ const PhoneShell: React.FC = () => {
             style={{ contain: useIOSStandaloneLayout ? undefined : 'layout style paint' }}
           >
             <AppErrorBoundary onCloseApp={closeApp} resetKey={`${activeApp}:${activeCharacterId || 'none'}`}>
-              <Suspense fallback={<AppLoadingFallback key={activeApp} onReturn={closeApp} animationEnabled={theme.appLoadingAnimationEnabled !== false} />}>
-                {/* 统一「淡入」过渡：每次切换 App 时 key 变化 → 重新挂载并淡入，
-                    让所有 App 都像个人档案那样「渐变进去」，而非瞬间咚一下。
-                    关键：只动 opacity、不做 scale/translate —— 否则会把整棵（常含大量头像图片的）
+              <Suspense fallback={<AppLoadingFallback
+                key={activeApp}
+                onReturn={closeApp}
+                animationEnabled={theme.appLoadingAnimationEnabled !== false && theme.desktopVariant !== 'nostalgia'}
+              />}>
+                {/* 纸感桌面使用「淡入」过渡；怀旧版直接打开，避免外壳渐变透过 App。
+                    只动 opacity、不做 scale/translate —— 否则会把整棵（常含大量头像图片的）
                     App 子树栅格化进 transform 图层，角色列表类 App 首帧会卡顿一下（停顿一秒）。
                     时长也压短，进重 App 时不至于多等。 */}
-                <AppEnterStage key={activeApp} appId={activeApp} onSettled={setSettledApp}>
+                <AppEnterStage
+                  key={activeApp}
+                  appId={activeApp}
+                  onSettled={setSettledApp}
+                  animate={theme.desktopVariant !== 'nostalgia'}
+                >
                   {renderApp()}
                 </AppEnterStage>
               </Suspense>
