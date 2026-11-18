@@ -1321,6 +1321,34 @@ const MessageItem = React.memo(({
     const [replyOffset, setReplyOffset] = useState(0);
     const [isReplyGestureActive, setIsReplyGestureActive] = useState(false);
     const [isReplyReady, setIsReplyReady] = useState(false);
+    const [voiceDurationSec, setVoiceDurationSec] = useState<number | null>(null);
+
+    // Read the real duration from the generated audio instead of deriving it from
+    // the decorative waveform. This keeps the value correct for every TTS file.
+    useEffect(() => {
+        setVoiceDurationSec(null);
+        if (!voiceData?.url || typeof Audio === 'undefined') return;
+        const audio = new Audio();
+        audio.preload = 'metadata';
+        const handleMetadata = () => {
+            if (Number.isFinite(audio.duration) && audio.duration > 0) {
+                setVoiceDurationSec(audio.duration);
+            }
+        };
+        audio.addEventListener('loadedmetadata', handleMetadata);
+        audio.src = voiceData.url;
+        return () => {
+            audio.removeEventListener('loadedmetadata', handleMetadata);
+            audio.removeAttribute('src');
+            audio.load();
+        };
+    }, [voiceData?.url]);
+
+    const voiceDurationLabel = voiceDurationSec == null
+        ? ''
+        : voiceDurationSec < 60
+            ? `${Math.max(1, Math.round(voiceDurationSec))}"`
+            : `${Math.floor(voiceDurationSec / 60)}'${String(Math.round(voiceDurationSec % 60)).padStart(2, '0')}"`;
 
     const clearLongPressTimer = () => {
         if (!longPressTimer.current) return;
@@ -3661,6 +3689,9 @@ const formatTimestamp = (ts: number) => {
                                         />
                                     ))}
                                 </div>
+                                <span className="sully-voice-bar-duration shrink-0 text-[10px] tabular-nums" aria-label={voiceDurationLabel ? `语音时长 ${voiceDurationLabel}` : '正在读取语音时长'}>
+                                    {voiceDurationLabel || '...'}
+                                </span>
                                 {/* Text toggle button — always available so user can read the text */}
                                 <div
                                     className={`sully-voice-bar-toggle shrink-0 ml-0.5 px-1.5 py-0.5 rounded-lg text-[9px] font-medium transition-all ${showVoiceText ? 'ring-1 ring-current/20' : ''}`}

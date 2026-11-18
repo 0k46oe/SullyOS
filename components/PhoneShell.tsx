@@ -1083,7 +1083,7 @@ const PhoneShell: React.FC = () => {
     });
 
   return (
-    <div className={`sully-phone-shell relative w-full h-full overflow-hidden ${appLoadingPending ? 'bg-[#e8ede4]' : 'bg-gradient-to-br from-pink-200 via-purple-200 to-indigo-200'} text-slate-900 font-sans select-none overscroll-none`}>
+    <div className="sully-phone-shell relative w-full h-full overflow-hidden bg-transparent text-slate-900 font-sans select-none overscroll-none">
        {/* Optimized Background Layer */}
        {/* 壁纸底层：进 App 时只柔和虚化/压暗作背景，不再做缩放「过场」——
           进 App 的过渡感统一交给 App 容器的淡入（见下方 animate-fade-in 包裹层）。
@@ -1092,8 +1092,8 @@ const PhoneShell: React.FC = () => {
          className="sully-shell-wallpaper absolute inset-0 bg-cover bg-center transition-opacity duration-500 ease-[cubic-bezier(0.25,0.1,0.25,1)]"
          style={{
              backgroundImage: bgImageValue,
-             filter: activeApp === AppID.Launcher || reducedBlur || shellBackdropHidden ? 'none' : 'blur(24px)',
-             opacity: activeApp === AppID.Launcher ? 1 : reducedBlur ? 0.25 : 0.6,
+             filter: activeApp === AppID.Launcher || appLoadingPending || reducedBlur || shellBackdropHidden ? 'none' : 'blur(24px)',
+             opacity: activeApp === AppID.Launcher || appLoadingPending ? 1 : reducedBlur ? 0.25 : 0.6,
              visibility: shellBackdropHidden ? 'hidden' : undefined,
              backfaceVisibility: 'hidden',
              contain: useIOSStandaloneLayout ? undefined : 'strict'
@@ -1114,7 +1114,7 @@ const PhoneShell: React.FC = () => {
            ? { visibility: 'hidden' }
            : appLoadingPending
              ? {
-                 background: 'linear-gradient(128deg, rgba(99,125,94,.17), rgba(223,232,216,.13) 56%, rgba(248,250,243,.2)), radial-gradient(ellipse at 16% 12%, rgba(255,255,255,.28), transparent 58%)',
+                 background: 'transparent',
                }
              : undefined}
        />
