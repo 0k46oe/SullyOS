@@ -13,6 +13,8 @@ import { useBlobRefUrl } from '../../utils/blobRef';
 interface Props {
   name: string;
   avatar?: string;
+  /** Keep the opaque cover up until the initial chat batch has committed. */
+  ready?: boolean;
   /** 过场播完（或被跳过）后回调，由父组件卸载本层。 */
   onDone: () => void;
 }
@@ -22,34 +24,61 @@ const prefersReducedMotion = () =>
   !!window.matchMedia &&
   window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-const CharacterEntryTransition: React.FC<Props> = ({ name, avatar, onDone }) => {
+const CharacterEntryTransition: React.FC<Props> = ({ name, avatar, ready = true, onDone }) => {
   const reduced = useMemo(prefersReducedMotion, []);
   // 头像约 650ms 对焦清晰、名字约 780ms 到位 → 停留到 REVEAL_AT 让人看清，再退场。
   const REVEAL_AT = reduced ? 220 : 1000; // 开始退场的时刻（清晰后的停留终点）
   const EXIT = reduced ? 200 : 440;       // 退场（推进穿过 + 淡出）时长
   const TOTAL = REVEAL_AT + EXIT;
 
+  const [started, setStarted] = useState(false);
   const [exiting, setExiting] = useState(false);
   const doneRef = useRef(false);
   const finish = () => { if (!doneRef.current) { doneRef.current = true; onDone(); } };
+  const resolvedAvatar = useBlobRefUrl(avatar);
+  const avatarBg = resolvedAvatar ? `url(${resolvedAvatar})` : '';
 
   useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    let timeout: number | undefined;
+    const begin = () => { if (!cancelled) setStarted(true); };
+
+    if (!avatar) {
+      begin();
+    } else if (!resolvedAvatar) {
+      timeout = window.setTimeout(begin, 1400);
+    } else {
+      const image = new Image();
+      timeout = window.setTimeout(begin, 1200);
+      image.onload = begin;
+      image.onerror = begin;
+      image.src = resolvedAvatar;
+      if (image.complete) begin();
+      if (typeof image.decode === 'function') void image.decode().then(begin).catch(() => {});
+    }
+
+    return () => {
+      cancelled = true;
+      if (timeout !== undefined) window.clearTimeout(timeout);
+    };
+  }, [avatar, ready, resolvedAvatar]);
+
+  useEffect(() => {
+    if (!started) return;
     const tExit = setTimeout(() => setExiting(true), REVEAL_AT);
     const tDone = setTimeout(finish, TOTAL);
     return () => { clearTimeout(tExit); clearTimeout(tDone); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [started]);
 
   // 轻触跳过：立刻进入退场（仍是平滑推进，不是硬切）
-  const skip = () => { if (!exiting) { setExiting(true); window.setTimeout(finish, EXIT); } };
+  const skip = () => { if (started && !exiting) { setExiting(true); window.setTimeout(finish, EXIT); } };
 
   // 头像字段可能是 blobref 令牌，令牌拼进 url() 是加载不出来的地址。先解析成可用地址再拼，
   // 判空也看解析结果——否则「没头像时改用主题色光场」那条分支永远走不到，整层过场会变成
   // 一张透明膜，底下的聊天界面直接透出来。令牌解析完成前 resolvedAvatar 是 undefined，
   // 那一帧走光场分支，照样铺满盖住聊天。
-  const resolvedAvatar = useBlobRefUrl(avatar);
-  const avatarBg = resolvedAvatar ? `url(${resolvedAvatar})` : '';
-
   return (
     <div
       onClick={skip}
@@ -97,6 +126,7 @@ const CharacterEntryTransition: React.FC<Props> = ({ name, avatar, onDone }) => 
             borderRadius: '9999px', filter: 'blur(8px)',
             background: 'radial-gradient(circle, rgba(255,255,255,0.5) 0%, hsla(var(--primary-hue),80%,80%,0.32) 40%, transparent 66%)',
             animation: reduced ? 'charVeilIn 240ms ease-out both' : 'charGlowIn 680ms cubic-bezier(0.22,1,0.36,1) 40ms both',
+            animationPlayState: started ? 'running' : 'paused',
           }} />
           {/* 头像：缩放 + 淡入「对焦」，不用 filter:blur（避免每帧重栅格化卡顿） */}
           <div
@@ -106,6 +136,7 @@ const CharacterEntryTransition: React.FC<Props> = ({ name, avatar, onDone }) => 
               backgroundColor: avatarBg ? undefined : 'hsla(var(--primary-hue),50%,55%,0.6)',
               boxShadow: '0 8px 40px rgba(0,0,0,0.45), 0 0 0 1.5px rgba(255,255,255,0.5), 0 0 28px hsla(var(--primary-hue),80%,80%,0.45)',
               animation: reduced ? 'charVeilIn 280ms ease-out both' : 'charAvatarIn 560ms cubic-bezier(0.22,1,0.36,1) 90ms both',
+              animationPlayState: started ? 'running' : 'paused',
               willChange: 'transform, opacity',
             }}
           />
@@ -115,6 +146,7 @@ const CharacterEntryTransition: React.FC<Props> = ({ name, avatar, onDone }) => 
           style={{
             textShadow: '0 2px 18px rgba(0,0,0,0.5), 0 0 24px hsla(var(--primary-hue),80%,80%,0.3)',
             animation: reduced ? 'charNameIn 300ms ease-out both' : 'charNameIn 480ms cubic-bezier(0.22,1,0.36,1) 320ms both',
+            animationPlayState: started ? 'running' : 'paused',
           }}
         >
           {name}
@@ -123,8 +155,14 @@ const CharacterEntryTransition: React.FC<Props> = ({ name, avatar, onDone }) => 
           background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.8), transparent)',
           transformOrigin: 'center',
           animation: reduced ? 'charVeilIn 300ms ease-out both' : 'charLineIn 540ms ease-out 420ms both',
+          animationPlayState: started ? 'running' : 'paused',
         }} />
       </div>
+      {!started && <div
+        data-chat-entry-cover
+        aria-hidden
+        style={{ position: 'absolute', inset: 0, zIndex: 2, backgroundColor: '#121214', pointerEvents: 'none' }}
+      />}
     </div>
   );
 };

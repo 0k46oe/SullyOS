@@ -1135,7 +1135,7 @@ const PhoneShell: React.FC = () => {
               <Suspense fallback={<AppLoadingFallback
                 key={activeApp}
                 onReturn={closeApp}
-                animationEnabled={theme.appLoadingAnimationEnabled !== false && theme.desktopVariant !== 'nostalgia'}
+                animationEnabled={theme.appLoadingAnimationEnabled === true && theme.desktopVariant !== 'nostalgia'}
               />}>
                 {/* 纸感桌面使用「淡入」过渡；怀旧版直接打开，避免外壳渐变透过 App。
                     只动 opacity、不做 scale/translate —— 否则会把整棵（常含大量头像图片的）

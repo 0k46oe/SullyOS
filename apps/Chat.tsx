@@ -212,6 +212,11 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     // 初值 false 让首次打开也是淡入、且不会有"先显示再变透明"的闪烁。
     // 角色切换「登场」过场是否显示。切换/进入角色时由 useLayoutEffect 在绘制前置真，覆盖住加载、避免闪到新聊天。
     const [showEntry, setShowEntry] = useState(false);
+    const [entryMessagesReadyFor, setEntryMessagesReadyFor] = useState<string | null>(null);
+    const [entryReadyCss, setEntryReadyCss] = useState<Set<string>>(() => new Set());
+    const markEntryCssReady = useCallback((css: string) => {
+        setEntryReadyCss(current => current.has(css) ? current : new Set(current).add(css));
+    }, []);
     const [input, setInput] = useState('');
     const [isInputFocused, setIsInputFocused] = useState(false);
     const [showPanel, setShowPanel] = useState<'none' | 'actions' | 'emojis' | 'chars'>('none');
@@ -1157,6 +1162,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 if (activeCharIdRef.current !== charIdAtStart || historyJumpSequenceRef.current !== historySequenceAtStart) return;
                 applyResult(recent, totalCount);
             } catch { /* give up silently */ }
+        } finally {
+            if (activeCharIdRef.current === charIdAtStart) setEntryMessagesReadyFor(charIdAtStart);
         }
     }, [activeCharacterId]);
 
@@ -1194,6 +1201,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             activeCharIdRef.current = activeCharacterId;
             historyJumpSequenceRef.current += 1;
             historyJumpPendingRef.current = false;
+            setEntryMessagesReadyFor(null);
 
             // Clear messages immediately to prevent showing stale chat from previous character
             setMessages([]);
@@ -3757,6 +3765,9 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const mergedFineTune = useMemo(() => mergeChatFineTune(osTheme, homePhone?undefined:char?.chatFineTune), [osTheme, char?.chatFineTune,!!homePhone]);
     const chatFineTuneCss = useMemo(() => buildChatFineTuneCss(mergedFineTune), [mergedFineTune]);
     const selectedAvatarFrameCss=useMemo(()=>avatarFrameLayer([osTheme.chatChromeCustomCss,char?.chromeCustomCss].filter(Boolean).join('\n')),[osTheme.chatChromeCustomCss,char?.chromeCustomCss]);
+    const entryCssAssets = [osTheme.chatChromeCustomCss, char?.chromeCustomCss, selectedAvatarFrameCss, activeTheme.customCss]
+        .filter((css): css is string => !!css?.trim());
+    const entryCssReady = entryCssAssets.every(css => entryReadyCss.has(css));
     if (!char) {
         return (
             <div className="flex flex-col items-center justify-center h-full bg-[#f1f5f9] text-center px-8 gap-3">
@@ -3843,8 +3854,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                  守护样式统一放在气泡主题 customCss 之后（见下），保证对所有用户 CSS 都能兜底。 */}
              {/* 心象卡片自定义 CSS（per-character）：作用于 .sully-psyche-* 各零件，编辑入口在个性装扮 / 聊天装扮的心象分栏 */}
              {!homePhone && resolvePsycheAppearance(osTheme, char).customCss && <style>{resolvePsycheAppearance(osTheme, char).customCss}</style>}
-             {osTheme.chatChromeCustomCss && <BlobRefStyle css={osTheme.chatChromeCustomCss}/>}
-             {!homePhone && char.chromeCustomCss && <BlobRefStyle css={char.chromeCustomCss}/>}
+             {osTheme.chatChromeCustomCss && <BlobRefStyle css={osTheme.chatChromeCustomCss} onReady={markEntryCssReady}/>}
+             {!homePhone && char.chromeCustomCss && <BlobRefStyle css={char.chromeCustomCss} onReady={markEntryCssReady}/>}
              {scheduleChangeNotice && (
                <ScheduleChangeNotice
                  key={scheduleChangeNotice.eventId}
@@ -3858,12 +3869,13 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                  key={`character-entry:${activeCharacterId}`}
                  name={char.name}
                  avatar={char.avatar}
+               ready={entryMessagesReadyFor === activeCharacterId && entryCssReady}
                  onDone={() => setShowEntry(false)}
                />
              )}
 
-             {activeTheme.customCss && <style>{activeTheme.customCss}</style>}
-             {!homePhone && selectedAvatarFrameCss && <BlobRefStyle css={selectedAvatarFrameCss} />}
+             {activeTheme.customCss && <BlobRefStyle css={activeTheme.customCss} onReady={markEntryCssReady}/>}
+             {!homePhone && selectedAvatarFrameCss && <BlobRefStyle css={selectedAvatarFrameCss} onReady={markEntryCssReady} />}
              {/* 气泡工坊的尾巴频率依赖直接挂在气泡上的稳定类。用户 CSS 即使给
                  ::before/::after 写了 !important，中间气泡仍会按“仅组末/隐藏”设置收起尾巴。 */}
              <style>{`

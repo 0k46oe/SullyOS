@@ -49,3 +49,18 @@ it('removes the entry veil with a persistent self-check sibling after rerenders 
   expect(errors.mock.calls.filter(args=>String(args[0]).includes('same key'))).toHaveLength(0);
  }finally{act(()=>root.unmount());errors.mockRestore();vi.useRealTimers();}
 });
+it('keeps an opaque cover until the initial chat batch is ready, then starts the transition timer',()=>{
+ vi.useFakeTimers();const host=document.createElement('div');const root=createRoot(host);const onDone=vi.fn();
+ const render=(ready:boolean)=>React.createElement(CharacterEntryTransition,{name:'大记录角色',ready,onDone});
+ try{
+  act(()=>root.render(render(false)));
+  expect(host.querySelector('[data-chat-entry-cover]')).not.toBeNull();
+  act(()=>vi.advanceTimersByTime(2000));
+  expect(onDone).not.toHaveBeenCalled();
+  expect(host.querySelector('[data-chat-entry-cover]')).not.toBeNull();
+  act(()=>root.render(render(true)));
+  expect(host.querySelector('[data-chat-entry-cover]')).toBeNull();
+  act(()=>vi.advanceTimersByTime(1500));
+  expect(onDone).toHaveBeenCalledTimes(1);
+ }finally{act(()=>root.unmount());vi.useRealTimers();}
+});
