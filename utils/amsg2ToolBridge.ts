@@ -30,8 +30,9 @@ import {
   getPendingTasks, isPendingTask, pruneStaleTasks, resolveExpirePolicy, shortTaskId,
 } from './amsg2Tasks';
 import { type AmsgLimits, checkSelfScheduleRules, resolveAmsgLimits } from './amsgLimits';
-import { buildScheduleParameters, MIN_SCHEDULE_LEAD_MS, resolveSendAtMs } from './amsgFireSchedule';
+import { buildScheduleParameters, MIN_SCHEDULE_LEAD_MS, resolveSendAtMs, resolveStoryYearlessSendAtMs } from './amsgFireSchedule';
 import { resolveCharTimeZone } from './timezone';
+import { getActiveTavernStoryTime } from './tavernStoryTime';
 
 // ─── OpenAI tools schema ───
 
@@ -45,7 +46,7 @@ interface OpenAITool {
  * 就不给 recurrence 参数，没放开「到点必发」就不给 expire_policy——摆在那儿等于邀请模型
  * 去选，选了再被打回白费一轮。任务名额也是用户定的，描述里写实数。
  */
-export const buildAmsg2Tools = (limits: AmsgLimits): OpenAITool[] => [
+export const buildAmsg2Tools = (limits: AmsgLimits, storyYearless = false): OpenAITool[] => [
   {
     type: 'function',
     function: {
@@ -63,7 +64,9 @@ export const buildAmsg2Tools = (limits: AmsgLimits): OpenAITool[] => [
         // 只教裸墙钟：角色照着自己那边的钟写，系统按角色时区还原成绝对时刻
         // （跟 worker 到点解析 send_at 同一份规则）。教它写 +08:00 这种偏移的话，
         // 纽约角色会照抄示例里的东八区，说出来的「明早九点」实际差一个时差。
-        sendAtDescription: '开始生成消息的时间，写你本地的墙钟时间，格式 YYYY-MM-DDTHH:mm:ss（如 2026-07-20T20:00:00），不要带时区后缀。必须晚于当前时间。',
+        sendAtDescription: storyYearless
+          ? '开始生成消息的时间，写你本地的墙钟时间，格式 MM-DDTHH:mm:ss（如 07-20T20:00:00），不要写年份或带时区后缀；系统会按你所在地映射到之后最近的真实日期。必须晚于当前时间。'
+          : '开始生成消息的时间，写你本地的墙钟时间，格式 YYYY-MM-DDTHH:mm:ss（如 2026-07-20T20:00:00），不要带时区后缀。必须晚于当前时间。',
         modeDescription: '生成模式。auto=根据最新聊天自动生成（推荐）；prompted=围绕 prompt_hint 方向生成。默认 auto。',
         promptHintDescription: '仅 mode=prompted 时有效。给角色的提示方向，如"问问对方晚饭吃了没"。',
         recurrenceDescription: '重复类型。none=一次性（默认）；daily=每天同一时间；weekly=每周同一天同一时间。',
@@ -96,7 +99,9 @@ export const buildAmsg2Tools = (limits: AmsgLimits): OpenAITool[] => [
       parameters: {
         type: 'object',
         properties: {
-          send_at: { type: 'string', description: '新的触发时间，写你本地的墙钟时间，格式 YYYY-MM-DDTHH:mm:ss，不带时区后缀。必须晚于当前时间。' },
+          send_at: { type: 'string', description: storyYearless
+            ? '新的触发时间，写你本地的墙钟时间，格式 MM-DDTHH:mm:ss，不写年份或带时区后缀。系统会映射到之后最近的真实日期。必须晚于当前时间。'
+            : '新的触发时间，写你本地的墙钟时间，格式 YYYY-MM-DDTHH:mm:ss，不带时区后缀。必须晚于当前时间。' },
           task_id: { type: 'string', description: '要续期的任务短 id（8 位）。只有一个任务时可省略。' },
         },
         required: ['send_at'],
@@ -340,9 +345,18 @@ async function handleSchedule(args: Record<string, any>, deps: Amsg2ToolDeps): P
   // 用户定的规矩（与到点生成里的排程工具同一份判定）：能不能排重复的、跟已经排着的
   // 隔够没有、「到点必发」放没放开。用户刚在聊天，所以只跟排着的任务比间隔，不拿「上一条
   // 主动消息」卡它。时间解析不出来的交给下面的排程接口报错，那边的说法更准。
+  const storyYearless = !!getActiveTavernStoryTime(char);
   const sendAtMs = typeof args.send_at === 'string'
-    ? resolveSendAtMs(args.send_at, { tzId: charTz ?? Intl.DateTimeFormat().resolvedOptions().timeZone })
+    ? storyYearless
+      ? resolveStoryYearlessSendAtMs(args.send_at, Date.now(), { tzId: charTz ?? Intl.DateTimeFormat().resolvedOptions().timeZone })
+      : resolveSendAtMs(args.send_at, { tzId: charTz ?? Intl.DateTimeFormat().resolvedOptions().timeZone })
     : Number.NaN;
+  if (!Number.isFinite(sendAtMs)) {
+    return reject(deps, 'invalid_send_at', storyYearless
+      ? '触发时间格式不正确或日期无效，请写 MM-DDTHH:mm:ss，不要写年份，并确保时间在未来。'
+      : '触发时间格式不正确，请写有效的本地墙钟时间并确保时间在未来。');
+  }
+  const scheduledAt = new Date(sendAtMs).toISOString();
   if (Number.isFinite(sendAtMs)) {
     const now = Date.now();
     const busy = getPendingTasks(config, now)
@@ -363,7 +377,7 @@ async function handleSchedule(args: Record<string, any>, deps: Amsg2ToolDeps): P
     if (!args.__replaceTaskUuid) expirePolicy = rules.expirePolicy;
   }
   const taskInput = {
-    mode, firstSendTime: args.send_at, recurrenceType: recurrence,
+    mode, firstSendTime: scheduledAt, recurrenceType: recurrence,
     promptHint: args.prompt_hint || undefined,
     expirePolicy,
   };

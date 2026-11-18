@@ -1056,6 +1056,13 @@ const PhoneShell: React.FC = () => {
   // TODO(safe-area-A): 把剩余「未迁移」App 逐个改为自理安全区后，移除外壳这层兜底，实现全屏无色条。
   const shellPadsSafeArea = shellHandlesSafeArea(activeApp);
   const activeCharacter = characters.find(c => c.id === activeCharacterId);
+  const paperUiScopes: Partial<Record<AppID, string>> = {
+    [AppID.Settings]: 'settings',
+    [AppID.MemoryPalace]: 'memory',
+    [AppID.Character]: 'character',
+    [AppID.Worldbook]: 'worldbook',
+    [AppID.Appearance]: 'appearance',
+  };
   const hasCustomChatChromeCss = Boolean(
     theme.chatChromeCustomCss ||
       (activeApp === AppID.Chat && activeCharacter?.chromeCustomCss) ||
@@ -1114,7 +1121,11 @@ const PhoneShell: React.FC = () => {
       >
           <FirstUseGuide />
           {/* App Container */}
-          <div className="flex-1 relative overflow-hidden" style={{ contain: useIOSStandaloneLayout ? undefined : 'layout style paint' }}>
+          <div
+            className="flex-1 relative overflow-hidden"
+            data-paper-ui={paperUiScopes[activeApp]}
+            style={{ contain: useIOSStandaloneLayout ? undefined : 'layout style paint' }}
+          >
             <AppErrorBoundary onCloseApp={closeApp} resetKey={`${activeApp}:${activeCharacterId || 'none'}`}>
               <Suspense fallback={<AppLoadingFallback key={activeApp} onReturn={closeApp} animationEnabled={theme.appLoadingAnimationEnabled !== false} />}>
                 {/* 统一「淡入」过渡：每次切换 App 时 key 变化 → 重新挂载并淡入，

@@ -204,6 +204,8 @@ type RealtimeWorldArgs = {
   toolConfig: AmsgToolConfig;
   /** 角色的时间感知开关（tool_pack 带上来的）：关掉就连今日节日一起不给。 */
   timeAwarenessEnabled: boolean;
+  /** 酒馆剧情年份开启时，不给角色注入现实天气、热搜、节日或用户所在地节日。 */
+  tavernStoryTime?: boolean;
   /** 角色的时区，判「今天几号」用。 */
   tzId: string;
   nowMs: number;
@@ -215,7 +217,7 @@ type RealtimeWorldArgs = {
 
 export const buildUserHolidayBlock = async (args: RealtimeWorldArgs): Promise<string> => {
   const { toolConfig: cfg, nowMs, globalRows } = args;
-  if (!args.timeAwarenessEnabled || !cfg.userHolidays?.timeZone) return '';
+  if (args.tavernStoryTime || !args.timeAwarenessEnabled || !cfg.userHolidays?.timeZone) return '';
   return getUserHolidayReminder(cfg.userHolidays, {
     async read(key) {
       try { return JSON.parse(globalRows.find(row => row.key === key)?.value || 'null'); } catch { return null; }
@@ -226,6 +228,7 @@ export const buildUserHolidayBlock = async (args: RealtimeWorldArgs): Promise<st
 
 export const buildRealtimeWorldBlock = async (args: RealtimeWorldArgs): Promise<string> => {
   const { nowMs, globalRows } = args;
+  if (args.tavernStoryTime) return '';
   const cfg = weatherForCharacter(args.toolConfig, args.charId);
 
   const specialDates = args.timeAwarenessEnabled ? checkSpecialDates(args.tzId, nowMs) : [];

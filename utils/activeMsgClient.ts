@@ -1,4 +1,5 @@
 import { resolveCharacterUserProfile } from './characterUserProfile';
+import { getActiveTavernStoryTime } from './tavernStoryTime';
 import { BILINGUAL_TAIL_REMINDER, buildChatOutputStylePrompt, readChatTranslationConfig } from './chatOutputStylePrompt';
 import { buildReproductionTask, DIAGNOSTIC_NAMESPACE, diagnosticRunId, type DiagnosticEvent } from './amsgReproduction';
 import { resolveDialogueApi } from './characterApi';
@@ -859,6 +860,7 @@ export const buildFirePack = async (
   // 时间（当前时间、日程日期、排程清单）都按它来。
   const charTz = resolveCharTimeZone(char);
   const tzId = charTz ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const tavernStoryTime = getActiveTavernStoryTime(char);
   // 用户设备自己的钟。跟 tzId 分开存：角色排消息时得知道「对方那边现在几点」，
   // 不然异国恋角色会把「晚上聊两句」排到用户的凌晨三点，而且没有任何线索能让它避开。
   const userTzId = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -915,7 +917,7 @@ export const buildFirePack = async (
     undefined,
     // 模板是现在打好、到点才渲染的，凡是「打包这一刻」的状态都不烤进去。
     // 具体拿掉哪些块、到点由谁补，见 ChatPrompts.PromptBuildOptions 上的表。
-    { forFirePack: true },
+    { forFirePack: true, tavernStoryTime: !!tavernStoryTime },
   );
   const outputStyle = buildChatOutputStylePrompt({
     charName: char.name,
@@ -933,7 +935,7 @@ export const buildFirePack = async (
     undefined,
     // 模板里放不下原图，有识图描述就用描述（与私聊同一份），没有就明说别猜；
     // 剧情副本错序兜底也与私聊一致。
-    { useVisionDescriptions: true, protectPendingChatTurn: true },
+    { useVisionDescriptions: true, protectPendingChatTurn: true, tavernStoryTime: !!tavernStoryTime },
   ).apiMessages
     .map((message) => formatHistoryLine(message.role, message.content, char, userProfile))
     .join('\n\n');
@@ -1013,6 +1015,12 @@ export const buildFirePack = async (
     // worker 渲染时两者各管各的一行，绝不混用。
     tzId,
     userTzId,
+    ...(tavernStoryTime ? {
+      tavernStoryTime: {
+        yearLabel: tavernStoryTime.yearLabel,
+        baseRealYear: tavernStoryTime.baseRealYear,
+      },
+    } : {}),
     targetName: userProfile.name || '对方',
     // 这份模板的身份戳：worker 用它判断云端自述日志里哪些正文已经进了新转写、
     // 自排任务备账还配不配得上当前清单（见 amsgFirePack 的 reconcileSelfLogWithPack）。

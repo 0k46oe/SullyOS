@@ -691,6 +691,17 @@ describe('buildInstantTimelyBlock', () => {
     expect(block).toContain('2026年8月1日 周六 早晨 08:00');
   });
 
+  it('酒馆剧情年份替换现实年份和星期，时分仍按角色当地现实时间', () => {
+    const block = buildInstantTimelyBlock({
+      ...base,
+      tavernStoryTime: { yearLabel: '庚辰年', baseRealYear: 2026 },
+      blocks: [],
+    });
+    expect(block).toContain('庚辰年8月1日 早晨 08:00');
+    expect(block).not.toContain('2026年');
+    expect(block).not.toContain('周六');
+  });
+
   // 报时后面必须跟那句语境框定，而且跟前台聊天用的是同一份常量。少了它，深夜的那行钟
   // 就够让角色每轮往「快睡吧、明天见」上收——本地聊天治好了、云端没治的话，同一个角色
   // 走两条路的分寸不一样，而即时对话恰恰是主路径。

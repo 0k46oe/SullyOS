@@ -74,6 +74,8 @@ export interface FireScheduleToolDef {
 export interface FireScheduleTimeOpts {
   nowMs: number;
   tz: AmsgTzRef;
+  /** 剧情年份开启时，角色填写月日时分，系统再映射到下一个真实日历日期。 */
+  storyYearless?: boolean;
 }
 
 /**
@@ -125,8 +127,8 @@ export const buildScheduleParameters = (opts: {
   required: ['send_at'],
 });
 
-const buildParameters = (example: string, abilities: SelfScheduleAbilities) => buildScheduleParameters({
-  sendAtDescription: `开始生成的时间，写你本地的墙钟时间、不带时区后缀（如 ${example}），系统按你所在的时区理解。至少比当前时间晚 1 分钟。排之前先想想对方那边是几点——你们之间可能有时差，别把消息排到对方的深夜。`,
+const buildParameters = (example: string, abilities: SelfScheduleAbilities, storyYearless = false) => buildScheduleParameters({
+  sendAtDescription: `开始生成的时间，写你本地的墙钟时间${storyYearless ? '，格式 MM-DDTHH:mm:ss，不写年份' : ''}（如 ${example}），系统按你所在的时区理解${storyYearless ? '，并映射到之后最近的真实日期' : ''}。至少比当前时间晚 1 分钟。排之前先想想对方那边是几点——你们之间可能有时差，别把消息排到对方的深夜。`,
   modeDescription: '生成模式。auto=到点根据那时的上下文自由发挥；prompted=围绕 prompt_hint 的方向说。默认 auto。',
   promptHintDescription: '给未来那条消息的方向，如"接着刚才那只猫的话往下说""告诉他汤炖好了"。mode=prompted 时必填。',
   recurrenceDescription: '重复类型。none=一次性（默认）；daily/weekly=每天/每周同一时间。',
@@ -141,8 +143,9 @@ export const buildFireScheduleTool = (
     name: AMSG_FIRE_SCHEDULE_TOOL,
     description: buildScheduleToolDescription(opts.context ?? 'fire'),
     parameters: buildParameters(
-      buildSendAtExample(opts.nowMs, opts.tz),
+      buildSendAtExample(opts.nowMs, opts.tz, opts.storyYearless),
       opts.abilities,
+      opts.storyYearless,
     ) as unknown as Record<string, unknown>,
   },
 });
@@ -177,12 +180,13 @@ export const buildFireRenewTool = (opts: FireScheduleTimeOpts): FireScheduleTool
       '给你挂着的一个任务改触发时间：只换时间，沿用原有模式与提示方向。',
       '一次性任务 = 整条改到新时间（编号不变）；循环任务 = 只给这一次补发一条一次性任务，原来的每天/每周节奏不动。',
       '想改的是循环任务本身的时间、或者想说的内容方向已经变了，改用 cancel_active_message + schedule_active_message 重新创建。',
-      `send_at 至少比现在晚 1 分钟（写你本地的墙钟时间，如 ${buildSendAtExample(opts.nowMs, opts.tz)}，不带时区后缀）。`,
+      ...(opts.storyYearless ? ['剧情年份已开启：send_at 只写 MM-DDTHH:mm:ss，不要写年份；系统会按你所在地换算成最近的真实日期。'] : []),
+      `send_at 至少比现在晚 1 分钟（写你本地的墙钟时间，如 ${buildSendAtExample(opts.nowMs, opts.tz, opts.storyYearless)}，不带时区后缀）。`,
     ].join('\n'),
     parameters: {
       type: 'object',
       properties: {
-        send_at: { type: 'string', description: '新的触发时间，写你本地的墙钟时间、不带时区后缀。至少比现在晚 1 分钟。' },
+        send_at: { type: 'string', description: `新的触发时间，写你本地的墙钟时间、不带时区后缀${opts.storyYearless ? '，格式 MM-DDTHH:mm:ss，不写年份' : ''}。至少比现在晚 1 分钟。` },
         task_id: { type: 'string', description: '要改期的任务短 id（8 位，见排程清单）。只有一个任务时可省略。' },
       },
       required: ['send_at'],
@@ -227,8 +231,8 @@ export const buildFireScheduleBlock = (
   const howTo = mode === 'native'
     ? `需要时通过系统的工具调用接口发起 ${AMSG_FIRE_SCHEDULE_TOOL}，不要把工具名和参数写进正文。`
     : `需要时单独输出一行 ${AMSG_FIRE_SCHEDULE_TOOL}({"send_at":"${
-      buildSendAtExample(opts.nowMs, opts.tz)
-    }","prompt_hint":"接着说"})（send_at 写你本地的墙钟时间，不带时区后缀），系统会代为安排并把结果告诉你。`;
+      buildSendAtExample(opts.nowMs, opts.tz, opts.storyYearless)
+    }","prompt_hint":"接着说"})（send_at 写你本地的墙钟时间${opts.storyYearless ? '，格式 MM-DDTHH:mm:ss，不写年份' : '，不带时区后缀'}），系统会代为安排并把结果告诉你。`;
   return [
     '',
     '---',
@@ -325,8 +329,41 @@ export const wallClockIso = (ms: number, tz: AmsgTzRef): string => {
 };
 
 /** 给模型看的 send_at 示例：明天这个点的裸墙钟——别再教它写 +08:00 之类的 offset。 */
-export const buildSendAtExample = (nowMs: number, tz: AmsgTzRef): string =>
-  wallClockIso(nowMs + 24 * 3600_000, tz);
+export const buildSendAtExample = (nowMs: number, tz: AmsgTzRef, storyYearless = false): string => {
+  const example = wallClockPartsInZone(nowMs + 24 * 3600_000, tz);
+  return storyYearless
+    ? `${pad2(example.month)}-${pad2(example.day)}T${pad2(example.hour)}:${pad2(example.minute)}:00`
+    : wallClockIso(nowMs + 24 * 3600_000, tz);
+};
+
+/** 剧情年份下将 MM-DDTHH:mm:ss 映射到当前角色时区之后最近的真实日期。 */
+export const resolveStoryYearlessSendAtMs = (raw: string, nowMs: number, tz: AmsgTzRef): number => {
+  const match = /^(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/.exec(raw.trim());
+  if (!match) return Number.NaN;
+  const [, monthText, dayText, hourText, minuteText, secondText] = match;
+  const month = Number(monthText), day = Number(dayText), hour = Number(hourText);
+  const minute = Number(minuteText), second = Number(secondText);
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return Number.NaN;
+
+  const now = wallClockPartsInZone(nowMs, tz);
+  const currentYear = now.year;
+  const requestedDay = month * 100 + day;
+  const today = now.month * 100 + now.day;
+  const firstYear = requestedDay < today ? currentYear + 1 : currentYear;
+  for (let year = firstYear; year <= firstYear + 8; year += 1) {
+    const candidate = wallClockToTimestamp(
+      `${year}-${monthText}-${dayText}T${hourText}:${minuteText}:${secondText}`,
+      tz.tzId,
+    );
+    if (!Number.isFinite(candidate)) continue;
+    const actual = wallClockPartsInZone(candidate, tz);
+    if (actual.year !== year || actual.month !== month || actual.day !== day
+      || actual.hour !== hour || actual.minute !== minute) continue;
+    if (candidate >= nowMs + MIN_SCHEDULE_LEAD_MS) return candidate;
+    if (year === currentYear) return Number.NaN;
+  }
+  return Number.NaN;
+};
 
 /** send_at 串 → epoch ms（解析不出 NaN）。规则见上面这段注释。 */
 export const resolveSendAtMs = (raw: string, tz: AmsgTzRef): number => {
@@ -371,15 +408,19 @@ export const parseFireScheduleArgs = (
   args: Record<string, unknown>,
   nowMs: number,
   tz: AmsgTzRef,
+  storyYearless = false,
 ): FireScheduleRequest | FireScheduleReject => {
-  const example = buildSendAtExample(nowMs, tz);
+  const example = buildSendAtExample(nowMs, tz, storyYearless);
+  const expectedFormat = storyYearless ? 'MM-DDTHH:mm:ss（不写年份）' : '你本地的墙钟时间';
   const sendAtRaw = args?.send_at;
   if (typeof sendAtRaw !== 'string' || !sendAtRaw.trim()) {
-    return { ok: false, reason: 'invalid_send_at', message: `send_at 必填，写你本地的墙钟时间（如 ${example}）。` };
+    return { ok: false, reason: 'invalid_send_at', message: `send_at 必填，写${expectedFormat}（如 ${example}）。` };
   }
-  const sendAtMs = resolveSendAtMs(sendAtRaw, tz);
+  const sendAtMs = storyYearless
+    ? resolveStoryYearlessSendAtMs(sendAtRaw, nowMs, tz)
+    : resolveSendAtMs(sendAtRaw, tz);
   if (!Number.isFinite(sendAtMs)) {
-    return { ok: false, reason: 'invalid_send_at', message: `send_at「${sendAtRaw}」解析不出时间，写你本地的墙钟时间（如 ${example}）。` };
+    return { ok: false, reason: 'invalid_send_at', message: `send_at 格式不正确或日期无效，写${expectedFormat}（如 ${example}）。` };
   }
   if (sendAtMs < nowMs + MIN_SCHEDULE_LEAD_MS) {
     return {
@@ -524,14 +565,18 @@ export const parseFireRenewSendAt = (
   raw: unknown,
   nowMs: number,
   tz: AmsgTzRef,
+  storyYearless = false,
 ): { sendAt: string } | FireScheduleReject => {
-  const example = buildSendAtExample(nowMs, tz);
+  const example = buildSendAtExample(nowMs, tz, storyYearless);
+  const expectedFormat = storyYearless ? 'MM-DDTHH:mm:ss（不写年份）' : '你本地的墙钟时间';
   if (typeof raw !== 'string' || !raw.trim()) {
-    return { ok: false, reason: 'invalid_send_at', message: `send_at 必填，写你本地的墙钟时间（如 ${example}）。` };
+    return { ok: false, reason: 'invalid_send_at', message: `send_at 必填，写${expectedFormat}（如 ${example}）。` };
   }
-  const sendAtMs = resolveSendAtMs(raw, tz);
+  const sendAtMs = storyYearless
+    ? resolveStoryYearlessSendAtMs(raw, nowMs, tz)
+    : resolveSendAtMs(raw, tz);
   if (!Number.isFinite(sendAtMs)) {
-    return { ok: false, reason: 'invalid_send_at', message: `send_at「${raw}」解析不出时间，写你本地的墙钟时间（如 ${example}）。` };
+    return { ok: false, reason: 'invalid_send_at', message: `send_at 格式不正确或日期无效，写${expectedFormat}（如 ${example}）。` };
   }
   if (sendAtMs < nowMs + MIN_SCHEDULE_LEAD_MS) {
     return {

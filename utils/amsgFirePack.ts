@@ -18,6 +18,7 @@
 import type { ActiveMsg2TaskRecord } from '../types';
 import { renderFireSceneBlock, type AmsgFireScene } from './amsgFireScene';
 import { DEFAULT_MAX_UNANSWERED_SENDS } from './amsgLimits';
+import { storyYearAt } from './tavernStoryTime';
 
 // 连发上限的默认值与解析搬进了 amsgLimits（和其余几项上限住在一起），这里转出去给老调用方。
 export { DEFAULT_MAX_UNANSWERED_SENDS, resolveMaxUnansweredSends } from './amsgLimits';
@@ -546,6 +547,15 @@ export interface AmsgFirePackChat {
   timelyInsertAt?: number;
 }
 
+/**
+ * 酒馆角色开启剧情年份时，主动消息只替换角色看到的年份。
+ * 月日时分仍由 worker 按 tzId 对当前现实时刻计算，排程本身也继续使用真实 epoch ms。
+ */
+export interface AmsgTavernStoryTime {
+  yearLabel: string;
+  baseRealYear: number;
+}
+
 export interface AmsgFirePack {
   /** 模板是否含用户指定的内心独白协议；旧包缺省不回传原始推理。 */
   thinkingChainEnabled?: boolean;
@@ -572,6 +582,8 @@ export interface AmsgFirePack {
    * 这两个绝不能混着用。必填：缺了整包按格式不对打回（跟 tzId 同一条规矩）。
    */
   userTzId: string;
+  /** 酒馆剧情年份；缺省表示主动消息沿用现实年份。 */
+  tavernStoryTime?: AmsgTavernStoryTime;
   /** 用户称呼（userProfile.name || '对方'），awayHint 文案用。 */
   targetName: string;
   /**
@@ -667,6 +679,20 @@ const pad2 = (n: number) => n.toString().padStart(2, '0');
 export const formatFireTimeFull = (nowMs: number, tz: AmsgTzRef): string => {
   const p = wallClockPartsInZone(nowMs, tz);
   return `${p.year}年${p.month}月${p.day}日 ${WEEKDAY_NAMES[p.weekday]} ${timeOfDayWord(p.hour)} ${pad2(p.hour)}:${pad2(p.minute)}`;
+};
+
+/**
+ * 酒馆剧情年份的当前时间：不显示现实年份或星期几，避免古代/架空角色读到出戏的信息。
+ * 月日时分和时段词仍按当前现实时刻在角色时区的墙钟读数生成。
+ */
+export const formatFireTimeFullWithStoryYear = (
+  nowMs: number,
+  tz: AmsgTzRef,
+  story: AmsgTavernStoryTime,
+): string => {
+  const p = wallClockPartsInZone(nowMs, tz);
+  const year = storyYearAt({ ...story, tz: tz.tzId }, nowMs);
+  return `${year}${year.endsWith('年') ? '' : ' '}${p.month}月${p.day}日 ${timeOfDayWord(p.hour)} ${pad2(p.hour)}:${pad2(p.minute)}`;
 };
 
 /** self_log 时间戳 / 排程清单用的短格式：`8月1日 08:00`（同一参照系，只是省地方）。 */
@@ -1052,7 +1078,9 @@ export const renderFirePack = (
   },
 ): string => {
   const tz: AmsgTzRef = { tzId: pack.tzId };
-  const currentTime = formatFireTimeFull(nowMs, tz);
+  const currentTime = pack.tavernStoryTime
+    ? formatFireTimeFullWithStoryYear(nowMs, tz, pack.tavernStoryTime)
+    : formatFireTimeFull(nowMs, tz);
   const lastUserMessageAt = extras?.lastUserMessageAt !== undefined
     ? extras.lastUserMessageAt
     : pack.lastUserMessageAt ?? null;
@@ -1156,6 +1184,13 @@ export const parseFirePack = (value: string): AmsgFirePack | null => {
       (parsed.lastAwayAnchorAt === undefined || parsed.lastAwayAnchorAt === null || typeof parsed.lastAwayAnchorAt === 'number') &&
       typeof parsed.tzId === 'string' && parsed.tzId.length > 0 &&
       typeof parsed.userTzId === 'string' && parsed.userTzId.length > 0 &&
+      (parsed.tavernStoryTime === undefined || (
+        parsed.tavernStoryTime && typeof parsed.tavernStoryTime === 'object' && !Array.isArray(parsed.tavernStoryTime)
+        && typeof parsed.tavernStoryTime.yearLabel === 'string'
+        && parsed.tavernStoryTime.yearLabel.trim().length > 0
+        && typeof parsed.tavernStoryTime.baseRealYear === 'number'
+        && Number.isFinite(parsed.tavernStoryTime.baseRealYear)
+      )) &&
       typeof parsed.targetName === 'string' &&
       typeof parsed.builtAt === 'number' &&
       Array.isArray(parsed.pendingTasks) &&

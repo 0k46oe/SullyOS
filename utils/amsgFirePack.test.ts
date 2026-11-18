@@ -22,6 +22,7 @@ import {
   DEFAULT_MAX_UNANSWERED_SENDS,
   describeLastSkip,
   formatFireTimeFull,
+  formatFireTimeFullWithStoryYear,
   formatFireTimeShort,
   formatTimeSinceUser,
   isValidGzipForInput,
@@ -118,6 +119,16 @@ describe('formatFireTimeFull / formatFireTimeShort（角色参照系的自然中
     expect(word(21)).toBe('晚上');
     expect(word(23)).toBe('深夜');
   });
+
+  it('剧情年份替换现实年份和星期，月日时分仍按角色时区的现实墙钟', () => {
+    const at = Date.parse('2026-07-17T12:30:00Z');
+    expect(formatFireTimeFullWithStoryYear(at, { tzId: 'America/New_York' }, {
+      yearLabel: '庚辰年', baseRealYear: 2026,
+    })).toBe('庚辰年7月17日 早晨 08:30');
+    expect(formatFireTimeFullWithStoryYear(at, { tzId: 'Asia/Shanghai' }, {
+      yearLabel: '3777年', baseRealYear: 2026,
+    })).toBe('3777年7月17日 晚上 20:30');
+  });
 });
 
 describe('renderFirePack', () => {
@@ -147,6 +158,18 @@ describe('renderFirePack', () => {
       '本次任务指令',
     ].join('\n'));
     expect(rendered).not.toContain('{{');
+  });
+
+  it('剧情年份只改变主动消息里角色看到的当前时间文本', () => {
+    const now = Date.parse('2026-07-17T12:30:00Z');
+    const rendered = renderFirePack({
+      ...basePack,
+      tavernStoryTime: { yearLabel: '庚辰年', baseRealYear: 2026 },
+    }, now, '本次任务指令');
+    expect(rendered).toContain('庚辰年7月17日 中午 12:30');
+    expect(rendered).not.toContain('2026年');
+    expect(rendered).not.toContain('周五');
+    expect(rendered).toContain('你们最近没有新的聊天记录');
   });
 
   it('按 pack.tzId 的 IANA 时区渲染（Intl 处理，不吃运行时本地时区）', () => {

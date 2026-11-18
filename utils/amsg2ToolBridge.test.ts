@@ -461,6 +461,26 @@ describe('连发上限·本地排程闸', () => {
     expect(open.parameters.properties).toHaveProperty('expire_policy');
   });
 
+  it('酒馆剧情时间的工具只展示月日时分，并把输入换成真实排程时间', async () => {
+    const storyChar = {
+      tavernImport: { source: 'test' },
+      tavernStoryTime: { enabled: true, yearLabel: '庚辰年', baseRealYear: 2026 },
+      customTimezoneEnabled: true,
+      customTimezone: 'UTC',
+    };
+    const tool = buildAmsg2Tools(resolveAmsgLimits(undefined), true)[0].function;
+    const description = tool.parameters.properties.send_at.description;
+    expect(description).toContain('MM-DDTHH:mm:ss');
+    expect(description).not.toContain('YYYY');
+    expect(description).not.toContain('2026');
+
+    const { deps } = makeSession(storyChar);
+    await executeAmsg2Tool('schedule_active_message', { send_at: '08-03T07:00:00' }, deps);
+    expect(ActiveMsgClient.scheduleCharacterTask).toHaveBeenCalledWith(expect.objectContaining({
+      task: expect.objectContaining({ firstSendTime: '2026-08-03T07:00:00.000Z' }),
+    }));
+  });
+
   it('用户把上限设成 1 → 第一条自排就打回第二条', async () => {
     const { deps } = makeSession({
       activeMsg2Config: { enabled: true, maxUnansweredSends: 1, tasks: [selfTask('u1')] },

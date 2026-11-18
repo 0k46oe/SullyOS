@@ -1230,7 +1230,9 @@ export const useChatAI = ({
             let amsg2ExpiredIds: string[] = [];
             let amsg2Notices: Amsg2ExpiredNoticeRecord[] = [];
             if (amsg2ToolsInjected) {
-                baseReqBody.tools = [...(baseReqBody.tools || []), ...buildAmsg2Tools(resolveAmsgLimits(char.activeMsg2Config))];
+                baseReqBody.tools = [...(baseReqBody.tools || []), ...buildAmsg2Tools(
+                    resolveAmsgLimits(char.activeMsg2Config), !!getActiveTavernStoryTime(char),
+                )];
                 if (!baseReqBody.tool_choice) baseReqBody.tool_choice = 'auto';
                 try {
                     // 回执这半边一轮只读一次台账；

@@ -10,6 +10,8 @@ import {
   buildTaskInstruction,
   extractFireScheduleTextCalls,
   parseFireScheduleArgs,
+  parseFireRenewSendAt,
+  resolveStoryYearlessSendAtMs,
   resolveFireTargetTask,
 } from './amsgFireSchedule';
 import { shortTaskId } from './amsg2Tasks';
@@ -129,6 +131,34 @@ describe('parseFireScheduleArgs 的时间参照系', () => {
     ) as any;
     expect(out.message).toContain('8月1日 10:00');
     expect(out.message).not.toContain('Z）');
+  });
+});
+
+describe('剧情年份下的年省略排程时间', () => {
+  it('不向角色展示公历年，并映射到之后最近的真实日期', () => {
+    expect(buildSendAtExample(NOW, TZ, true)).toBe('07-31T12:00:00');
+    const out = parseFireScheduleArgs({ send_at: '07-31T13:00:00' }, NOW, TZ, true) as any;
+    expect(out.sendAt).toBe('2026-07-31T13:00:00.000Z');
+    expect((parseFireScheduleArgs({ send_at: '2026-07-31T13:00:00' }, NOW, TZ, true) as any).reason).toBe('invalid_send_at');
+  });
+
+  it('月日已过时映射到下一年的真实日期，但同日已过时刻不误排到明年', () => {
+    expect(resolveStoryYearlessSendAtMs('07-29T13:00:00', NOW, TZ)).toBe(Date.UTC(2027, 6, 29, 13));
+    expect(Number.isNaN(resolveStoryYearlessSendAtMs('07-30T11:00:00', NOW, TZ))).toBe(true);
+  });
+
+  it('续期解析同样只接受不带年份的角色墙钟', () => {
+    const renewed = parseFireRenewSendAt('07-31T13:00:00', NOW, TZ, true) as any;
+    expect(renewed.sendAt).toBe('2026-07-31T13:00:00.000Z');
+    expect((parseFireRenewSendAt('2026-07-31T13:00:00', NOW, TZ, true) as any).reason).toBe('invalid_send_at');
+  });
+
+  it('排程工具示例和说明都不泄露公历年份', () => {
+    const tool = buildFireScheduleTool({ nowMs: NOW, tz: TZ, abilities: { allowRecurring: true, allowForce: true }, storyYearless: true });
+    const text = JSON.stringify(tool.function.parameters) + buildFireScheduleBlock('text', { nowMs: NOW, tz: TZ, storyYearless: true });
+    expect(text).toContain('MM-DDTHH:mm:ss');
+    expect(text).toContain('07-31T12:00:00');
+    expect(text).not.toContain('2026');
   });
 });
 

@@ -1581,7 +1581,8 @@ export const runFireScheduleTool = async (
 
   // 裸 send_at 按角色的时间参照系解析（③）：角色在 prompt 里看到的钟是它自己时区的，
   // worker 跑在 UTC，不带 tz 的话「明早 9 点」会整整差一个时差。
-  const parsed = parseFireScheduleArgs(args, nowMs, stash.tz);
+  const storyYearless = !!stash.firePack?.tavernStoryTime;
+  const parsed = parseFireScheduleArgs(args, nowMs, stash.tz, storyYearless);
   if ('ok' in parsed) return parsed as unknown as Record<string, unknown>;
 
   // 用户定的规矩：能不能排重复的、两条之间隔够没有、「到点必发」放没放开（没放开就按
@@ -1798,7 +1799,7 @@ export const runFireRenewTool = async (
   if (target.mode === 'fixed') {
     return { ok: false, reason: 'fixed_task', message: '固定内容的任务不在这里改，让用户去设置面板调整。' };
   }
-  const parsed = parseFireRenewSendAt(args.send_at, nowMs, stash.tz);
+  const parsed = parseFireRenewSendAt(args.send_at, nowMs, stash.tz, !!stash.firePack?.tavernStoryTime);
   if ('ok' in parsed) return parsed as unknown as Record<string, unknown>;
 
   // 循环任务：补发一条一次性，原节奏不动（与前台 renew 同语义）。走排程工具的
@@ -2544,6 +2545,7 @@ export const amsgHooks = {
       toolConfig,
       userName: pack.targetName,
       timeAwarenessEnabled: toolPack.timeAwarenessEnabled,
+      tavernStoryTime: !!pack.tavernStoryTime,
       tzId: pack.tzId,
       nowMs: ctx.now.getTime(),
       globalRows,
@@ -2584,6 +2586,7 @@ export const amsgHooks = {
       ? buildFireScheduleBlock(mcpNative ? 'native' : 'text', {
         nowMs: ctx.now.getTime(), tz, limitsBrief,
         context: instant ? 'chat' : 'fire', targetName: pack.targetName,
+        storyYearless: !!pack.tavernStoryTime,
       })
       : '';
     const abilities = { allowRecurring: limits.allowSelfRecurring, allowForce: limits.allowSelfForce };
@@ -2591,10 +2594,10 @@ export const amsgHooks = {
     const fireTools = [
       ...(mcpResolve && mcpNative ? buildMcpFireTools(mcpResolve) : []),
       ...(canSelfSchedule && mcpNative
-        ? [buildFireScheduleTool({ nowMs: ctx.now.getTime(), tz, abilities, context: instant ? 'chat' : 'fire' })]
+        ? [buildFireScheduleTool({ nowMs: ctx.now.getTime(), tz, abilities, context: instant ? 'chat' : 'fire', storyYearless: !!pack.tavernStoryTime })]
         : []),
       ...(canManageTasks && mcpNative
-        ? [buildFireCancelTool(), buildFireRenewTool({ nowMs: ctx.now.getTime(), tz })]
+        ? [buildFireCancelTool(), buildFireRenewTool({ nowMs: ctx.now.getTime(), tz, storyYearless: !!pack.tavernStoryTime })]
         : []),
     ];
     // 带工具时说清「这次回复」从哪儿算起：即时对话是用户那条消息，定时触发是这份说明本身。
@@ -2631,6 +2634,7 @@ export const amsgHooks = {
         userTzId: pack.userTzId,
         targetName: pack.targetName,
         timeAwarenessEnabled: toolPack.timeAwarenessEnabled,
+        tavernStoryTime: pack.tavernStoryTime,
         blocks: [
           realtimeWorldBlock,
           renderSelfLogBlock(selfLog, ctx.now.getTime(), tz, maxUnansweredSends),

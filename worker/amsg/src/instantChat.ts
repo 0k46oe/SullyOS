@@ -27,6 +27,8 @@ import {
   amsgStateNamespace,
   buildUserClockHint,
   formatFireTimeFull,
+  formatFireTimeFullWithStoryYear,
+  type AmsgTavernStoryTime,
   type AmsgTzRef,
 } from '../../../utils/amsgFirePack';
 import { TIME_FRAMING_CONVERSATIONAL } from '../../../utils/timeFramingNote';
@@ -62,6 +64,8 @@ export const buildInstantTimelyBlock = (args: {
   tz: AmsgTzRef;
   userTzId: string;
   targetName: string;
+  /** 酒馆剧情年份：只替换年月日提示中的年份，不参与任务的现实时间调度。 */
+  tavernStoryTime?: AmsgTavernStoryTime;
   /**
    * 角色的「时间感知」开关（tool_pack.timeAwarenessEnabled）。关掉的角色在前台连今天
    * 几号都读不到，云端这条路也一个钟都不给——两条路是同一个开关，不能各行其是。
@@ -79,7 +83,9 @@ export const buildInstantTimelyBlock = (args: {
   const head = args.timeAwarenessEnabled
     ? [
         '【此刻的系统信息·仅你可见】',
-        `现在是 ${formatFireTimeFull(args.nowMs, args.tz)}。`,
+        `现在是 ${args.tavernStoryTime
+          ? formatFireTimeFullWithStoryYear(args.nowMs, args.tz, args.tavernStoryTime)
+          : formatFireTimeFull(args.nowMs, args.tz)}。`,
         // 报时后面跟那句语境框定，跟前台聊天引的是同一份常量。这一轮是用户刚按下发送、
         // 正等着回复，所以「对方还在跟你说话」是真的；少了它，深夜的那行钟就够让角色
         // 每轮都往「快睡吧、明天见」上收——本地那条路修好了、云端没修的话，同一个角色

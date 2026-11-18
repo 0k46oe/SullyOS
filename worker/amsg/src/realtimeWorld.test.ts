@@ -45,11 +45,13 @@ const hotNewsSnapshot = (id: string, platforms: string[], titles: string[], fetc
 const run = (args: {
     toolConfig: AmsgToolConfig;
     timeAwarenessEnabled?: boolean;
+    tavernStoryTime?: boolean;
     globalRows?: Array<{ key: string; value: string }>;
     writeState?: any;
 }) => buildRealtimeWorldBlock({
     toolConfig: args.toolConfig,
     timeAwarenessEnabled: args.timeAwarenessEnabled ?? true,
+    tavernStoryTime: args.tavernStoryTime,
     tzId: TZ,
     nowMs: NOW,
     globalRows: args.globalRows ?? [],
@@ -92,6 +94,18 @@ describe('时间感知开关跟到后台', () => {
         });
         expect(out).toContain('实时天气');
         expect(out).not.toContain('今日特殊');
+    });
+});
+
+describe('酒馆剧情年份隔离现实世界信息', () => {
+    it('剧情年份开启时不注入天气、热搜、现实节日，也不为它们发起网络请求', async () => {
+        const out = await run({
+            tavernStoryTime: true,
+            toolConfig: cfg({ weatherEnabled: true, weatherCity: '上海', newsEnabled: true, newsPlatforms: ['weibo'] }),
+            globalRows: [weatherSnapshot('上海', NOW), hotNewsSnapshot('weibo', ['weibo'], ['现实热点'])],
+        });
+        expect(out).toBe('');
+        expect(fetchMock).not.toHaveBeenCalled();
     });
 });
 

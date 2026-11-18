@@ -1018,13 +1018,22 @@ describe('buildFirePack 的时区参照系与模板（①）', () => {
     expect(out.tzId).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone);
   });
 
+  it('酒馆剧情年份开启时把年份配置随 fire_pack 上传，普通角色不带', async () => {
+    const tavern = await pack(baseChar({
+      tavernImport: true,
+      tavernStoryTime: { enabled: true, yearLabel: '庚辰年', baseRealYear: 2026 },
+    }));
+    expect(tavern.tavernStoryTime).toEqual({ yearLabel: '庚辰年', baseRealYear: 2026 });
+    expect(await pack(baseChar())).not.toHaveProperty('tavernStoryTime');
+  });
+
   it('buildSystemPrompt 收到 forFirePack —— 打包时刻的状态一律不烤进模板', async () => {
     await pack(baseChar());
     expect(systemPromptSpy).toHaveBeenCalledTimes(1);
     // 第 12 个位置参数是 promptOptions（见 chatPrompts.buildSystemPrompt 签名）。
     // 这个开关一次性关掉时间块 / 真实世界感知 / 日程 / 音乐 / 刚打完电话 / 群聊相对时间 /
     // 生活记录代记 / [schedule_message] 教学，清单见 ChatPrompts.PromptBuildOptions。
-    expect(systemPromptSpy.mock.calls[0][11]).toEqual({ forFirePack: true });
+    expect(systemPromptSpy.mock.calls[0][11]).toEqual({ forFirePack: true, tavernStoryTime: false });
   });
 
   it('当前时间槽位保留：worker 到点现算填入（1.0 提示块的「现在是」也是槽位）', async () => {

@@ -1215,6 +1215,99 @@ var buildLimitsBrief = (input) => {
   return ["\u7528\u6237\u7ED9\u4F60\u5B9A\u7684\u89C4\u77E9\uFF08\u7CFB\u7EDF\u7167\u7740\u6267\u884C\uFF1A\u8D85\u51FA\u7684\u6392\u4E0D\u4E0A\uFF0C\u6392\u4E0A\u4E86\u5230\u70B9\u4E5F\u4E0D\u53D1\uFF09\uFF1A", ...lines].join("\n");
 };
 
+// utils/tavernStoryTime.ts
+var DAY_MS = 24 * 60 * 60 * 1e3;
+var wall = (story, ts) => nowInTimeZone(story.tz, new Date(ts));
+var STEMS = "\u7532\u4E59\u4E19\u4E01\u620A\u5DF1\u5E9A\u8F9B\u58EC\u7678";
+var BRANCHES = "\u5B50\u4E11\u5BC5\u536F\u8FB0\u5DF3\u5348\u672A\u7533\u9149\u620C\u4EA5";
+var CN_DIGITS = "\u3007\u4E00\u4E8C\u4E09\u56DB\u4E94\u516D\u4E03\u516B\u4E5D";
+var CN_DIGIT_VALUE = { "\u3007": 0, \u96F6: 0, \u4E00: 1, \u4E8C: 2, \u4E24: 2, \u4E09: 3, \u56DB: 4, \u4E94: 5, \u516D: 6, \u4E03: 7, \u516B: 8, \u4E5D: 9 };
+var CN_UNIT_VALUE = { \u5341: 10, \u767E: 100, \u5343: 1e3, \u4E07: 1e4 };
+function shiftGanzhi(text2, offset) {
+  return text2.replace(/([甲乙丙丁戊己庚辛壬癸])([子丑寅卯辰巳午未申酉戌亥])/g, (pair, stem, branch) => {
+    const s = STEMS.indexOf(stem), b = BRANCHES.indexOf(branch);
+    if (s % 2 !== b % 2) return pair;
+    let index = 0;
+    while (index % 10 !== s || index % 12 !== b) index++;
+    const next = ((index + offset) % 60 + 60) % 60;
+    return STEMS[next % 10] + BRANCHES[next % 12];
+  });
+}
+function parseChineseNumber(text2) {
+  if (text2 === "\u5143") return 1;
+  if (!text2 || /[^〇零一二两三四五六七八九十百千万]/.test(text2)) return null;
+  if (!/[十百千万]/.test(text2)) {
+    return text2.length > 1 || text2 in CN_DIGIT_VALUE ? Number([...text2].map((ch) => CN_DIGIT_VALUE[ch]).join("")) : null;
+  }
+  let total = 0, section = 0, digit = 0;
+  for (const ch of text2) {
+    if (ch in CN_DIGIT_VALUE) {
+      digit = CN_DIGIT_VALUE[ch];
+      continue;
+    }
+    const unit = CN_UNIT_VALUE[ch];
+    if (unit === 1e4) {
+      total += (section + digit) * 1e4;
+      section = 0;
+      digit = 0;
+      continue;
+    }
+    section += (digit || 1) * unit;
+    digit = 0;
+  }
+  return total + section + digit;
+}
+function formatChineseUnder10000(n, leadingTen) {
+  const units = ["\u5343", "\u767E", "\u5341", ""];
+  const digits = String(n).padStart(4, "0").split("").map(Number);
+  let out = "", zero = false, started = false;
+  digits.forEach((d, i) => {
+    if (d === 0) {
+      if (started) zero = true;
+      return;
+    }
+    if (zero) {
+      out += "\u96F6";
+      zero = false;
+    }
+    out += leadingTen && !started && d === 1 && units[i] === "\u5341" ? "\u5341" : CN_DIGITS[d] + units[i];
+    started = true;
+  });
+  return out;
+}
+function formatChineseNumber(n, style) {
+  if (style === "digits") return String(n).split("").map((d) => CN_DIGITS[Number(d)]).join("");
+  if (n === 0) return "\u96F6";
+  if (n < 1e4) return formatChineseUnder10000(n, n < 20);
+  const high = Math.floor(n / 1e4), low = n % 1e4;
+  return formatChineseUnder10000(high, high < 20) + "\u4E07" + (low === 0 ? "" : (low < 1e3 ? "\u96F6" : "") + formatChineseUnder10000(low, false));
+}
+function shiftYearLabel(label, offset) {
+  if (!offset) return label;
+  let result = label;
+  const arabic = [...label.matchAll(/\d+/g)].pop();
+  if (arabic) {
+    const next = Number(arabic[0]) + offset;
+    if (next >= 0) {
+      const text2 = String(next).padStart(arabic[0].length, "0");
+      result = label.slice(0, arabic.index) + text2 + label.slice(arabic.index + arabic[0].length);
+    }
+  } else {
+    const chinese = [...label.matchAll(/([〇零一二两三四五六七八九十百千万]+|元)(?=年)/g)].pop();
+    const value = chinese ? parseChineseNumber(chinese[1]) : null;
+    if (chinese && value !== null && value + offset >= 1) {
+      const next = value + offset;
+      const style = chinese[1] !== "\u5143" && !/[十百千万]/.test(chinese[1]) && chinese[1].length > 1 ? "digits" : "units";
+      const text2 = next === 1 && chinese[1] === "\u5143" ? "\u5143" : formatChineseNumber(next, style);
+      result = label.slice(0, chinese.index) + text2 + label.slice(chinese.index + chinese[1].length);
+    }
+  }
+  return shiftGanzhi(result, offset);
+}
+function storyYearAt(story, realTs) {
+  return shiftYearLabel(story.yearLabel, wall(story, realTs).getFullYear() - story.baseRealYear);
+}
+
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
 var readTaskKind = (metadata) => {
@@ -1411,6 +1504,11 @@ var formatFireTimeFull = (nowMs, tz) => {
   const p = wallClockPartsInZone(nowMs, tz);
   return `${p.year}\u5E74${p.month}\u6708${p.day}\u65E5 ${WEEKDAY_NAMES[p.weekday]} ${timeOfDayWord(p.hour)} ${pad2(p.hour)}:${pad2(p.minute)}`;
 };
+var formatFireTimeFullWithStoryYear = (nowMs, tz, story) => {
+  const p = wallClockPartsInZone(nowMs, tz);
+  const year = storyYearAt({ ...story, tz: tz.tzId }, nowMs);
+  return `${year}${year.endsWith("\u5E74") ? "" : " "}${p.month}\u6708${p.day}\u65E5 ${timeOfDayWord(p.hour)} ${pad2(p.hour)}:${pad2(p.minute)}`;
+};
 var formatFireTimeShort = (nowMs, tz) => {
   const p = wallClockPartsInZone(nowMs, tz);
   return `${p.month}\u6708${p.day}\u65E5 ${pad2(p.hour)}:${pad2(p.minute)}`;
@@ -1557,7 +1655,7 @@ var renderLiveChatLine = (targetName, lastUserMessageAt, nowMs) => {
 var fillSlot = (text2, slot, value) => text2.split(slot).join(value);
 var renderFirePack = (pack, nowMs, taskInstruction, extras) => {
   const tz = { tzId: pack.tzId };
-  const currentTime = formatFireTimeFull(nowMs, tz);
+  const currentTime = pack.tavernStoryTime ? formatFireTimeFullWithStoryYear(nowMs, tz, pack.tavernStoryTime) : formatFireTimeFull(nowMs, tz);
   const lastUserMessageAt = extras?.lastUserMessageAt !== void 0 ? extras.lastUserMessageAt : pack.lastUserMessageAt ?? null;
   const diffMinutes = lastUserMessageAt == null ? null : Math.max(0, Math.floor((nowMs - lastUserMessageAt) / 6e4));
   const timeSinceUser = formatTimeSinceUser(diffMinutes);
@@ -1618,7 +1716,7 @@ var chatFieldOk = (chat) => {
 var parseFirePack = (value) => {
   try {
     const parsed = JSON.parse(value);
-    if (parsed && typeof parsed === "object" && parsed.v === FIRE_PACK_VERSION && chatFieldOk(parsed.chat) && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && (parsed.lastAwayAnchorAt === void 0 || parsed.lastAwayAnchorAt === null || typeof parsed.lastAwayAnchorAt === "number") && typeof parsed.tzId === "string" && parsed.tzId.length > 0 && typeof parsed.userTzId === "string" && parsed.userTzId.length > 0 && typeof parsed.targetName === "string" && typeof parsed.builtAt === "number" && Array.isArray(parsed.pendingTasks) && (parsed.scene === null || typeof parsed.scene === "object") && typeof parsed.selfScheduleEnabled === "boolean") {
+    if (parsed && typeof parsed === "object" && parsed.v === FIRE_PACK_VERSION && chatFieldOk(parsed.chat) && typeof parsed.template === "string" && parsed.template.length > 0 && (parsed.lastUserMessageAt === null || typeof parsed.lastUserMessageAt === "number") && (parsed.lastAwayAnchorAt === void 0 || parsed.lastAwayAnchorAt === null || typeof parsed.lastAwayAnchorAt === "number") && typeof parsed.tzId === "string" && parsed.tzId.length > 0 && typeof parsed.userTzId === "string" && parsed.userTzId.length > 0 && (parsed.tavernStoryTime === void 0 || parsed.tavernStoryTime && typeof parsed.tavernStoryTime === "object" && !Array.isArray(parsed.tavernStoryTime) && typeof parsed.tavernStoryTime.yearLabel === "string" && parsed.tavernStoryTime.yearLabel.trim().length > 0 && typeof parsed.tavernStoryTime.baseRealYear === "number" && Number.isFinite(parsed.tavernStoryTime.baseRealYear)) && typeof parsed.targetName === "string" && typeof parsed.builtAt === "number" && Array.isArray(parsed.pendingTasks) && (parsed.scene === null || typeof parsed.scene === "object") && typeof parsed.selfScheduleEnabled === "boolean") {
       return parsed;
     }
   } catch {
@@ -3293,7 +3391,7 @@ function stringifyDecisionForError(value) {
 }
 
 // ../../../../2026-10-30/https-github-com-0k46oe-sullyos-https/sullyos/node_modules/.pnpm/@rei-standard+amsg-server@3_f2a08373d30841ce79e2e19c7fb88ed9/node_modules/@rei-standard/amsg-server/dist/chunk-WFKLHUUE.mjs
-var DAY_MS = 24 * 60 * 60 * 1e3;
+var DAY_MS2 = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
 var formatterCache = /* @__PURE__ */ new Map();
@@ -3352,26 +3450,26 @@ function epochFromWallParts({ year, month, day, hour, minute, second, ms }, tzId
   if (tzOffsetMsAt(refined, tzId) !== tzOffsetMsAt(firstGuess, tzId)) return firstGuess;
   return refined;
 }
-function timeOfDayFor(occurrenceMs, wall, tzId, anchorMs) {
-  if (!Number.isFinite(anchorMs)) return wall;
+function timeOfDayFor(occurrenceMs, wall2, tzId, anchorMs) {
+  if (!Number.isFinite(anchorMs)) return wall2;
   const anchor = wallPartsOf(anchorMs, tzId);
-  if (anchor.hour === wall.hour && anchor.minute === wall.minute && anchor.second === wall.second) return wall;
+  if (anchor.hour === wall2.hour && anchor.minute === wall2.minute && anchor.second === wall2.second) return wall2;
   const anchorOnThisDay = epochFromWallParts(
-    { year: wall.year, month: wall.month, day: wall.day, hour: anchor.hour, minute: anchor.minute, second: anchor.second, ms: occurrenceMs - Math.floor(occurrenceMs / 1e3) * 1e3 },
+    { year: wall2.year, month: wall2.month, day: wall2.day, hour: anchor.hour, minute: anchor.minute, second: anchor.second, ms: occurrenceMs - Math.floor(occurrenceMs / 1e3) * 1e3 },
     tzId
   );
-  return anchorOnThisDay === occurrenceMs ? anchor : wall;
+  return anchorOnThisDay === occurrenceMs ? anchor : wall2;
 }
 function periodDaysOf(recurrenceType) {
   return recurrenceType === "weekly" ? 7 : 1;
 }
 function advanceOccurrence(occurrenceMs, recurrenceType, periods, tzId, anchorMs) {
   const days = periodDaysOf(recurrenceType) * periods;
-  if (!tzId) return occurrenceMs + days * DAY_MS;
+  if (!tzId) return occurrenceMs + days * DAY_MS2;
   try {
     const p = wallPartsOf(occurrenceMs, tzId);
     const time = timeOfDayFor(occurrenceMs, p, tzId, anchorMs);
-    const shiftedDate = new Date(utcFromParts(p.year, p.month, p.day, 0, 0, 0, 0) + days * DAY_MS);
+    const shiftedDate = new Date(utcFromParts(p.year, p.month, p.day, 0, 0, 0, 0) + days * DAY_MS2);
     return epochFromWallParts(
       {
         year: shiftedDate.getUTCFullYear(),
@@ -3386,11 +3484,11 @@ function advanceOccurrence(occurrenceMs, recurrenceType, periods, tzId, anchorMs
     );
   } catch (error) {
     console.warn(`[amsg-server] \u65F6\u533A ${tzId} \u6362\u7B97\u5931\u8D25\uFF0C\u672C\u6B21\u6309 UTC \u63A8\u8FDB\uFF1A`, error && error.message);
-    return occurrenceMs + days * DAY_MS;
+    return occurrenceMs + days * DAY_MS2;
   }
 }
 function planNextOccurrence(occurrenceMs, recurrenceType, nowMs, tzId, anchorMs) {
-  const periodMs = periodDaysOf(recurrenceType) * DAY_MS;
+  const periodMs = periodDaysOf(recurrenceType) * DAY_MS2;
   let periods = nowMs > occurrenceMs ? Math.max(1, Math.floor((nowMs - occurrenceMs) / periodMs)) : 1;
   let cursor = advanceOccurrence(occurrenceMs, recurrenceType, periods, tzId, anchorMs);
   for (let step = 0; step < MAX_ADJUST_STEPS && periods > 1; step++) {
@@ -13949,8 +14047,8 @@ var buildMcpFireBlock = (resolve, opts) => {
 
 // utils/amsg2ExpireGuard.ts
 var FIRE_GRACE_MS = 9e4;
-var DAY_MS2 = 24 * 36e5;
-var recurrencePeriodMs = (recurrenceType) => recurrenceType === "daily" ? DAY_MS2 : recurrenceType === "weekly" ? 7 * DAY_MS2 : null;
+var DAY_MS3 = 24 * 36e5;
+var recurrencePeriodMs = (recurrenceType) => recurrenceType === "daily" ? DAY_MS3 : recurrenceType === "weekly" ? 7 * DAY_MS3 : null;
 
 // utils/amsg2Tasks.ts
 var shortTaskId = (taskUuid) => taskUuid.slice(0, 8);
@@ -14056,8 +14154,8 @@ var buildScheduleParameters = (opts) => ({
   },
   required: ["send_at"]
 });
-var buildParameters = (example, abilities) => buildScheduleParameters({
-  sendAtDescription: `\u5F00\u59CB\u751F\u6210\u7684\u65F6\u95F4\uFF0C\u5199\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4\u3001\u4E0D\u5E26\u65F6\u533A\u540E\u7F00\uFF08\u5982 ${example}\uFF09\uFF0C\u7CFB\u7EDF\u6309\u4F60\u6240\u5728\u7684\u65F6\u533A\u7406\u89E3\u3002\u81F3\u5C11\u6BD4\u5F53\u524D\u65F6\u95F4\u665A 1 \u5206\u949F\u3002\u6392\u4E4B\u524D\u5148\u60F3\u60F3\u5BF9\u65B9\u90A3\u8FB9\u662F\u51E0\u70B9\u2014\u2014\u4F60\u4EEC\u4E4B\u95F4\u53EF\u80FD\u6709\u65F6\u5DEE\uFF0C\u522B\u628A\u6D88\u606F\u6392\u5230\u5BF9\u65B9\u7684\u6DF1\u591C\u3002`,
+var buildParameters = (example, abilities, storyYearless = false) => buildScheduleParameters({
+  sendAtDescription: `\u5F00\u59CB\u751F\u6210\u7684\u65F6\u95F4\uFF0C\u5199\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4${storyYearless ? "\uFF0C\u683C\u5F0F MM-DDTHH:mm:ss\uFF0C\u4E0D\u5199\u5E74\u4EFD" : ""}\uFF08\u5982 ${example}\uFF09\uFF0C\u7CFB\u7EDF\u6309\u4F60\u6240\u5728\u7684\u65F6\u533A\u7406\u89E3${storyYearless ? "\uFF0C\u5E76\u6620\u5C04\u5230\u4E4B\u540E\u6700\u8FD1\u7684\u771F\u5B9E\u65E5\u671F" : ""}\u3002\u81F3\u5C11\u6BD4\u5F53\u524D\u65F6\u95F4\u665A 1 \u5206\u949F\u3002\u6392\u4E4B\u524D\u5148\u60F3\u60F3\u5BF9\u65B9\u90A3\u8FB9\u662F\u51E0\u70B9\u2014\u2014\u4F60\u4EEC\u4E4B\u95F4\u53EF\u80FD\u6709\u65F6\u5DEE\uFF0C\u522B\u628A\u6D88\u606F\u6392\u5230\u5BF9\u65B9\u7684\u6DF1\u591C\u3002`,
   modeDescription: "\u751F\u6210\u6A21\u5F0F\u3002auto=\u5230\u70B9\u6839\u636E\u90A3\u65F6\u7684\u4E0A\u4E0B\u6587\u81EA\u7531\u53D1\u6325\uFF1Bprompted=\u56F4\u7ED5 prompt_hint \u7684\u65B9\u5411\u8BF4\u3002\u9ED8\u8BA4 auto\u3002",
   promptHintDescription: '\u7ED9\u672A\u6765\u90A3\u6761\u6D88\u606F\u7684\u65B9\u5411\uFF0C\u5982"\u63A5\u7740\u521A\u624D\u90A3\u53EA\u732B\u7684\u8BDD\u5F80\u4E0B\u8BF4""\u544A\u8BC9\u4ED6\u6C64\u7096\u597D\u4E86"\u3002mode=prompted \u65F6\u5FC5\u586B\u3002',
   recurrenceDescription: "\u91CD\u590D\u7C7B\u578B\u3002none=\u4E00\u6B21\u6027\uFF08\u9ED8\u8BA4\uFF09\uFF1Bdaily/weekly=\u6BCF\u5929/\u6BCF\u5468\u540C\u4E00\u65F6\u95F4\u3002",
@@ -14069,8 +14167,9 @@ var buildFireScheduleTool = (opts) => ({
     name: AMSG_FIRE_SCHEDULE_TOOL,
     description: buildScheduleToolDescription(opts.context ?? "fire"),
     parameters: buildParameters(
-      buildSendAtExample(opts.nowMs, opts.tz),
-      opts.abilities
+      buildSendAtExample(opts.nowMs, opts.tz, opts.storyYearless),
+      opts.abilities,
+      opts.storyYearless
     )
   }
 });
@@ -14099,12 +14198,13 @@ var buildFireRenewTool = (opts) => ({
       "\u7ED9\u4F60\u6302\u7740\u7684\u4E00\u4E2A\u4EFB\u52A1\u6539\u89E6\u53D1\u65F6\u95F4\uFF1A\u53EA\u6362\u65F6\u95F4\uFF0C\u6CBF\u7528\u539F\u6709\u6A21\u5F0F\u4E0E\u63D0\u793A\u65B9\u5411\u3002",
       "\u4E00\u6B21\u6027\u4EFB\u52A1 = \u6574\u6761\u6539\u5230\u65B0\u65F6\u95F4\uFF08\u7F16\u53F7\u4E0D\u53D8\uFF09\uFF1B\u5FAA\u73AF\u4EFB\u52A1 = \u53EA\u7ED9\u8FD9\u4E00\u6B21\u8865\u53D1\u4E00\u6761\u4E00\u6B21\u6027\u4EFB\u52A1\uFF0C\u539F\u6765\u7684\u6BCF\u5929/\u6BCF\u5468\u8282\u594F\u4E0D\u52A8\u3002",
       "\u60F3\u6539\u7684\u662F\u5FAA\u73AF\u4EFB\u52A1\u672C\u8EAB\u7684\u65F6\u95F4\u3001\u6216\u8005\u60F3\u8BF4\u7684\u5185\u5BB9\u65B9\u5411\u5DF2\u7ECF\u53D8\u4E86\uFF0C\u6539\u7528 cancel_active_message + schedule_active_message \u91CD\u65B0\u521B\u5EFA\u3002",
-      `send_at \u81F3\u5C11\u6BD4\u73B0\u5728\u665A 1 \u5206\u949F\uFF08\u5199\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4\uFF0C\u5982 ${buildSendAtExample(opts.nowMs, opts.tz)}\uFF0C\u4E0D\u5E26\u65F6\u533A\u540E\u7F00\uFF09\u3002`
+      ...opts.storyYearless ? ["\u5267\u60C5\u5E74\u4EFD\u5DF2\u5F00\u542F\uFF1Asend_at \u53EA\u5199 MM-DDTHH:mm:ss\uFF0C\u4E0D\u8981\u5199\u5E74\u4EFD\uFF1B\u7CFB\u7EDF\u4F1A\u6309\u4F60\u6240\u5728\u5730\u6362\u7B97\u6210\u6700\u8FD1\u7684\u771F\u5B9E\u65E5\u671F\u3002"] : [],
+      `send_at \u81F3\u5C11\u6BD4\u73B0\u5728\u665A 1 \u5206\u949F\uFF08\u5199\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4\uFF0C\u5982 ${buildSendAtExample(opts.nowMs, opts.tz, opts.storyYearless)}\uFF0C\u4E0D\u5E26\u65F6\u533A\u540E\u7F00\uFF09\u3002`
     ].join("\n"),
     parameters: {
       type: "object",
       properties: {
-        send_at: { type: "string", description: "\u65B0\u7684\u89E6\u53D1\u65F6\u95F4\uFF0C\u5199\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4\u3001\u4E0D\u5E26\u65F6\u533A\u540E\u7F00\u3002\u81F3\u5C11\u6BD4\u73B0\u5728\u665A 1 \u5206\u949F\u3002" },
+        send_at: { type: "string", description: `\u65B0\u7684\u89E6\u53D1\u65F6\u95F4\uFF0C\u5199\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4\u3001\u4E0D\u5E26\u65F6\u533A\u540E\u7F00${opts.storyYearless ? "\uFF0C\u683C\u5F0F MM-DDTHH:mm:ss\uFF0C\u4E0D\u5199\u5E74\u4EFD" : ""}\u3002\u81F3\u5C11\u6BD4\u73B0\u5728\u665A 1 \u5206\u949F\u3002` },
         task_id: { type: "string", description: "\u8981\u6539\u671F\u7684\u4EFB\u52A1\u77ED id\uFF088 \u4F4D\uFF0C\u89C1\u6392\u7A0B\u6E05\u5355\uFF09\u3002\u53EA\u6709\u4E00\u4E2A\u4EFB\u52A1\u65F6\u53EF\u7701\u7565\u3002" }
       },
       required: ["send_at"]
@@ -14124,7 +14224,7 @@ var buildAmsg2ChatScheduleBrief = (targetName) => {
   ].join("\n");
 };
 var buildFireScheduleBlock = (mode, opts) => {
-  const howTo = mode === "native" ? `\u9700\u8981\u65F6\u901A\u8FC7\u7CFB\u7EDF\u7684\u5DE5\u5177\u8C03\u7528\u63A5\u53E3\u53D1\u8D77 ${AMSG_FIRE_SCHEDULE_TOOL}\uFF0C\u4E0D\u8981\u628A\u5DE5\u5177\u540D\u548C\u53C2\u6570\u5199\u8FDB\u6B63\u6587\u3002` : `\u9700\u8981\u65F6\u5355\u72EC\u8F93\u51FA\u4E00\u884C ${AMSG_FIRE_SCHEDULE_TOOL}({"send_at":"${buildSendAtExample(opts.nowMs, opts.tz)}","prompt_hint":"\u63A5\u7740\u8BF4"})\uFF08send_at \u5199\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4\uFF0C\u4E0D\u5E26\u65F6\u533A\u540E\u7F00\uFF09\uFF0C\u7CFB\u7EDF\u4F1A\u4EE3\u4E3A\u5B89\u6392\u5E76\u628A\u7ED3\u679C\u544A\u8BC9\u4F60\u3002`;
+  const howTo = mode === "native" ? `\u9700\u8981\u65F6\u901A\u8FC7\u7CFB\u7EDF\u7684\u5DE5\u5177\u8C03\u7528\u63A5\u53E3\u53D1\u8D77 ${AMSG_FIRE_SCHEDULE_TOOL}\uFF0C\u4E0D\u8981\u628A\u5DE5\u5177\u540D\u548C\u53C2\u6570\u5199\u8FDB\u6B63\u6587\u3002` : `\u9700\u8981\u65F6\u5355\u72EC\u8F93\u51FA\u4E00\u884C ${AMSG_FIRE_SCHEDULE_TOOL}({"send_at":"${buildSendAtExample(opts.nowMs, opts.tz, opts.storyYearless)}","prompt_hint":"\u63A5\u7740\u8BF4"})\uFF08send_at \u5199\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4${opts.storyYearless ? "\uFF0C\u683C\u5F0F MM-DDTHH:mm:ss\uFF0C\u4E0D\u5199\u5E74\u4EFD" : "\uFF0C\u4E0D\u5E26\u65F6\u533A\u540E\u7F00"}\uFF09\uFF0C\u7CFB\u7EDF\u4F1A\u4EE3\u4E3A\u5B89\u6392\u5E76\u628A\u7ED3\u679C\u544A\u8BC9\u4F60\u3002`;
   return [
     "",
     "---",
@@ -14167,7 +14267,35 @@ var wallClockIso = (ms, tz) => {
   const p = wallClockPartsInZone(ms, tz);
   return `${p.year}-${pad22(p.month)}-${pad22(p.day)}T${pad22(p.hour)}:${pad22(p.minute)}:00`;
 };
-var buildSendAtExample = (nowMs, tz) => wallClockIso(nowMs + 24 * 36e5, tz);
+var buildSendAtExample = (nowMs, tz, storyYearless = false) => {
+  const example = wallClockPartsInZone(nowMs + 24 * 36e5, tz);
+  return storyYearless ? `${pad22(example.month)}-${pad22(example.day)}T${pad22(example.hour)}:${pad22(example.minute)}:00` : wallClockIso(nowMs + 24 * 36e5, tz);
+};
+var resolveStoryYearlessSendAtMs = (raw, nowMs, tz) => {
+  const match = /^(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/.exec(raw.trim());
+  if (!match) return Number.NaN;
+  const [, monthText, dayText, hourText, minuteText, secondText] = match;
+  const month = Number(monthText), day = Number(dayText), hour = Number(hourText);
+  const minute = Number(minuteText), second = Number(secondText);
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return Number.NaN;
+  const now = wallClockPartsInZone(nowMs, tz);
+  const currentYear = now.year;
+  const requestedDay = month * 100 + day;
+  const today = now.month * 100 + now.day;
+  const firstYear = requestedDay < today ? currentYear + 1 : currentYear;
+  for (let year = firstYear; year <= firstYear + 8; year += 1) {
+    const candidate = wallClockToTimestamp(
+      `${year}-${monthText}-${dayText}T${hourText}:${minuteText}:${secondText}`,
+      tz.tzId
+    );
+    if (!Number.isFinite(candidate)) continue;
+    const actual = wallClockPartsInZone(candidate, tz);
+    if (actual.year !== year || actual.month !== month || actual.day !== day || actual.hour !== hour || actual.minute !== minute) continue;
+    if (candidate >= nowMs + MIN_SCHEDULE_LEAD_MS2) return candidate;
+    if (year === currentYear) return Number.NaN;
+  }
+  return Number.NaN;
+};
 var resolveSendAtMs = (raw, tz) => {
   const text2 = raw.trim();
   if (hasExplicitOffset(text2)) return new Date(text2).getTime();
@@ -14176,15 +14304,16 @@ var resolveSendAtMs = (raw, tz) => {
 var MIN_SCHEDULE_LEAD_MS2 = 6e4;
 var MODES = ["auto", "prompted"];
 var RECURRENCES = ["none", "daily", "weekly"];
-var parseFireScheduleArgs = (args, nowMs, tz) => {
-  const example = buildSendAtExample(nowMs, tz);
+var parseFireScheduleArgs = (args, nowMs, tz, storyYearless = false) => {
+  const example = buildSendAtExample(nowMs, tz, storyYearless);
+  const expectedFormat = storyYearless ? "MM-DDTHH:mm:ss\uFF08\u4E0D\u5199\u5E74\u4EFD\uFF09" : "\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4";
   const sendAtRaw = args?.send_at;
   if (typeof sendAtRaw !== "string" || !sendAtRaw.trim()) {
-    return { ok: false, reason: "invalid_send_at", message: `send_at \u5FC5\u586B\uFF0C\u5199\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4\uFF08\u5982 ${example}\uFF09\u3002` };
+    return { ok: false, reason: "invalid_send_at", message: `send_at \u5FC5\u586B\uFF0C\u5199${expectedFormat}\uFF08\u5982 ${example}\uFF09\u3002` };
   }
-  const sendAtMs = resolveSendAtMs(sendAtRaw, tz);
+  const sendAtMs = storyYearless ? resolveStoryYearlessSendAtMs(sendAtRaw, nowMs, tz) : resolveSendAtMs(sendAtRaw, tz);
   if (!Number.isFinite(sendAtMs)) {
-    return { ok: false, reason: "invalid_send_at", message: `send_at\u300C${sendAtRaw}\u300D\u89E3\u6790\u4E0D\u51FA\u65F6\u95F4\uFF0C\u5199\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4\uFF08\u5982 ${example}\uFF09\u3002` };
+    return { ok: false, reason: "invalid_send_at", message: `send_at \u683C\u5F0F\u4E0D\u6B63\u786E\u6216\u65E5\u671F\u65E0\u6548\uFF0C\u5199${expectedFormat}\uFF08\u5982 ${example}\uFF09\u3002` };
   }
   if (sendAtMs < nowMs + MIN_SCHEDULE_LEAD_MS2) {
     return {
@@ -14259,14 +14388,15 @@ var resolveFireTargetTask = (tasks, taskIdArg, nowMs, tz) => {
   if (pending.length === 0 && tasks.length === 1) return { task: tasks[0] };
   return { ok: false, reason: "ambiguous_task", message: "\u4F60\u6302\u7740\u4E0D\u6B62\u4E00\u4E2A\u4EFB\u52A1\uFF0C\u5E26 task_id\uFF08\u6392\u7A0B\u6E05\u5355\u91CC\u7684\u77ED id\uFF09\u6307\u5B9A\u8981\u52A8\u54EA\u4E00\u4E2A\u3002" };
 };
-var parseFireRenewSendAt = (raw, nowMs, tz) => {
-  const example = buildSendAtExample(nowMs, tz);
+var parseFireRenewSendAt = (raw, nowMs, tz, storyYearless = false) => {
+  const example = buildSendAtExample(nowMs, tz, storyYearless);
+  const expectedFormat = storyYearless ? "MM-DDTHH:mm:ss\uFF08\u4E0D\u5199\u5E74\u4EFD\uFF09" : "\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4";
   if (typeof raw !== "string" || !raw.trim()) {
-    return { ok: false, reason: "invalid_send_at", message: `send_at \u5FC5\u586B\uFF0C\u5199\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4\uFF08\u5982 ${example}\uFF09\u3002` };
+    return { ok: false, reason: "invalid_send_at", message: `send_at \u5FC5\u586B\uFF0C\u5199${expectedFormat}\uFF08\u5982 ${example}\uFF09\u3002` };
   }
-  const sendAtMs = resolveSendAtMs(raw, tz);
+  const sendAtMs = storyYearless ? resolveStoryYearlessSendAtMs(raw, nowMs, tz) : resolveSendAtMs(raw, tz);
   if (!Number.isFinite(sendAtMs)) {
-    return { ok: false, reason: "invalid_send_at", message: `send_at\u300C${raw}\u300D\u89E3\u6790\u4E0D\u51FA\u65F6\u95F4\uFF0C\u5199\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4\uFF08\u5982 ${example}\uFF09\u3002` };
+    return { ok: false, reason: "invalid_send_at", message: `send_at \u683C\u5F0F\u4E0D\u6B63\u786E\u6216\u65E5\u671F\u65E0\u6548\uFF0C\u5199${expectedFormat}\uFF08\u5982 ${example}\uFF09\u3002` };
   }
   if (sendAtMs < nowMs + MIN_SCHEDULE_LEAD_MS2) {
     return {
@@ -16065,7 +16195,7 @@ var loadHotNews = async (cfg, nowMs, globalRows, pendingWrites) => {
 };
 var buildUserHolidayBlock = async (args) => {
   const { toolConfig: cfg, nowMs, globalRows } = args;
-  if (!args.timeAwarenessEnabled || !cfg.userHolidays?.timeZone) return "";
+  if (args.tavernStoryTime || !args.timeAwarenessEnabled || !cfg.userHolidays?.timeZone) return "";
   return getUserHolidayReminder(cfg.userHolidays, {
     async read(key) {
       try {
@@ -16081,6 +16211,7 @@ var buildUserHolidayBlock = async (args) => {
 };
 var buildRealtimeWorldBlock = async (args) => {
   const { nowMs, globalRows } = args;
+  if (args.tavernStoryTime) return "";
   const cfg = weatherForCharacter(args.toolConfig, args.charId);
   const specialDates = args.timeAwarenessEnabled ? checkSpecialDates(args.tzId, nowMs) : [];
   if (!cfg.weatherEnabled && !cfg.newsEnabled) {
@@ -16127,7 +16258,7 @@ var buildInstantTimelyBlock = (args) => {
   if (!args.timeAwarenessEnabled && blocks.length === 0) return "";
   const head = args.timeAwarenessEnabled ? [
     "\u3010\u6B64\u523B\u7684\u7CFB\u7EDF\u4FE1\u606F\xB7\u4EC5\u4F60\u53EF\u89C1\u3011",
-    `\u73B0\u5728\u662F ${formatFireTimeFull(args.nowMs, args.tz)}\u3002`,
+    `\u73B0\u5728\u662F ${args.tavernStoryTime ? formatFireTimeFullWithStoryYear(args.nowMs, args.tz, args.tavernStoryTime) : formatFireTimeFull(args.nowMs, args.tz)}\u3002`,
     // 报时后面跟那句语境框定，跟前台聊天引的是同一份常量。这一轮是用户刚按下发送、
     // 正等着回复，所以「对方还在跟你说话」是真的；少了它，深夜的那行钟就够让角色
     // 每轮都往「快睡吧、明天见」上收——本地那条路修好了、云端没修的话，同一个角色
@@ -20107,7 +20238,8 @@ var runFireScheduleTool = async (stash, scheduleTask, args, nowMs) => {
       message: `\u4F60\u540C\u65F6\u6302\u7740\u7684\u4EFB\u52A1\u5DF2\u7ECF\u6709 ${live} \u4E2A\uFF08\u7528\u6237\u8BBE\u7684\u4E0A\u9650\u662F ${stash.limits.maxActiveTasks}\uFF09\uFF0C\u8FD9\u6B21\u522B\u518D\u6392\u4E86\u3002`
     };
   }
-  const parsed = parseFireScheduleArgs(args, nowMs, stash.tz);
+  const storyYearless = !!stash.firePack?.tavernStoryTime;
+  const parsed = parseFireScheduleArgs(args, nowMs, stash.tz, storyYearless);
   if ("ok" in parsed) return parsed;
   const rules = checkSelfScheduleRules({
     limits: stash.limits,
@@ -20255,7 +20387,7 @@ var runFireRenewTool = async (stash, fireCtx, args, nowMs) => {
   if (target.mode === "fixed") {
     return { ok: false, reason: "fixed_task", message: "\u56FA\u5B9A\u5185\u5BB9\u7684\u4EFB\u52A1\u4E0D\u5728\u8FD9\u91CC\u6539\uFF0C\u8BA9\u7528\u6237\u53BB\u8BBE\u7F6E\u9762\u677F\u8C03\u6574\u3002" };
   }
-  const parsed = parseFireRenewSendAt(args.send_at, nowMs, stash.tz);
+  const parsed = parseFireRenewSendAt(args.send_at, nowMs, stash.tz, !!stash.firePack?.tavernStoryTime);
   if ("ok" in parsed) return parsed;
   if (target.recurrenceType !== "none") {
     const result2 = await runFireScheduleTool(stash, fireCtx.scheduleTask, {
@@ -20734,6 +20866,7 @@ var amsgHooks = {
       toolConfig,
       userName: pack.targetName,
       timeAwarenessEnabled: toolPack.timeAwarenessEnabled,
+      tavernStoryTime: !!pack.tavernStoryTime,
       tzId: pack.tzId,
       nowMs: ctx.now.getTime(),
       globalRows,
@@ -20762,13 +20895,14 @@ var amsgHooks = {
       tz,
       limitsBrief,
       context: instant ? "chat" : "fire",
-      targetName: pack.targetName
+      targetName: pack.targetName,
+      storyYearless: !!pack.tavernStoryTime
     }) : "";
     const abilities = { allowRecurring: limits.allowSelfRecurring, allowForce: limits.allowSelfForce };
     const fireTools = [
       ...mcpResolve && mcpNative ? buildMcpFireTools(mcpResolve) : [],
-      ...canSelfSchedule && mcpNative ? [buildFireScheduleTool({ nowMs: ctx.now.getTime(), tz, abilities, context: instant ? "chat" : "fire" })] : [],
-      ...canManageTasks && mcpNative ? [buildFireCancelTool(), buildFireRenewTool({ nowMs: ctx.now.getTime(), tz })] : []
+      ...canSelfSchedule && mcpNative ? [buildFireScheduleTool({ nowMs: ctx.now.getTime(), tz, abilities, context: instant ? "chat" : "fire", storyYearless: !!pack.tavernStoryTime })] : [],
+      ...canManageTasks && mcpNative ? [buildFireCancelTool(), buildFireRenewTool({ nowMs: ctx.now.getTime(), tz, storyYearless: !!pack.tavernStoryTime })] : []
     ];
     const replyScopeBlock = fireTools.length > 0 || mcpBlock || scheduleBlock ? `
 ${buildReplyScopeRule(instant ? "user" : "scheduled")}
@@ -20792,6 +20926,7 @@ ${buildReplyScopeRule(instant ? "user" : "scheduled")}
         userTzId: pack.userTzId,
         targetName: pack.targetName,
         timeAwarenessEnabled: toolPack.timeAwarenessEnabled,
+        tavernStoryTime: pack.tavernStoryTime,
         blocks: [
           realtimeWorldBlock,
           renderSelfLogBlock(selfLog, ctx.now.getTime(), tz, maxUnansweredSends),
