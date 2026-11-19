@@ -3861,6 +3861,11 @@ const MessageItem = React.memo(({
            prev.bubbleVariant === next.bubbleVariant &&
            prev.messageSpacing === next.messageSpacing &&
            prev.showTimestamp === next.showTimestamp &&
+           // 时间位置 / 分段 / 发送进度变了必须重渲染，漏了会导致切「上方居中」后仍停在气泡下方
+           prev.timestampPosition === next.timestampPosition &&
+           prev.startsTimeSegment === next.startsTimeSegment &&
+           prev.timestampNow?.getTime() === next.timestampNow?.getTime() &&
+           prev.sendPhase === next.sendPhase &&
            prev.storyTime === next.storyTime &&
            prev.showRealTime === next.showRealTime &&
            prev.onToggleTimeMode === next.onToggleTimeMode &&
