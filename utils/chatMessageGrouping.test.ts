@@ -68,6 +68,7 @@ describe('chatMessageGrouping & timestamp position', () => {
         expect(belowHtml).toContain('sully-chat-timestamp-slot');
         expect(belowHtml).toContain('sully-chat-timestamp');
         expect(belowHtml).not.toContain('sully-chat-time-divider');
+        expect(belowHtml).not.toContain('sully-chat-timestamp-divider');
 
         const topPreset = {
             ...basePreset,

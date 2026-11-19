@@ -1857,7 +1857,7 @@ const formatTimestamp = (ts: number) => {
     const commonLayout = (content: React.ReactNode) => (
         <>
         {timeDividerNode}
-        {timestampPosition !== 'top_center' && isFirstInGroup && showTimestamp !== 'never' && (
+        {storyTime && timestampPosition !== 'top_center' && isFirstInGroup && showTimestamp !== 'never' && (
 <div className={`sully-chat-timestamp-divider w-full flex justify-center pt-3 pb-0.5 select-none ${storyTime && onToggleTimeMode && !selectionMode ? '' : 'pointer-events-none'}`}>
     {storyTime && onToggleTimeMode && !selectionMode
         ? <button type="button" title={showRealTime ? '点一下切回剧情时间' : '点一下切到现实时间'}
@@ -1946,6 +1946,13 @@ const formatTimestamp = (ts: number) => {
                     {!centerModules && thinkingChainNode}
                     <div className={selectionMode ? 'pointer-events-none' : ''}>
                         {<ChatCardSurface message={m}>{content}</ChatCardSurface>}
+                        {showBelowTimestamp && (
+                            <div className={`sully-chat-timestamp-slot flex w-full ${isUser ? 'justify-end' : 'justify-start'}`}>
+                                <span className={`sully-chat-timestamp text-[10px] text-slate-400 opacity-70 ${showTimestamp === 'hover' ? 'opacity-0 hover:opacity-100 transition-opacity' : ''}`}>
+                                    {formatTime(m.timestamp)}
+                                </span>
+                            </div>
+                        )}
                     </div>
                     </div>                </div>
 
