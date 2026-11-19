@@ -13,7 +13,7 @@ import { stopInstantChat } from '../utils/amsgInstantChat';
 import {resolvePsycheAppearance} from '../utils/psycheAppearance';
 import { translateThinkingMessage } from '../utils/thinkingTranslation';
 import { resolveDialogueApi } from '../utils/characterApi';
-import { computeTimeSegmentStarts, startsNewMessageGroup, startsNewTimeSegment } from '../utils/chatMessageGrouping';
+import { computeTimeSegmentStarts, startsNewMessageGroup, startsNewRoleSegment, startsNewTimeSegment } from '../utils/chatMessageGrouping';
 import EmojiExportDialog from '../components/chat/EmojiExportDialog';
 import BlobRefStyle from '../components/chat/BlobRefStyle';
 import React, { useState, useEffect, useRef, useLayoutEffect, useMemo, useCallback, useSyncExternalStore } from 'react';
@@ -3684,7 +3684,11 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         });
     }, [activeCharacterId, homePhone, renderedMessages]);
 
-    const timeSegmentStarts = useMemo(() => computeTimeSegmentStarts(renderedMessages), [renderedMessages]);
+    const splitTimeSegmentsByRole = !!(char?.tavernImport && char.chatActionDescriptionEnabled === true);
+    const timeSegmentStarts = useMemo(
+        () => computeTimeSegmentStarts(renderedMessages, splitTimeSegmentsByRole),
+        [renderedMessages, splitTimeSegmentsByRole],
+    );
     const timestampDiagnosticRef = useRef('');
     useLayoutEffect(() => {
         if (homePhone) return;
@@ -3699,7 +3703,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             showTimestamp,
             renderedMessageCount: renderedMessages.length,
             timeSegmentCount: timeSegmentStarts.filter(Boolean).length,
-            centeredDividerCount: root?.querySelectorAll('.sully-chat-time-divider').length ?? 0,
+            centeredDividerCount: root?.querySelectorAll('.sully-chat-timestamp-divider').length ?? 0,
             belowTimestampCount: root?.querySelectorAll('.sully-chat-timestamp-slot .sully-chat-timestamp').length ?? 0,
         });
     }, [activeCharacterId, homePhone, osTheme.chatTimestampPosition, osTheme.chatShowTimestamp, renderedMessages.length, timeSegmentStarts]);
@@ -4302,7 +4306,9 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                                     messageSpacing={osTheme.chatMessageSpacing}
                                     showTimestamp={osTheme.chatShowTimestamp}
                                     timestampPosition={osTheme.chatTimestampPosition}
-                                    startsTimeSegment={i === 0 && startsNewTimeSegment(lastNonSystemRenderedMessage, { timestamp: Date.now() })}
+                                    startsTimeSegment={i === 0 && (splitTimeSegmentsByRole
+                                        ? startsNewRoleSegment(lastNonSystemRenderedMessage, { role: 'assistant' })
+                                        : startsNewTimeSegment(lastNonSystemRenderedMessage, { timestamp: Date.now() }))}
                                     thinkingChainOptions={thinkingChainOptions}
                                 />
                             </div>
@@ -5069,7 +5075,9 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                                     messageSpacing={osTheme.chatMessageSpacing}
                                     showTimestamp={osTheme.chatShowTimestamp}
                                     timestampPosition={osTheme.chatTimestampPosition}
-                                    startsTimeSegment={i === 0 && startsNewTimeSegment(lastNonSystemRenderedMessage, { timestamp: Date.now() })}
+                                    startsTimeSegment={i === 0 && (splitTimeSegmentsByRole
+                                        ? startsNewRoleSegment(lastNonSystemRenderedMessage, { role: 'assistant' })
+                                        : startsNewTimeSegment(lastNonSystemRenderedMessage, { timestamp: Date.now() }))}
                                     storyTime={storyTime}
                                     showRealTime={showRealTime}
                                     thinkingChainOptions={thinkingChainOptions}

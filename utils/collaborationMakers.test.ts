@@ -116,7 +116,8 @@ title: 夜航日记
     const psychePrompt = COLLABORATION_MAKER_MAP['psyche-css'].prompt;
     expect(bubblePrompt).toContain('.sully-voice-bar-wave-segment');
     expect(whiteboxPrompt).toContain('.sully-chat-turn-avatar-slot');
-    expect(whiteboxPrompt).toContain('.sully-chat-time-divider');
+    expect(whiteboxPrompt).toContain('.sully-chat-timestamp-divider');
+    expect(whiteboxPrompt).toContain('.sully-chat-timestamp-text');
     expect(whiteboxPrompt).toContain('.sully-chat-timestamp');
     expect(whiteboxPrompt).toContain('.sully-collaboration-file-action');
     for (const part of ['card', 'receipt', 'header', 'icon', 'brand', 'watermark', 'amount', 'note', 'recipient', 'status', 'overlay', 'dialog', 'accept', 'return']) {

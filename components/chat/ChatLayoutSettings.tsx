@@ -413,7 +413,7 @@ return <div><details className="chat-decoration-layout-group"><summary>内置布
                 </div>
                 <div className="mt-4">
                     <ChoiceGroup title="时间位置" items={choices.timestampPosition} value={timestampPosition} onPick={(value) => updateTheme({ chatTimestampPosition: value as OSTheme['chatTimestampPosition'] })} />
-                    <p className="mt-1.5 text-[10px] text-slate-400">具体字号、胶囊底色或装饰可在「白框」里用 .sully-chat-time-divider 与 .sully-chat-timestamp 自定义。</p>
+                    <p className="mt-1.5 text-[10px] text-slate-400">具体字号、胶囊底色或装饰可在「白框」里用 .sully-chat-timestamp-divider、.sully-chat-timestamp-text 或 .sully-chat-timestamp 自定义。</p>
                 </div>
                 </div></details>
 <details className="chat-decoration-layout-group" open><summary>细节微调</summary><div><ChatFineTunePanel value={theme} onChange={updateTheme}/><button className="chat-decoration-link" onClick={()=>updateTheme({...FINE_TUNE_DEFAULTS})}>微调恢复默认</button></div></details>

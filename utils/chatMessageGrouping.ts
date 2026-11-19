@@ -12,13 +12,23 @@ export function startsNewTimeSegment(previous: Pick<Message, 'timestamp'> | null
     return !previous || Math.abs(current.timestamp - previous.timestamp) >= CHAT_TIME_SEGMENT_GAP_MS;
 }
 
-export function computeTimeSegmentStarts(messages: ReadonlyArray<Pick<Message, 'role' | 'timestamp'>>): boolean[] {
+/** 线上动描角色的顶部时间条按 AI / 用户发言组切换，而不是按时间间隔切换。 */
+export function startsNewRoleSegment(previous: Pick<Message, 'role'> | null, current: Pick<Message, 'role'>): boolean {
+    return !previous || previous.role !== current.role;
+}
+
+export function computeTimeSegmentStarts(
+    messages: ReadonlyArray<Pick<Message, 'role' | 'timestamp'>>,
+    splitByRole = false,
+): boolean[] {
     const starts: boolean[] = new Array(messages.length).fill(false);
     let lastNonSystem: Pick<Message, 'role' | 'timestamp'> | null = null;
     for (let i = 0; i < messages.length; i++) {
         const message = messages[i];
         if (message.role === 'system') continue;
-        starts[i] = startsNewTimeSegment(lastNonSystem, message);
+        starts[i] = splitByRole
+            ? startsNewRoleSegment(lastNonSystem, message)
+            : startsNewTimeSegment(lastNonSystem, message);
         lastNonSystem = message;
     }
     return starts;

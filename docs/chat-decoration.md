@@ -71,8 +71,8 @@ CSS 编辑器的旧预设及分享格式不迁移。CSS 分类保留 body portal
 
 消息时间位置由布局字段 `chatTimestampPosition`（`below` / `top_center`）控制，随角色装扮、整套预设导出与装扮预览保存，内置 `WeChat` 布局预设使用 `top_center`：
 - `below`（默认）：在同侧连续发言的末条气泡下方 `.sully-chat-timestamp-slot` 中显示 `HH:mm`，与即时对话发送进度 `<ChatSendProgress />` 独立渲染，美化时间样式不影响发送状态提示。
-- `top_center`：按相邻消息绝对时间差（≥ 5 分钟）分段，在每段首条非系统消息上方渲染整行居中的 `.sully-chat-time-divider`（脱离气泡宽度与左滑引用层），跨本地日历日自动附带「昨天 / 月日 / 年月日」（统一使用设备本地时区）；`chatBubbleStyle: 'wechat'`（含内置 `WeChat` 布局预设）默认渲染 4px 小圆角浅灰半透明时间胶囊，其余布局保持无底色灰字以免干扰深色白框。
-两种模式下的时间文字节点均为 `.sully-chat-timestamp`，供白框 CSS 定制字号、配色、胶囊底纹或伪元素装饰。
+- `top_center`：通常按相邻消息绝对时间差（≥ 5 分钟）分段；酒馆角色开启「线上聊天动描」时改为按用户 / AI 发言组切换分段。在每段首条非系统消息上方渲染整行居中的 `.sully-chat-timestamp-divider`（脱离气泡宽度与左滑引用层），文字节点为 `.sully-chat-timestamp-text`。跨本地日历日自动附带「昨天 / 月日 / 年月日」（统一使用设备本地时区）；`chatBubbleStyle: 'wechat'`（含内置 `WeChat` 布局预设）默认渲染 4px 小圆角浅灰半透明时间胶囊，其余布局保持无底色灰字以免干扰深色白框。
+- 气泡下方时间继续使用 `.sully-chat-timestamp-slot` 挂载位与 `.sully-chat-timestamp` 文字节点；关闭线上动描的酒馆角色、糯米机角色和群聊仍按时间间隔显示顶部时间条。
 
 已确认过旧版 `v1:decoration` 公告的用户不会重复弹出。装扮面板本身不再挂公告。聊天加号功能按单一顺序列表每页 8 项自动分页，第二页补入相册；各页固定两行，避免第三页内容少导致面板和翻页圆点跳动。
 

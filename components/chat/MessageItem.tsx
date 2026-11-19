@@ -1486,8 +1486,8 @@ const MessageItem = React.memo(({
         </button>
         : <span className={className}>{label}</span>;
     const timeDividerNode = showTopTimeDivider ? (
-        <div className={`sully-chat-time-divider flex justify-center w-full px-3 mt-1.5 mb-3 select-none ${showTimestamp === 'hover' ? 'opacity-0 hover:opacity-100 transition-opacity' : ''}`}>
-            {renderTimestampLabel(getTimestampLabel(true), `sully-chat-timestamp text-[11px] leading-tight font-normal whitespace-nowrap ${isWechatTopCapsule ? 'bg-black/[0.05] text-[#7f7f7f] px-2.5 py-[3px] rounded-[4px]' : 'text-slate-400 px-2 py-0.5 rounded-md'}`)}
+        <div className={`sully-chat-timestamp-divider flex justify-center w-full px-3 mt-1.5 mb-3 select-none ${showTimestamp === 'hover' ? 'opacity-0 hover:opacity-100 transition-opacity' : ''}`}>
+            {renderTimestampLabel(getTimestampLabel(true), `sully-chat-timestamp-text text-[11px] leading-tight font-normal whitespace-nowrap ${isWechatTopCapsule ? 'bg-black/[0.05] text-[#7f7f7f] px-2.5 py-[3px] rounded-[4px]' : 'text-slate-400 px-2 py-0.5 rounded-md'}`)}
         </div>
     ) : null;
 
