@@ -13,6 +13,7 @@ import { findEmojiSuggestions } from '../../utils/emojiSuggestions';
 import { useEmojiThumbnailCache } from '../../utils/useEmojiThumbnailCache';
 import { CHAT_ACTION_ORDER_CHANGED, CHAT_ACTION_ORDER_KEY, loadChatActionOrder, normalizeChatActionOrder, saveChatActionOrder } from '../../utils/chatActionOrder';
 import { useReducedBlur } from '../../utils/blurPolicy';
+import { appendDevDebugRenderLog, isCaptureEnabled } from '../../utils/devDebug';
 
 const ChatActionOrderEditor = React.lazy(() => import('./ChatActionOrderEditor'));
 
@@ -126,6 +127,39 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     const suggestionsRef = useRef<HTMLDivElement>(null);
     const [isInputFocused, setIsInputFocused] = useState(false);
     const [isComposing, setIsComposing] = useState(false);
+
+    useEffect(() => {
+        if (!isCaptureEnabled('render')) return;
+        const inputBar = inputBarRef.current;
+        if (!inputBar) return;
+        const startedAt = performance.now();
+        const measureIcons = (event: string) => {
+            const icons = Array.from(inputBar.querySelectorAll<SVGSVGElement>('svg'));
+            const dimensions = icons.map(icon => {
+                const rect = icon.getBoundingClientRect();
+                return { width: Math.round(rect.width), height: Math.round(rect.height) };
+            });
+            appendDevDebugRenderLog(event, {
+                elapsedMs: Math.round(performance.now() - startedAt),
+                iosStandalone: isIOSStandaloneWebApp(),
+                textareaPresent: !!inputBar.querySelector('textarea'),
+                svgCount: dimensions.length,
+                zeroSizedSvgCount: dimensions.filter(size => size.width === 0 || size.height === 0).length,
+                firstSvg: dimensions[0],
+            });
+            return icons;
+        };
+
+        const icons = measureIcons('chat-input-mounted');
+        if (typeof ResizeObserver === 'undefined' || !icons.length) return;
+        const observer = new ResizeObserver(() => measureIcons('chat-input-svg-resized'));
+        icons.forEach(icon => observer.observe(icon));
+        const timeout = window.setTimeout(() => observer.disconnect(), 10_000);
+        return () => {
+            window.clearTimeout(timeout);
+            observer.disconnect();
+        };
+    }, [activeCharacterId]);
     const [dismissedSuggestionInput, setDismissedSuggestionInput] = useState<string | null>(null);
     const suggestedEmojis = useMemo(() => emojiSuggestionsEnabled && !isComposing && !selectionMode
         && showPanel === 'none' && dismissedSuggestionInput !== input

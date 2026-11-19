@@ -6,7 +6,7 @@
 // 其余存储 / 脱敏 / 限容 / 导出逻辑全部通用，不用改。
 // 分类按「来源通道」切：api = 普通聊天直发模型；amsg = 主动消息 2.0 的收发链路（推送落库、云端回合 trace）；
 // lifecycle = 页面前后台/网络状态变化（排查「请求等着等着就 NetworkError」时跟 api 类对时间线）。
-export type DevDebugCaptureCategory = 'api' | 'amsg' | 'lifecycle' | 'memory-palace';
+export type DevDebugCaptureCategory = 'api' | 'amsg' | 'lifecycle' | 'memory-palace' | 'render';
 
 export interface DevDebugCaptureCategoryMeta {
     key: DevDebugCaptureCategory;
@@ -36,6 +36,11 @@ export const DEV_DEBUG_CAPTURE_CATEGORIES: DevDebugCaptureCategoryMeta[] = [
         key: 'memory-palace',
         title: '记忆',
         detail: '记忆召回管线 Trace：入口、版本、开关快照、耗时与结果；不记录聊天原文和 API Key。',
+    },
+    {
+        key: 'render',
+        title: '页面加载',
+        detail: '聊天首条消息、头像解码、装扮 CSS 图片引用及输入栏 SVG 尺寸时间线；不记录聊天内容或资源地址。',
     },
 ];
 
@@ -513,6 +518,14 @@ export function appendDevDebugApiLog(input: DevDebugHttpLogInput): void {
 /** 记忆宫殿结构化 Trace；调用方只传脱敏后的统计与状态，不传 query / prompt 原文。 */
 export function appendDevDebugMemoryPalaceLog(input: { label?: string; data: unknown }): void {
     appendDevDebugLog('memory-palace', input);
+}
+
+/** Chat first-render and visual-asset readiness timings; payloads must not include user content or asset URLs. */
+export function appendDevDebugRenderLog(event: string, data: Record<string, unknown>): void {
+    appendDevDebugLog('render', {
+        label: `[render] ${event}`,
+        data: { event, ...data },
+    });
 }
 
 // ===== lifecycle 类：页面前后台 / 焦点 / 网络状态变化 =====

@@ -98,6 +98,40 @@ describe('chatMessageGrouping & timestamp position', () => {
         expect(hiddenHtml).not.toContain('sully-chat-timestamp');
     });
 
+    it('does not show the legacy per-speaker divider in top_center mode inside a five-minute segment', () => {
+        const msg: Message = {
+            id: 2,
+            charId: 'char-1',
+            role: 'assistant',
+            type: 'text',
+            content: '收到',
+            timestamp: new Date(2026, 10, 17, 14, 2).getTime(),
+        };
+        const messageElement = React.createElement(MessageItem, {
+                msg,
+                isFirstInGroup: true,
+                isLastInGroup: true,
+                activeTheme: PRESET_THEMES.default,
+                charAvatar: '',
+                charName: '角色',
+                userAvatar: '',
+                onLongPress: noop,
+                onReply: noop,
+                selectionMode: false,
+                isSelected: false,
+                onToggleSelect: noop,
+                showTimestamp: 'always',
+                timestampPosition: 'top_center',
+                startsTimeSegment: false,
+            });
+        const html = renderToStaticMarkup(messageElement);
+        expect(html).not.toContain('sully-chat-timestamp-divider');
+        expect(html).not.toContain('sully-chat-time-divider');
+        const segmentStartHtml = renderToStaticMarkup(React.cloneElement(messageElement, { startsTimeSegment: true }));
+        expect(segmentStartHtml).toContain('sully-chat-time-divider');
+        expect(segmentStartHtml).not.toContain('sully-chat-timestamp-divider');
+    });
+
     it('keeps Worker send progress below the bubble when timestampPosition is top_center', () => {
         const msg: Message = {
             id: 1,

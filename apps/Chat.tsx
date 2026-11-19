@@ -43,7 +43,7 @@ import { getRoomLabel } from '../utils/memoryPalace/types';
 import { XhsMcpClient, extractNotesFromMcpData, normalizeXhsLiteDetail } from '../utils/xhsMcpClient';
 import { extractWebpageContent, detectFirstUrl, detectXhsShortUrl, extractXhsShareTitle, isXhsUrl, extractXhsNoteLink, expandShortUrl, type ExtractedWebpage } from '../utils/webpageExtractor';
 import { isVideoShareUrl, parseVideoShareUrl } from '../utils/videoParser';
-import { isDevDebugAvailable } from '../utils/devDebug';
+import { appendDevDebugRenderLog, isDevDebugAvailable } from '../utils/devDebug';
 import { isImageValue, migrateDataUrlToRef, putImageBlob, putImageBlobDeduped, useBlobRefUrl } from '../utils/blobRef';
 import { buildReplySnapshotContent } from '../utils/applyAssistantPostProcessing';
 import { resolveLifeRecordCard } from '../utils/lifeRecords';
@@ -212,6 +212,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     // 初值 false 让首次打开也是淡入、且不会有"先显示再变透明"的闪烁。
     // 角色切换「登场」过场是否显示。切换/进入角色时由 useLayoutEffect 在绘制前置真，覆盖住加载、避免闪到新聊天。
     const [showEntry, setShowEntry] = useState(false);
+    const entryRenderTraceRef = useRef<{ characterId: string; startedAt: number; firstMessageLogged: boolean } | null>(null);
     const [entryMessagesReadyFor, setEntryMessagesReadyFor] = useState<string | null>(null);
     const [entryReadyCss, setEntryReadyCss] = useState<Set<string>>(() => new Set());
     const markEntryCssReady = useCallback((css: string) => {
@@ -3655,6 +3656,33 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         const pending = new Set(streamingHandoverIds);
         return displayMessages.filter(message => !pending.has(message.id));
     }, [displayMessages, streamingBubbles, streamingThinking, streamingHandoverIds, selectionMode]);
+
+    useLayoutEffect(() => {
+        if (!activeCharacterId) {
+            entryRenderTraceRef.current = null;
+            return;
+        }
+        if (entryRenderTraceRef.current?.characterId === activeCharacterId) return;
+        entryRenderTraceRef.current = {
+            characterId: activeCharacterId,
+            startedAt: performance.now(),
+            firstMessageLogged: false,
+        };
+        if (!homePhone) appendDevDebugRenderLog('chat-entry-start', {});
+    }, [activeCharacterId, homePhone]);
+
+    useLayoutEffect(() => {
+        if (homePhone) return;
+        const trace = entryRenderTraceRef.current;
+        if (!trace || trace.characterId !== activeCharacterId || trace.firstMessageLogged) return;
+        const visibleMessageCount = renderedMessages.filter(message => message.role !== 'system').length;
+        if (!visibleMessageCount) return;
+        trace.firstMessageLogged = true;
+        appendDevDebugRenderLog('first-chat-message-committed', {
+            durationMs: Math.round(performance.now() - trace.startedAt),
+            visibleMessageCount,
+        });
+    }, [activeCharacterId, homePhone, renderedMessages]);
 
     const timeSegmentStarts = useMemo(() => computeTimeSegmentStarts(renderedMessages), [renderedMessages]);
     const lastNonSystemRenderedMessage = useMemo(() => {

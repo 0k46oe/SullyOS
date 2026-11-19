@@ -17,6 +17,7 @@ import { buildXhsNoteLink } from '../../utils/xhsNoteLink';
 import { trackEvent } from '../../utils/analytics';
 import { resolveBubbleCornerRadii, shouldHideBubbleTail } from '../../utils/bubbleAppearance';
 import { formatChatTimeDivider, formatChatTimestamp } from '../../utils/chatMessageGrouping';
+import { appendDevDebugRenderLog, isCaptureEnabled } from '../../utils/devDebug';
 import { isReducedBlurActive } from '../../utils/blurPolicy';
 import { isImageValue, useBlobRefUrl } from '../../utils/blobRef';
 import { buildReplySnapshotContent } from '../../utils/applyAssistantPostProcessing';
@@ -1309,6 +1310,10 @@ const MessageItem = React.memo(({
     const activePointerId = useRef<number | null>(null);
     const activePointerType = useRef<string>('');
     const replyGestureActiveRef = useRef(false);
+    const entryAvatarMountedAtRef = useRef(0);
+    if (!entryAvatarMountedAtRef.current && typeof performance !== 'undefined') {
+        entryAvatarMountedAtRef.current = performance.now();
+    }
     const replyReadyRef = useRef(false);
 
     const styleConfig = isUser ? activeTheme.user : activeTheme.ai;
@@ -1523,6 +1528,25 @@ const formatTimestamp = (ts: number) => {
                             loading={prioritizeEntryAvatar ? 'eager' : 'lazy'}
                             fetchPriority={prioritizeEntryAvatar ? 'high' : undefined}
                             decoding="async"
+                            onLoad={prioritizeEntryAvatar ? async event => {
+                                if (!isCaptureEnabled('render')) return;
+                                const image = event.currentTarget;
+                                const loadedAt = performance.now();
+                                let outcome = 'loaded';
+                                if (typeof image.decode === 'function') {
+                                    try { await image.decode(); } catch { outcome = 'decode-error'; }
+                                }
+                                appendDevDebugRenderLog('chat-avatar-ready', {
+                                    loadAfterMountMs: Math.round(loadedAt - entryAvatarMountedAtRef.current),
+                                    decodeAfterLoadMs: Math.round(performance.now() - loadedAt),
+                                    outcome,
+                                    naturalWidth: image.naturalWidth,
+                                    naturalHeight: image.naturalHeight,
+                                });
+                            } : undefined}
+                            onError={prioritizeEntryAvatar ? () => appendDevDebugRenderLog('chat-avatar-error', {
+                                loadAfterMountMs: Math.round(performance.now() - entryAvatarMountedAtRef.current),
+                            }) : undefined}
                         />
                         {styleConfig.avatarDecoration && (
                             <TokenImg
@@ -1832,7 +1856,8 @@ const formatTimestamp = (ts: number) => {
     ) : null;
     const commonLayout = (content: React.ReactNode) => (
         <>
-        {isFirstInGroup && showTimestamp !== 'never' && (
+        {timeDividerNode}
+        {timestampPosition !== 'top_center' && isFirstInGroup && showTimestamp !== 'never' && (
 <div className={`sully-chat-timestamp-divider w-full flex justify-center pt-3 pb-0.5 select-none ${storyTime && onToggleTimeMode && !selectionMode ? '' : 'pointer-events-none'}`}>
     {storyTime && onToggleTimeMode && !selectionMode
         ? <button type="button" title={showRealTime ? '点一下切回剧情时间' : '点一下切到现实时间'}
