@@ -3685,6 +3685,25 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     }, [activeCharacterId, homePhone, renderedMessages]);
 
     const timeSegmentStarts = useMemo(() => computeTimeSegmentStarts(renderedMessages), [renderedMessages]);
+    const timestampDiagnosticRef = useRef('');
+    useLayoutEffect(() => {
+        if (homePhone) return;
+        const position = osTheme.chatTimestampPosition || 'below';
+        const showTimestamp = osTheme.chatShowTimestamp || 'always';
+        const signature = `${activeCharacterId}|${position}|${showTimestamp}|${renderedMessages.length}`;
+        if (timestampDiagnosticRef.current === signature) return;
+        timestampDiagnosticRef.current = signature;
+        const root = document.querySelector('.sully-chat-root');
+        appendDevDebugRenderLog('chat-timestamp-layout', {
+            position,
+            showTimestamp,
+            renderedMessageCount: renderedMessages.length,
+            timeSegmentCount: timeSegmentStarts.filter(Boolean).length,
+            centeredDividerCount: root?.querySelectorAll('.sully-chat-time-divider').length ?? 0,
+            belowTimestampCount: root?.querySelectorAll('.sully-chat-timestamp-slot .sully-chat-timestamp').length ?? 0,
+        });
+    }, [activeCharacterId, homePhone, osTheme.chatTimestampPosition, osTheme.chatShowTimestamp, renderedMessages.length, timeSegmentStarts]);
+
     const lastNonSystemRenderedMessage = useMemo(() => {
         for (let i = renderedMessages.length - 1; i >= 0; i--) {
             if (renderedMessages[i].role !== 'system') return renderedMessages[i];
