@@ -189,6 +189,26 @@ describe('iOS 全屏 PWA 键盘态', () => {
         expect(visibleAppHeight()).toBe(`${SCREEN_H}px`);
     });
 
+    it('iOS 桌面 PWA 从后台恢复时重建高度基线，即使 WebKit 没派发 resize', async () => {
+        vi.useFakeTimers();
+        vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+            callback(0);
+            return 0;
+        });
+        await install();
+
+        // 模拟后台恢复后视口高度变了，但 window/visualViewport 都没派发 resize。
+        Object.defineProperty(window, 'innerHeight', { value: SCREEN_H - 62, configurable: true, writable: true });
+        visualViewport.height = SCREEN_H - 62;
+        window.dispatchEvent(new Event('pageshow'));
+        vi.advanceTimersByTime(120);
+
+        expect(inKeyboardMode()).toBe(false);
+        expect(appHeight()).toBe(`${SCREEN_H - 62 + SAFE_BOTTOM}px`);
+        expect(visibleAppHeight()).toBe(`${SCREEN_H - 62}px`);
+        vi.useRealTimers();
+    });
+
     it.each(['Android Chrome', 'iPhone Safari'])('浏览器平移不抵消键盘高度：%s', async userAgent => {
         Object.defineProperty(navigator, 'userAgent', { value: userAgent, configurable: true });
         const originalMatchMedia = window.matchMedia;
