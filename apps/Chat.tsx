@@ -4982,6 +4982,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                             bubbleVariant={osTheme.chatBubbleStyle}
                             messageSpacing={osTheme.chatMessageSpacing}
                             showTimestamp={osTheme.chatShowTimestamp}
+                            timestampPosition={osTheme.chatTimestampPosition}
+                            startsTimeSegment={timeSegmentStarts[i]}
                             storyTime={storyTime}
                             showRealTime={showRealTime}
                             onToggleTimeMode={toggleTimeMode}
@@ -5066,6 +5068,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                                     bubbleVariant={osTheme.chatBubbleStyle}
                                     messageSpacing={osTheme.chatMessageSpacing}
                                     showTimestamp={osTheme.chatShowTimestamp}
+                                    timestampPosition={osTheme.chatTimestampPosition}
+                                    startsTimeSegment={i === 0 && startsNewTimeSegment(lastNonSystemRenderedMessage, { timestamp: Date.now() })}
                                     storyTime={storyTime}
                                     showRealTime={showRealTime}
                                     thinkingChainOptions={thinkingChainOptions}
