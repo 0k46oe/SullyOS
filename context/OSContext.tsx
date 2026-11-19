@@ -3598,6 +3598,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       mode: 'text_only' | 'media_only' | 'full',
       exportOptions: { includeBackendConnection?: boolean; volumeId?: string; onVolume?: (part: BackupVolumeOutput) => Promise<void> } = {},
   ): Promise<Blob> => {
+      const includeBackendConnection = exportOptions.includeBackendConnection ?? readBackupPreferences().includeBackendConnection;
       const zip = createBackupArchive({ ...exportOptions, mode });
       try {
           setSysOperation({ status: 'processing', message: '正在初始化打包引擎...', progress: 0 });
