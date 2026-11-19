@@ -55,7 +55,9 @@ const waitForEntryAvatarDecode = (image: HTMLImageElement) => new Promise<void>(
 });
 
 const waitForEntryAvatars = (): Promise<void> | null => {
-  const images = Array.from(document.querySelectorAll<HTMLImageElement>('img[data-chat-entry-avatar="true"]'));
+  // 白框布局可能保留 display:none 的组首头像副本；隐藏图片不应卡住聊天登场。
+  const images = Array.from(document.querySelectorAll<HTMLImageElement>('img[data-chat-entry-avatar="true"]'))
+    .filter(image => image.getClientRects().length > 0);
   return images.length ? Promise.all(images.map(waitForEntryAvatarDecode)).then(() => {}) : null;
 };
 
