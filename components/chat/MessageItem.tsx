@@ -1466,45 +1466,31 @@ const MessageItem = React.memo(({
     };
 
     const formatTime = formatChatTimestamp;
+    /** 剧情年份显示完整日期，避免与现实模式的简短时间看起来相同。 */
+    function formatStoryTimestamp(ts: number, story: ActiveStoryTime) {
+        return formatStoryDateTime(story, ts);
+    }
     const showTopTimeDivider = timestampPosition === 'top_center' && startsTimeSegment && showTimestamp !== 'never';
-    const showBelowTimestamp = timestampPosition !== 'top_center' && isLastInGroup && showTimestamp !== 'never';
+    const showBelowTimestamp = timestampPosition === 'below' && isLastInGroup && showTimestamp !== 'never';
     const isWechatTopCapsule = bubbleVariant === 'wechat';
+    const canToggleTimestampMode = !!storyTime && !!onToggleTimeMode && !selectionMode;
+    const getTimestampLabel = (centered: boolean) => storyTime && !showRealTime
+        ? formatStoryTimestamp(m.timestamp, storyTime)
+        : centered ? formatChatTimeDivider(m.timestamp, timestampNow) : formatTime(m.timestamp);
+    const renderTimestampLabel = (label: string, className: string) => canToggleTimestampMode
+        ? <button type="button" title={showRealTime ? '点一下切回剧情时间' : '点一下切到现实时间'}
+            className={`${className} appearance-none border-0 bg-transparent p-0 cursor-pointer`}
+            onPointerDown={e => e.stopPropagation()} onTouchStart={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()}
+            onClick={e => { e.stopPropagation(); onToggleTimeMode?.(); }}>
+            {label}
+        </button>
+        : <span className={className}>{label}</span>;
     const timeDividerNode = showTopTimeDivider ? (
         <div className={`sully-chat-time-divider flex justify-center w-full px-3 mt-1.5 mb-3 select-none ${showTimestamp === 'hover' ? 'opacity-0 hover:opacity-100 transition-opacity' : ''}`}>
-            <span className={`sully-chat-timestamp text-[11px] leading-tight font-normal whitespace-nowrap ${isWechatTopCapsule ? 'bg-black/[0.05] text-[#7f7f7f] px-2.5 py-[3px] rounded-[4px]' : 'text-slate-400 px-2 py-0.5 rounded-md'}`}>
-                {formatChatTimeDivider(m.timestamp, timestampNow)}
-            </span>
+            {renderTimestampLabel(getTimestampLabel(true), `sully-chat-timestamp text-[11px] leading-tight font-normal whitespace-nowrap ${isWechatTopCapsule ? 'bg-black/[0.05] text-[#7f7f7f] px-2.5 py-[3px] rounded-[4px]' : 'text-slate-400 px-2 py-0.5 rounded-md'}`)}
         </div>
     ) : null;
 
-/**
- * 剧情年份版本：始终写出剧情年份 + 月日 + 时刻（「3777年11月1日 14:20」）。
- * 剧情年份只换年份，月日时分和现实一样；如果像现实格式那样今天只写「14:20」，
- * 两种模式看起来一模一样，点了也像没切换。不提星期几。
- */
-const formatStoryTimestamp = (ts: number, story: ActiveStoryTime) => formatStoryDateTime(story, ts);
-
-const formatTimestamp = (ts: number) => {
-    const d = new Date(ts);
-    const now = new Date();
-    const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-
-    const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-    const dayDiff = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
-
-    if (dayDiff === 0) return time;
-    if (dayDiff === 1) return `昨天 ${time}`;
-    if (dayDiff <= 7) {
-        const week = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'][d.getDay()];
-        return `${week} ${time}`;
-    }
-
-    const sameYear = d.getFullYear() === now.getFullYear();
-    const dateStr = sameYear
-        ? `${d.getMonth() + 1}月${d.getDate()}日`
-        : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
-    return `${dateStr} ${time}`;
-};
     // Render Avatar with potential decoration/frame
     // Removed mb-5 from here, handled via absolute positioning in parent
     const renderAvatar = (
@@ -1857,19 +1843,6 @@ const formatTimestamp = (ts: number) => {
     const commonLayout = (content: React.ReactNode) => (
         <>
         {timeDividerNode}
-        {storyTime && timestampPosition !== 'top_center' && isFirstInGroup && showTimestamp !== 'never' && (
-<div className={`sully-chat-timestamp-divider w-full flex justify-center pt-3 pb-0.5 select-none ${storyTime && onToggleTimeMode && !selectionMode ? '' : 'pointer-events-none'}`}>
-    {storyTime && onToggleTimeMode && !selectionMode
-        ? <button type="button" title={showRealTime ? '点一下切回剧情时间' : '点一下切到现实时间'}
-            className="sully-chat-timestamp-text text-[10px] text-slate-400/80 font-medium"
-            onPointerDown={e => e.stopPropagation()} onTouchStart={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()}
-            onClick={e => { e.stopPropagation(); onToggleTimeMode(); }}>
-            {showRealTime ? formatTimestamp(m.timestamp) : formatStoryTimestamp(m.timestamp, storyTime)}
-        </button>
-        : <span className="sully-chat-timestamp-text text-[10px] text-slate-400/80 font-medium">
-            {storyTime && !showRealTime ? formatStoryTimestamp(m.timestamp, storyTime) : formatTimestamp(m.timestamp)}
-        </span>}
-</div>        )}
             {!isUser && m.metadata?.chatActionDescription && <div className="sully-chat-action-description w-full px-6 py-2 text-center text-xs leading-relaxed text-slate-500 whitespace-pre-wrap">{String(m.metadata.chatActionDescription)}</div>}
             {centerModules && thinkingChainNode && (
                 <div className="px-3 flex justify-center">
@@ -1946,14 +1919,13 @@ const formatTimestamp = (ts: number) => {
                     {!centerModules && thinkingChainNode}
                     <div className={selectionMode ? 'pointer-events-none' : ''}>
                         {<ChatCardSurface message={m}>{content}</ChatCardSurface>}
-                        {showBelowTimestamp && (
-                            <div className={`sully-chat-timestamp-slot flex w-full ${isUser ? 'justify-end' : 'justify-start'}`}>
-                                <span className={`sully-chat-timestamp text-[10px] text-slate-400 opacity-70 ${showTimestamp === 'hover' ? 'opacity-0 hover:opacity-100 transition-opacity' : ''}`}>
-                                    {formatTime(m.timestamp)}
-                                </span>
-                            </div>
-                        )}
                     </div>
+                    {(showSendProgress || showBelowTimestamp) && (
+                        <div className={`sully-chat-timestamp-slot absolute top-full ${isUser ? 'right-0' : 'left-0'} mt-0.5 px-1 flex items-center gap-1 text-[9px] text-slate-400/80 font-medium whitespace-nowrap ${canToggleTimestampMode ? '' : 'pointer-events-none'}`}>
+                            {showSendProgress && <ChatSendProgress phase={sendPhase!} />}
+                            {showBelowTimestamp && renderTimestampLabel(getTimestampLabel(false), `sully-chat-timestamp ${showTimestamp === 'hover' ? 'opacity-0 group-hover:opacity-100 transition-opacity' : ''}`)}
+                        </div>
+                    )}
                     </div>                </div>
 
                 {/* 用户侧若存在导入/历史模块卡，也保持同一条“卡片不带消息外侧头像”规则。 */}

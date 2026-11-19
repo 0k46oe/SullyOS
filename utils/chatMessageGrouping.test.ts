@@ -133,6 +133,52 @@ describe('chatMessageGrouping & timestamp position', () => {
         expect(segmentStartHtml).not.toContain('sully-chat-timestamp-divider');
     });
 
+    it('keeps story-time labels and the real-time toggle in the selected timestamp position', () => {
+        const msg: Message = {
+            id: 3,
+            charId: 'char-1',
+            role: 'assistant',
+            type: 'text',
+            content: '收到',
+            timestamp: new Date(2026, 10, 17, 14, 2).getTime(),
+        };
+        const commonProps = {
+            msg,
+            isFirstInGroup: true,
+            isLastInGroup: true,
+            activeTheme: PRESET_THEMES.default,
+            charAvatar: '',
+            charName: '角色',
+            userAvatar: '',
+            onLongPress: noop,
+            onReply: noop,
+            selectionMode: false,
+            isSelected: false,
+            onToggleSelect: noop,
+            showTimestamp: 'always' as const,
+            storyTime: { yearLabel: '3777年', baseRealYear: 2026 },
+            showRealTime: false,
+            onToggleTimeMode: noop,
+        };
+        const belowHtml = renderToStaticMarkup(React.createElement(MessageItem, {
+            ...commonProps,
+            timestampPosition: 'below',
+        }));
+        expect(belowHtml).toContain('sully-chat-timestamp-slot');
+        expect(belowHtml).toContain('3777年11月17日 14:02');
+        expect(belowHtml).not.toContain('sully-chat-timestamp-divider');
+
+        const centeredHtml = renderToStaticMarkup(React.createElement(MessageItem, {
+            ...commonProps,
+            timestampPosition: 'top_center',
+            startsTimeSegment: true,
+        }));
+        expect(centeredHtml).toContain('sully-chat-time-divider');
+        expect(centeredHtml).toContain('3777年11月17日 14:02');
+        expect(centeredHtml).not.toContain('sully-chat-timestamp-slot');
+        expect(centeredHtml).not.toContain('sully-chat-timestamp-divider');
+    });
+
     it('keeps Worker send progress below the bubble when timestampPosition is top_center', () => {
         const msg: Message = {
             id: 1,
