@@ -48,50 +48,79 @@ const ThinkingChainSettingsModal: React.FC<Props> = ({ isOpen, onClose, value, o
     if (!isOpen) return null;
 
     return (
-        <div
-            className="fixed inset-0 z-[200] flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-[1px]"
-            style={{ paddingBottom: 'var(--safe-bottom)' }}
-            onClick={onClose}
-        >
+        <div className="thinking-settings-overlay" onClick={close}>
             <div
-                data-paper-ui="dialog" className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-3xl max-h-[85vh] overflow-y-auto no-scrollbar shadow-2xl"
-                onClick={e => e.stopPropagation()}
+                ref={panel}
+                role="dialog"
+                aria-modal="true"
+                aria-label="心象设置"
+                className="thinking-settings-panel"
+                onClick={event => event.stopPropagation()}
+                onKeyDown={event => {
+                    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); }
+                    if (event.key !== 'Tab') return;
+                    const controls = Array.from(panel.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input, select, textarea, summary') || []).filter(el => el.getClientRects().length);
+                    if (event.shiftKey && document.activeElement === controls[0]) { event.preventDefault(); controls.at(-1)?.focus(); }
+                    if (!event.shiftKey && document.activeElement === controls.at(-1)) { event.preventDefault(); controls[0]?.focus(); }
+                }}
             >
-                <div className="sticky top-0 z-10 bg-white px-5 pt-5 pb-3 border-b border-slate-100">
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <h2 className="text-base font-bold text-slate-800">心象 · 设置</h2>
-                            <p className="text-[11px] text-slate-400 mt-0.5">显示与追加提示词；卡片风格在「个性装扮 → 心象」调整</p>
-                        </div>
-                        <button
-                            onClick={() => { commitPrompt(); onClose(); }}
-                            className="text-[12px] font-bold text-indigo-500 active:scale-95 transition"
-                        >
-                            完成
-                        </button>
+                <header className="thinking-settings-header">
+                    <div>
+                        <h2>心象 · 设置</h2>
+                        <p>显示与追加提示词；卡片风格在「个性装扮 → 心象」调整</p>
                     </div>
-                    <p className="thinking-setting-hint">关闭后不显示新回复的心象，旧记录保留。</p>
+                    <button ref={done} type="button" onClick={close}>完成</button>
+                </header>
+                <div className="thinking-settings-content">
+                    <section>
+                        <div className="thinking-setting-heading">
+                            <h3>显示心象</h3>
+                            <button
+                                type="button"
+                                role="switch"
+                                aria-label="显示心象"
+                                aria-checked={value.enabled}
+                                className="thinking-switch"
+                                onClick={() => onChange({ enabled: !value.enabled })}
+                            >
+                                <span />
+                            </button>
+                        </div>
+                        <p className="thinking-setting-hint">关闭后不显示新回复的心象，旧记录保留。</p>
+                    </section>
+                    {onChangeTranslationApi && dialogueApi && (
+                        <ThinkingTranslationSettings
+                            value={translationApi}
+                            dialogueApi={dialogueApi}
+                            presets={apiPresets}
+                            onChange={onChangeTranslationApi}
+                            onAddPreset={onAddApiPreset}
+                        />
+                    )}
+                    <section>
+                        <h3>追加提示词</h3>
+                        <p className="thinking-setting-hint">补充你希望的表达方式，留空沿用默认。语言要求不一定会被模型遵循。</p>
+                        <textarea
+                            aria-label="心象追加提示词"
+                            value={draftPrompt}
+                            onChange={event => setDraftPrompt(event.target.value)}
+                            onBlur={commitPrompt}
+                            placeholder="比如：请用中文概括思考，多写一些感官细节…"
+                        />
+                    </section>
+                    <details className="thinking-help" open={helpOpen} onToggle={event => setHelpOpen(event.currentTarget.open)}>
+                        <summary>关于心象与常见问题</summary>
+                        <p>「心象」展示模型或渠道返回的思考文字。有些模型只提供摘要，不代表完整的内部思考，也不保证每轮都有。</p>
+                        <p>这些文字可能是分析、规划或自言自语，语气不一定像角色台词。被识别为心象的文字与聊天正文分开保存，不作为普通聊天记录传给下一轮。</p>
+                        <p>关闭显示不等于关闭模型推理，也不保证减少思考用量。卡片风格在「个性装扮 → 心象」调整。</p>
+                        <h4>开了却没有卡片？</h4>
+                        <p>模型或渠道可能没有返回可显示的文字，摘要也可能比实际推理短。同一模型在别处有、这里没有时，可向渠道确认是否分别返回思考和正文。</p>
+                        <h4>思考一直是英文？</h4>
+                        <p>语言由模型和渠道决定，追加提示词不保证有效。长按心象可选择「复制全文」或「翻译成中文」；翻译只处理这一条心象，保留原文，不改聊天正文。</p>
+                        <h4>思考出现在聊天气泡里？</h4>
+                        <p>先更新页面，再试一次新回复。如仍出现，请反馈完整模型名、是否流式，以及渠道是否将思考混入正文。无需清空历史；关闭心象无法可靠隐藏没有标记的正文。</p>
+                    </details>
                 </div>
-                {onChangeTranslationApi && dialogueApi && <ThinkingTranslationSettings value={translationApi} dialogueApi={dialogueApi}
-                    presets={apiPresets} onChange={onChangeTranslationApi} onAddPreset={onAddApiPreset} />}
-                <section>
-                    <h3>追加提示词</h3>
-                    <p className="thinking-setting-hint">补充你希望的表达方式，留空沿用默认。语言要求不一定会被模型遵循。</p>
-                    <textarea aria-label="心象追加提示词" value={draftPrompt} onChange={event => setDraftPrompt(event.target.value)} onBlur={commitPrompt}
-                        placeholder="比如：请用中文概括思考，多写一些感官细节…" />
-                </section>
-                <details className="thinking-help" open={helpOpen} onToggle={event => setHelpOpen(event.currentTarget.open)}>
-                    <summary>关于心象与常见问题</summary>
-                    <p>「心象」展示模型或渠道返回的思考文字。有些模型只提供摘要，不代表完整的内部思考，也不保证每轮都有。</p>
-                    <p>这些文字可能是分析、规划或自言自语，语气不一定像角色台词。被识别为心象的文字与聊天正文分开保存，不作为普通聊天记录传给下一轮。</p>
-                    <p>关闭显示不等于关闭模型推理，也不保证减少思考用量。卡片风格在「个性装扮 → 心象」调整。</p>
-                    <h4>开了却没有卡片？</h4>
-                    <p>模型或渠道可能没有返回可显示的文字，摘要也可能比实际推理短。同一模型在别处有、这里没有时，可向渠道确认是否分别返回思考和正文。</p>
-                    <h4>思考一直是英文？</h4>
-                    <p>语言由模型和渠道决定，追加提示词不保证有效。长按心象可选择「复制全文」或「翻译成中文」；翻译只处理这一条心象，保留原文，不改聊天正文。</p>
-                    <h4>思考出现在聊天气泡里？</h4>
-                    <p>先更新页面，再试一次新回复。如仍出现，请反馈完整模型名、是否流式，以及渠道是否将思考混入正文。无需清空历史；关闭心象无法可靠隐藏没有标记的正文。</p>
-                </details>
             </div>
         </div>
     );
