@@ -1507,18 +1507,21 @@ const formatTimestamp = (ts: number) => {
         options?: { visible?: boolean; className?: string },
     ) => {
         const visible = options?.visible ?? shouldShowAvatar;
+        // 组首的白框头像是另一份隐藏副本，不应抢占登场阶段的图片优先级或阻塞可见头像解码。
+        const prioritizeEntryAvatar = entryAvatarPriority &&
+            options?.className !== 'sully-chat-turn-avatar' && isImageValue(src);
         return (
             <div className={`${visible ? 'sully-chat-avatar-wrap' : ''} relative ${avatarSizeClass} z-0 ${options?.className || ''}`}>
                 {visible && (
                     <>
                         <TokenImg
                             value={src}
-                            data-chat-entry-avatar={entryAvatarPriority && isImageValue(src) ? 'true' : undefined}
+                            data-chat-entry-avatar={prioritizeEntryAvatar ? 'true' : undefined}
                             style={isAnniversaryFrame(styleConfig.avatarDecoration) ? { borderRadius: "50%" } : undefined}
                             className={`sully-chat-message-avatar-img w-full h-full ${avatarRadiusClass} object-cover shadow-sm ring-1 ring-black/5 relative z-0`}
                             alt="avatar"
-                            loading={entryAvatarPriority ? 'eager' : 'lazy'}
-                            fetchPriority={entryAvatarPriority && isImageValue(src) ? 'high' : undefined}
+                            loading={prioritizeEntryAvatar ? 'eager' : 'lazy'}
+                            fetchPriority={prioritizeEntryAvatar ? 'high' : undefined}
                             decoding="async"
                         />
                         {styleConfig.avatarDecoration && (
