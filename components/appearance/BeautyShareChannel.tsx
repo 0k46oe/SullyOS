@@ -310,6 +310,17 @@ export default function BeautyShareChannel({ presets, onExport, onImport, onBusy
         closeApp();
       } else if(received.preset.parts.collaboration){
         await applyCollaboration(received.preset.parts.collaboration);
+        const key=await decorationSourceKey(received.preset);await DB.saveAsset('decoration_global_collaboration',key);await startBeautyUsage(key,'collaboration');
+        setNotice('已应用到协同工作，所有协同窗口共用此外观');
+      } else if(received.preset.parts.story){
+        await updateTheme({storyAppearance:{...received.preset.parts.story,name:received.name}});
+        setNotice('已应用剧情界面美化');
+      } else if(isAppDecoration(received.preset)){
+        const p=validateDecoration(received.preset).parts;await updateTheme({...p.schedule?{scheduleCardAppearance:p.schedule}:{},...p.journal?{journalAppearance:p.journal}:{}});
+        const key=await decorationSourceKey(received.preset);for(const part of ['schedule','journal'] as const)if(p[part]){await DB.saveAsset('decoration_global_'+part,key);await startBeautyUsage(key,'appearance:'+part);}setNotice('已同步全局 App 样式，内容保持不变');
+      } else {
+        const targets=applyAll?characters:characters.filter(item=>item.id===target);
+        if (!targets.length) throw Error('请选择要应用的角色');
         const origin=await readDecorationOrigin(await decorationSourceKey(received.preset));
         await applyToCharacters(received.preset,targets,origin,avatarTarget);
         setNotice(applyAll?`已应用到全部 ${targets.length} 个角色`:`已应用给 ${targets[0].name}`);
