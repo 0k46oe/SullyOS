@@ -1,8 +1,10 @@
 import CharacterLinkActions from '../components/character/CharacterLinkActions';
 import CharacterApiPanel from '../components/character/CharacterApiPanel';
 import CharacterSettingsSection from '../components/character/CharacterSettingsSection';
+import ProfileTextField from '../components/character/ProfileTextField';
 import CharacterStatsPanel from '../components/character/CharacterStatsPanel';
 import { characterRemark } from '../utils/characterRemark';
+import { useLocalBackHandler } from '../hooks/useLocalBackHandler';
 import { loadCharacterContextMessages } from '../utils/chatContextRange';
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
@@ -111,10 +113,10 @@ const CharacterCard: React.FC<{
     </div>
 );
 
-const Character: React.FC = () => {
+const Character: React.FC<{ profileCharacterId?: string }> = ({ profileCharacterId }) => {
   const { closeApp, openApp, characters, activeCharacterId, setActiveCharacterId, addCharacter, updateCharacter, deleteCharacter, characterGroups, createCharacterGroup, renameCharacterGroup, deleteCharacterGroup, apiConfig, addToast, userProfile, worldbooks, addWorldbook } = useOS();
-  const launchIntent = characterLaunch.peek();
-  const [view, setView] = useState<'list' | 'detail'>(() => launchIntent ? 'detail' : 'list');
+  const launchIntent = profileCharacterId ? null : characterLaunch.peek();
+  const [view, setView] = useState<'list' | 'detail'>(() => profileCharacterId || launchIntent ? 'detail' : 'list');
   const [charPage, setCharPage] = useState(0); // 角色列表分页（每页 6 个，仅未建分组时）
   // 分组展开状态：存"已展开"的分组 id（未记录 = 收起）。跨会话记住，key 见下
   const [expandedGroups, setExpandedGroups] = useState<string[]>(() => {
@@ -137,11 +139,11 @@ const Character: React.FC = () => {
   const [detailTab, setDetailTab] = useState<'identity' | 'memory' | 'impression' | 'plates' | 'chibi' | 'stats'>(() => launchIntent?.openChibiStudio ? 'chibi' : 'identity');
   // QQ捏人工坊（手办柜）全屏覆盖层
   const [showChibiStudio, setShowChibiStudio] = useState(() => !!launchIntent?.openChibiStudio);
-  const [editingId, setEditingId] = useState<string | null>(() => launchIntent?.charId || null);
+  const [editingId, setEditingId] = useState<string | null>(() => profileCharacterId || launchIntent?.charId || null);
   const [formData, setFormData] = useState<CharacterProfile | null>(null);
   const memoryCharacter = characters.find(character => character.id === formData?.id) || formData;
   const linkedMemoryEnabled = !!memoryCharacter?.memoryPalaceEnabled;
-  const archiveMemories = useLinkedArchives(formData?.id, formData?.memories, linkedMemoryEnabled);
+  const archiveMemories = useLinkedArchives(formData?.id, formData?.memories, !profileCharacterId && linkedMemoryEnabled);
   const { memoryPalaceConfig, remoteVectorConfig } = useOS();
   useEffect(() => {
       const applyDeletion = (event: Event) => {
@@ -169,6 +171,7 @@ const Character: React.FC = () => {
           .catch(() => {});
   }, []);
   useEffect(() => {
+      if (profileCharacterId) return;
       const apply = () => {
           const intent = characterLaunch.consume();
           if (!intent) return;
@@ -179,7 +182,7 @@ const Character: React.FC = () => {
       };
       apply();
       return characterLaunch.subscribe(apply);
-  }, [characters]);
+  }, [characters, profileCharacterId]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cardImportRef = useRef<HTMLInputElement>(null);
   
@@ -202,6 +205,11 @@ const Character: React.FC = () => {
   const [showTimeAwareAmsgModal, setShowTimeAwareAmsgModal] = useState(false);
   const [isDisablingAmsgFromTimeAware, setIsDisablingAmsgFromTimeAware] = useState(false);
   const [showWorldbookModal, setShowWorldbookModal] = useState(false); // New Modal
+  useLocalBackHandler(() => {
+      if (showWorldbookModal) setShowWorldbookModal(false);
+      else if (!isDisablingAmsgFromTimeAware) setShowTimeAwareAmsgModal(false);
+      return true;
+  }, 45, !!profileCharacterId && (showTimeAwareAmsgModal || showWorldbookModal));
   // 挂载世界书弹窗：搜索词 + 当前展开的分组（分组默认折叠，避免全量条目一次性渲染卡爆）
   const [wbModalSearch, setWbModalSearch] = useState('');
   const [wbModalExpandedCategory, setWbModalExpandedCategory] = useState<string | null>(null);
@@ -1290,7 +1298,7 @@ ${isInitialGeneration ? `
   };
 
   return (
-    <div className="h-full w-full bg-slate-50/30 font-light relative">
+    <div className={profileCharacterId ? 'w-full relative' : 'h-full w-full bg-slate-50/30 font-light relative'}>
        {avatarCropDialog}
        <Modal isOpen={showCardImportModal} title="导入角色卡" onClose={() => setShowCardImportModal(false)}
            footer={<button disabled={isImportingCard} onClick={() => { setShowCardImportModal(false); cardImportRef.current?.click(); }} className="w-full py-3 rounded-2xl bg-primary text-white font-bold disabled:opacity-50">{isImportingCard ? '正在导入…' : '选择 PNG / JSON 文件'}</button>}>
@@ -1431,14 +1439,14 @@ ${isInitialGeneration ? `
                </div>
            </div>
        ) : formData && (
-           <div data-paper-surface="character-detail" className="flex flex-col h-full animate-fade-in bg-slate-50/50 relative">
+           <div data-paper-surface={profileCharacterId ? undefined : 'character-detail'} className={profileCharacterId ? 'relative' : 'flex flex-col h-full animate-fade-in bg-slate-50/50 relative'}>
                {/* safe-area: OUTER 保留渐变背景 + 模糊 + sticky，刘海高度由 paddingTop 让位；
                    INNER 不再用 h-32 沉底——那是老的「做高栏 + 内容沉底」状态栏预留写法，会和 safe-top 叠加出一大块空白。
                    改为内容自然高度、直接贴在 safe-top 下方。 */}
                {/* 顶栏 paddingTop 用 max(2.75rem, safe-top) 保底：--safe-top 为 0 的环境
                    （无刘海/某些 WebView）下也留出状态栏高度，避免「列表/发消息」贴到状态栏。
                    与列表页及全项目 detail 顶栏惯例（max(rem, var(--safe-top))）一致。 */}
-               <div className="bg-gradient-to-b from-white/90 to-transparent backdrop-blur-sm shrink-0 z-40 sticky top-0" style={{ paddingTop: 'max(2.75rem, var(--safe-top))' }}>
+               {!profileCharacterId && <div className="bg-gradient-to-b from-white/90 to-transparent backdrop-blur-sm shrink-0 z-40 sticky top-0" style={{ paddingTop: 'max(2.75rem, var(--safe-top))' }}>
                  <div className="flex flex-col px-5 pt-2 pb-2">
                    <div className="flex justify-between items-center mb-3">
                        <button onClick={handleBack} className="p-2 -ml-2 rounded-full hover:bg-white/60 flex items-center gap-1 text-slate-600"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg><span className="text-sm font-medium">列表</span></button>
@@ -1453,8 +1461,8 @@ ${isInitialGeneration ? `
                        <button onClick={() => setDetailTab('stats')} className={`pb-2 transition-colors relative ${detailTab === 'stats' ? 'text-slate-800' : ''}`}>角色统计{detailTab === 'stats' && <div className="absolute bottom-0 left-0 w-full h-0.5 bg-primary rounded-full" />}</button>
                    </div>
                  </div>
-               </div>
-               <div className="flex-1 overflow-y-auto p-5 no-scrollbar pb-10">
+               </div>}
+               <div className={profileCharacterId ? 'py-3' : 'flex-1 overflow-y-auto p-5 no-scrollbar pb-10'}>
                    {detailTab === 'identity' && (
                        <div className="space-y-6 animate-fade-in">
                            <div className="flex items-center gap-5">
@@ -1550,12 +1558,12 @@ ${isInitialGeneration ? `
 
                            <div>
                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">核心指令 (System Prompt)</label>
-                               <textarea value={formData.systemPrompt} onChange={(e) => handleChange('systemPrompt', e.target.value)} className="w-full h-40 bg-white rounded-3xl p-5 text-sm shadow-sm resize-none focus:ring-1 focus:ring-primary/20 transition-all vr-reader-scroll" placeholder="设定..." />
+                               <ProfileTextField label="核心指令" expandable={!!profileCharacterId} value={formData.systemPrompt} onChange={(e) => handleChange('systemPrompt', e.target.value)} className="w-full h-40 bg-white rounded-3xl p-5 text-sm shadow-sm resize-none focus:ring-1 focus:ring-primary/20 transition-all vr-reader-scroll" placeholder="设定..." />
                            </div>
 
                            <div>
                                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1.5 block">世界观 / 设定补充 (Worldview & Lore)</label>
-                               <textarea
+                               <ProfileTextField label="世界观 / 设定补充" expandable={!!profileCharacterId}
                                     value={formData.worldview || ''}
                                     onChange={(e) => handleChange('worldview', e.target.value)}
                                     className="w-full h-24 bg-white rounded-3xl p-5 text-sm shadow-sm resize-none focus:ring-1 focus:ring-primary/20 transition-all vr-reader-scroll"

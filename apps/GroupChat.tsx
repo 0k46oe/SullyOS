@@ -185,9 +185,7 @@ const GroupMessageItem = React.memo(({
     const avatar = isUser ? userAvatar : char?.avatar;
     const name = isUser ? '我' : char?.name || '未知成员';
 
-    const groupBottomGap = timestampPosition === 'top_center'
-        ? (messageSpacing === 'compact' ? 'mb-2.5' : messageSpacing === 'spacious' ? 'mb-6' : 'mb-3.5')
-        : (messageSpacing === 'compact' ? 'mb-3' : messageSpacing === 'spacious' ? 'mb-8' : 'mb-6');
+    const groupBottomGap = messageSpacing === 'compact' ? 'mb-3' : messageSpacing === 'spacious' ? 'mb-8' : 'mb-6';
     const spacingClass = isLastInGroup
         ? groupBottomGap
         : (messageSpacing === 'compact' ? 'mb-0.5' : messageSpacing === 'spacious' ? 'mb-2.5' : 'mb-1.5');
@@ -240,7 +238,6 @@ const GroupMessageItem = React.memo(({
     const timeStr = formatChatTimestamp(msg.timestamp);
     const showTopTimeDivider = timestampPosition === 'top_center' && startsTimeSegment && showTimestamp !== 'never';
     const showBelowTimestamp = timestampPosition !== 'top_center' && isLastInGroup && showTimestamp !== 'never';
-    const isWechatTopCapsule = bubbleVariant === 'wechat';
 
     const clearLongPressTimer = () => {
         if (!longPressTimer.current) return;
@@ -431,8 +428,8 @@ const GroupMessageItem = React.memo(({
     return (
         <>
             {showTopTimeDivider && (
-                <div className={`sully-chat-timestamp-divider flex justify-center w-full px-3 mt-1.5 mb-3 select-none ${showTimestamp === 'hover' ? 'opacity-0 hover:opacity-100 transition-opacity' : ''}`}>
-                    <span className={`sully-chat-timestamp-text text-[11px] leading-tight font-normal whitespace-nowrap ${isWechatTopCapsule ? 'bg-black/[0.05] text-[#7f7f7f] px-2.5 py-[3px] rounded-[4px]' : 'text-slate-400 px-2 py-0.5 rounded-md'}`}>
+                <div className={`sully-chat-timestamp-divider w-full flex justify-center pt-3 pb-0.5 select-none ${showTimestamp === 'hover' ? 'opacity-0 hover:opacity-100 transition-opacity' : ''}`}>
+                    <span className="sully-chat-timestamp-text text-[10px] text-slate-400/80 font-medium">
                         {formatChatTimeDivider(msg.timestamp)}
                     </span>
                 </div>

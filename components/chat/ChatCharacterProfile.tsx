@@ -11,7 +11,6 @@ import { resolveCharTimeZone, tzShortLabel } from '../../utils/timezone';
 import { useLocalBackHandler } from '../../hooks/useLocalBackHandler';
 import { useTickingNow } from '../../hooks/useTickingNow';
 import { handleLocalBack } from '../../utils/localBackHandlers';
-import { characterLaunch } from '../../utils/characterLaunch';
 import BlobRefStyle from './BlobRefStyle';
 import TokenImg from '../os/TokenImg';
 import ScheduleTheaterButton from '../schedule/ScheduleTheaterButton';
@@ -79,7 +78,6 @@ export default function ChatCharacterProfile({ character, schedule, initialTab =
     const selectTab = (next: ProfileTab) => {
         if (next !== tab && next === '设定') trackEvent('查看角色名片栏目', { 栏目: '设定' });
         if (next !== tab && next === '日程') trackEvent('查看角色名片栏目', { 栏目: '日程' });
-        if (!preview && next === '设定') characterLaunch.request({ charId: character.id, detailTab: 'identity' });
         setTab(next);
         tablist.current?.querySelector<HTMLButtonElement>(`[data-tab="${next}"]`)?.focus({ preventScroll: true });
     };
