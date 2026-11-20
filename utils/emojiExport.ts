@@ -5,6 +5,8 @@ import { fetchBlobForShare } from './shareExport';
 
 const safeName = (name: string) => name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/g, '').slice(0, 100) || '表情';
 
+export const packManifest = 'sully-stickers.json';
+
 export async function emojiExtension(blob: Blob): Promise<string> {
     const bytes = new Uint8Array(await blob.slice(0, 16).arrayBuffer());
     const header = String.fromCharCode(...bytes);
