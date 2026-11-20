@@ -1,7 +1,7 @@
 import {CharacterWeatherCities} from '../components/settings/CharacterAwarenessSettings';
 import {cleanCharacterWeatherCities} from '../utils/characterWeather';
 import NavigationBallSettings from '../components/settings/NavigationBallSettings';
-import { useSettingsFocus } from '../utils/settingsNavigation';
+import { requestSettingsFocus, useSettingsFocus } from '../utils/settingsNavigation';
 import ApiPresetGroups from '../components/settings/ApiPresetGroups';
 import ImageGenerationSettings from '../components/settings/ImageGenerationSettings';
 import DialogueApiFields from '../components/settings/DialogueApiFields';
@@ -24,6 +24,7 @@ import Modal from '../components/os/Modal';
 import UserHolidaySettings from '../components/settings/UserHolidaySettings';
 import UserLocationSettings, { USER_LOCATION_PAGE_TITLES, getUserLocationParentPage, type UserLocationSettingsPage } from '../components/settings/UserLocationSettings';
 import { useLocalBackHandler } from '../hooks/useLocalBackHandler';
+import { ActiveMsgSettingsEntry, ActiveMsgSettingsPages, type AmsgSettingsPage } from '../components/settings/ActiveMsgSettings';
 import { loadUserLocationConfig, type UserLocationConfig } from '../utils/userLocationPrivacy';
 import { saveUserLocationConfig } from '../utils/userLocation';
 import { consumeHolidaySettings, hasHolidaySettingsRequest, type UserHolidayConfig } from '../utils/userHolidays';
@@ -47,11 +48,12 @@ import { loadMcpServers, saveMcpServers, createMcpServer, testMcpConnection, res
 import { loadPushConfig, savePushConfig, registerScheduleOnWorker, startHeartbeat, stopHeartbeat, isPushConfigAvailable, ensureSubscribed, sendTestPush, getPushDiagnostics, resetSubscription, deepResetSubscription, type PushDiagnostics } from '../utils/proactivePushConfig';
 import { ProactiveChat } from '../utils/proactiveChat';
 import { PushVapidSettingsModal } from '../components/settings/PushVapidSettingsModal';
-import AmsgCloudDataModal from '../components/settings/AmsgCloudDataModal';
 import PushSubscriptionPanel from '../components/settings/PushSubscriptionPanel';
-import ActiveMsgGlobalSettingsModal from '../components/settings/ActiveMsgGlobalSettingsModal';
 import { syncAmsgLlmCredentials, syncAmsgToolConfig, syncAmsgToolConfigAndPrompts } from '../utils/amsgStateSync';
 import { ActiveMsgClient } from '../utils/activeMsgClient';
+import { ActiveMsgStore } from '../utils/activeMsgStore';
+import { AMSG_GLOBAL_CONFIG_EVENT, isAmsg2GloballyEnabled } from '../utils/amsgGlobalGate';
+import { flushAmsg2AfterReenable, setAmsg2GlobalEnabled } from '../utils/amsgGlobalSwitch';
 import VersionInfo from '../components/settings/VersionInfo';
 import { isPushVapidReady } from '../utils/pushVapid';
 import ApiCallLogModal from '../components/settings/ApiCallLogModal';
@@ -502,7 +504,7 @@ const Settings: React.FC = () => {
       sysOperation, // Get progress state
       realtimeConfig, updateRealtimeConfig, // 实时感知配置
       // 改工具凭据时要连云端提示词一起刷（见 syncAmsgToolConfigAndPrompts）
-      characters, groups, userProfile,
+      characters, characterGroups, groups, userProfile,
       cloudBackupConfig, updateCloudBackupConfig,
       cloudBackupToWebDAV, cloudRestoreFromWebDAV, listCloudBackups,
   } = useOS();
@@ -801,8 +803,49 @@ const Settings: React.FC = () => {
   // 连续 zombie 重置失败次数 — 累计 >= 3 时, "重置订阅" 按钮自动 morph 成
   // "深度重置". 不持久化, 刷新页面归零 (用户原话: "刷新页面正常消失").
   const [ppZombieStreak, setPpZombieStreak] = useState(0);
-  const [showAmsg2Modal, setShowAmsg2Modal] = useState(false);
-  const [showAmsgCloudData, setShowAmsgCloudData] = useState(false);
+  const [amsgPage, setAmsgPage] = useState<AmsgSettingsPage | null>(null);
+  const amsgEntryFocus = useRef<HTMLElement | null>(null);
+  const amsgWasOpen = useRef(false);
+  useEffect(() => {
+      if (!amsgPage && amsgWasOpen.current) amsgEntryFocus.current?.focus({ preventScroll: true });
+      amsgWasOpen.current = Boolean(amsgPage);
+  }, [amsgPage]);
+  const openAmsgPage = (page: AmsgSettingsPage) => {
+      amsgEntryFocus.current = document.activeElement as HTMLElement | null;
+      if (page === 'config' || page === 'overview') trackEvent('打开主动消息2.0配置');
+      setAmsgPage(page);
+  };
+  useSettingsFocus('amsg2', () => openAmsgPage('config'));
+  const [amsgGlobalConfig, setAmsgGlobalConfig] = useState<{ workerUrl: string; enabled?: boolean; initializedAt?: number } | null>(null);
+  const [amsgGlobalToggling, setAmsgGlobalToggling] = useState(false);
+  useEffect(() => {
+      let alive = true;
+      void ActiveMsgStore.getGlobalConfig()
+          .then((cfg) => { if (alive) setAmsgGlobalConfig(cfg); })
+          .catch(() => {});
+      const onGlobalCfg = (ev: Event) => {
+          const detail = (ev as CustomEvent).detail;
+          if (detail) {
+              setAmsgGlobalConfig(detail);
+              if (!isAmsg2GloballyEnabled(detail)) flushMcpToolConfigSync();
+          }
+      };
+      window.addEventListener(AMSG_GLOBAL_CONFIG_EVENT, onGlobalCfg);
+      return () => {
+          alive = false;
+          window.removeEventListener(AMSG_GLOBAL_CONFIG_EVENT, onGlobalCfg);
+      };
+  }, []);
+  const handleToggleAmsg2Global = async (next: boolean) => {
+      if (amsgGlobalToggling) return;
+      setAmsgGlobalToggling(true);
+      try {
+          const result = await setAmsg2GlobalEnabled(next, { characters, userProfile, groups, realtimeConfig, apiConfig });
+          addToast(result.cronNotice || (next ? '已恢复主动消息 2.0。' : '已暂停主动消息 2.0，云端连接与角色配置均已保留。'), result.cronNotice ? 'info' : 'success');
+      } finally {
+          setAmsgGlobalToggling(false);
+      }
+  };
   /**
    * 导出时带不带主动消息 2.0 的后端连接（Worker 地址 + 密钥 + 用户 id）。
    *
@@ -2177,7 +2220,7 @@ const Settings: React.FC = () => {
       )}
 
       {/* Header */}
-      <div className="sully-settings-header bg-[#fffefe] border-b border-slate-200 shrink-0 z-10 sticky top-0" style={{ paddingTop: 'var(--safe-top)' }}>
+      <div className="sully-settings-header bg-[#fffefe] border-b border-slate-200 shrink-0 z-10 sticky top-0" style={{ paddingTop: 'var(--safe-top)' }} {...(amsgPage ? { inert: '', 'aria-hidden': true } : {})}>
         <div className="flex items-center px-4 py-3">
         <div className="flex items-center gap-2 w-full">
             <button onClick={closeApp} className="p-2 -ml-2 rounded-full hover:bg-black/5 active:scale-90 transition-transform">
@@ -2190,7 +2233,7 @@ const Settings: React.FC = () => {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-5 space-y-6 no-scrollbar pb-20">
+      <div className="flex-1 overflow-y-auto p-5 space-y-6 no-scrollbar pb-20" {...(amsgPage ? { inert: '', 'aria-hidden': true } : {})}>
 
         <NavigationBallSettings characters={characters} loadWorlds={() => DB.getWorlds()} />
         {/* 外观救急入口统一放在设置顶部，无需进入已被错误 CSS 遮住的聊天或日记。 */}
@@ -3610,32 +3653,7 @@ const Settings: React.FC = () => {
         </SettingsSection>
         )}
 
-        {/* ───────── 主动消息 2.0（定时推送） ───────── */}
-        <section className="bg-white/80 rounded-3xl p-5 shadow-sm border border-white/50">
-            <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                    <div className="p-2 bg-violet-100/60 rounded-xl text-violet-600">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-                        </svg>
-                    </div>
-                    <h2 className="text-sm font-semibold text-slate-600 tracking-wider">主动消息 2.0</h2>
-                </div>
-                <button
-                    onClick={() => { trackEvent('打开主动消息2.0配置'); setShowAmsg2Modal(true); }}
-                    className="text-[10px] bg-violet-100 text-violet-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform"
-                >
-                    配置
-                </button>
-            </div>
-            <p className="text-xs text-slate-500 leading-relaxed">
-                角色到点自动给你发消息，App 关着也能收。需要你自己部署一个 Cloudflare Worker（自带 D1 数据库 + 定时触发），在配置里填地址即可。聊天上云（即时对话）与定时主动消息都由它承担。
-            </p>
-            <button type="button" onClick={() => setShowAmsgCloudData(true)} className="mt-3 w-full rounded-2xl border border-violet-100 bg-violet-50/60 px-4 py-3 text-left text-xs text-violet-700">
-                <span className="block font-semibold">云端数据管理</span>
-                <span className="mt-1 block text-[11px] text-slate-500">查看 Worker 实际保存的数据，按项清理或彻底移除角色。</span>
-            </button>
-        </section>
+        <ActiveMsgSettingsEntry onOpen={openAmsgPage} connected={Boolean(amsgGlobalConfig?.initializedAt && amsgGlobalConfig.workerUrl?.trim())} enabled={amsgGlobalConfig?.workerUrl?.trim() ? isAmsg2GloballyEnabled(amsgGlobalConfig) : undefined} toggling={amsgGlobalToggling} onToggle={next => void handleToggleAmsg2Global(next)} />
 
         {/* 自定义网络代理 — 刻意低调的高级入口。默认折叠，不主动指引基本发现不了。
             普通用户无需配置：默认走作者部署的公共 Worker，所有功能开箱即用。 */}
@@ -4907,20 +4925,18 @@ const Settings: React.FC = () => {
         onClose={() => { setShowVapidModal(false); setVapidReadyTick((n) => n + 1); }}
         addToast={addToast}
       />
-      <ActiveMsgGlobalSettingsModal
-        isOpen={showAmsg2Modal}
-        onClose={() => setShowAmsg2Modal(false)}
+      {amsgPage && <ActiveMsgSettingsPages
+        initialPage={amsgPage}
+        onClose={() => setAmsgPage(null)}
+        onRestoreBackup={() => { amsgEntryFocus.current = null; setAmsgPage(null); requestSettingsFocus('backup'); }}
         addToast={addToast}
         realtimeConfig={realtimeConfig}
-        onOpenVapid={() => { setShowAmsg2Modal(false); setShowVapidModal(true); }}
-        onOpenCloudData={() => { setShowAmsg2Modal(false); setShowAmsgCloudData(true); }}
-      />
-      <AmsgCloudDataModal
-        isOpen={showAmsgCloudData}
-        onClose={() => setShowAmsgCloudData(false)}
         characters={characters}
-        addToast={addToast}
-      />
+        characterGroups={characterGroups}
+        characterSettings={{ apiConfig, userProfile, groups, onSave: (id, updater) => updateCharacter(id, previous => ({ activeMsg2Config: updater(previous.activeMsg2Config) })) }}
+        onToggleGlobalEnabled={handleToggleAmsg2Global}
+        onReenabledAfterConnect={() => void flushAmsg2AfterReenable({ characters, userProfile, groups, realtimeConfig, apiConfig })}
+      />}
 
     </div>
   );
