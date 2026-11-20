@@ -1292,9 +1292,7 @@ const MessageItem = React.memo(({
     const isUser = m.role === 'user';
     const showSendProgress = isUser && !selectionMode && !!sendPhase && sendPhase !== 'accepted' && sendPhase !== 'cancelled';
     const isSystem = m.role === 'system';
-    const groupBottomGap = timestampPosition === 'top_center'
-        ? (messageSpacing === 'compact' ? 'mb-2.5' : messageSpacing === 'spacious' ? 'mb-6' : 'mb-3.5')
-        : (messageSpacing === 'compact' ? 'mb-3' : messageSpacing === 'spacious' ? 'mb-8' : 'mb-6');
+    const groupBottomGap = messageSpacing === 'compact' ? 'mb-3' : messageSpacing === 'spacious' ? 'mb-8' : 'mb-6';
     const spacingClass = isLastInGroup
         ? groupBottomGap
         : (messageSpacing === 'compact' ? 'mb-0.5' : messageSpacing === 'spacious' ? 'mb-2.5' : 'mb-1.5');

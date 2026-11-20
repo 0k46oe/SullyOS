@@ -23,12 +23,14 @@ export function computeTimeSegmentStarts(
 ): boolean[] {
     const starts: boolean[] = new Array(messages.length).fill(false);
     let lastNonSystem: Pick<Message, 'role' | 'timestamp'> | null = null;
+    let segmentStart: Pick<Message, 'role' | 'timestamp'> | null = null;
     for (let i = 0; i < messages.length; i++) {
         const message = messages[i];
         if (message.role === 'system') continue;
         starts[i] = splitByRole
             ? startsNewRoleSegment(lastNonSystem, message)
-            : startsNewTimeSegment(lastNonSystem, message);
+            : startsNewTimeSegment(segmentStart, message);
+        if (starts[i]) segmentStart = message;
         lastNonSystem = message;
     }
     return starts;

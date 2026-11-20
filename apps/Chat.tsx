@@ -3714,6 +3714,12 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         () => computeTimeSegmentStarts(renderedMessages, splitTimeSegmentsByRole),
         [renderedMessages, splitTimeSegmentsByRole],
     );
+    const lastTimeSegmentStartMessage = useMemo(() => {
+        for (let i = timeSegmentStarts.length - 1; i >= 0; i--) {
+            if (timeSegmentStarts[i]) return renderedMessages[i];
+        }
+        return null;
+    }, [renderedMessages, timeSegmentStarts]);
     const timestampDiagnosticRef = useRef('');
     useLayoutEffect(() => {
         if (homePhone) return;
@@ -4335,7 +4341,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                                     timestampPosition={osTheme.chatTimestampPosition}
                                     startsTimeSegment={i === 0 && (splitTimeSegmentsByRole
                                         ? startsNewRoleSegment(lastNonSystemRenderedMessage, { role: 'assistant' })
-                                        : startsNewTimeSegment(lastNonSystemRenderedMessage, { timestamp: Date.now() }))}
+                                        : startsNewTimeSegment(lastTimeSegmentStartMessage, { timestamp: Date.now() }))}
                                     thinkingChainOptions={thinkingChainOptions}
                                 />
                             </div>
@@ -5120,7 +5126,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                                     timestampPosition={osTheme.chatTimestampPosition}
                                     startsTimeSegment={i === 0 && (splitTimeSegmentsByRole
                                         ? startsNewRoleSegment(lastNonSystemRenderedMessage, { role: 'assistant' })
-                                        : startsNewTimeSegment(lastNonSystemRenderedMessage, { timestamp: Date.now() }))}
+                                        : startsNewTimeSegment(lastTimeSegmentStartMessage, { timestamp: Date.now() }))}
                                     storyTime={storyTime}
                                     showRealTime={showRealTime}
                                     thinkingChainOptions={thinkingChainOptions}

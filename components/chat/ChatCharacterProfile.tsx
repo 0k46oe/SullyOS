@@ -11,6 +11,7 @@ import { resolveCharTimeZone, tzShortLabel } from '../../utils/timezone';
 import { useLocalBackHandler } from '../../hooks/useLocalBackHandler';
 import { useTickingNow } from '../../hooks/useTickingNow';
 import { handleLocalBack } from '../../utils/localBackHandlers';
+import { characterLaunch } from '../../utils/characterLaunch';
 import BlobRefStyle from './BlobRefStyle';
 import TokenImg from '../os/TokenImg';
 import ScheduleTheaterButton from '../schedule/ScheduleTheaterButton';
@@ -78,6 +79,7 @@ export default function ChatCharacterProfile({ character, schedule, initialTab =
     const selectTab = (next: ProfileTab) => {
         if (next !== tab && next === '设定') trackEvent('查看角色名片栏目', { 栏目: '设定' });
         if (next !== tab && next === '日程') trackEvent('查看角色名片栏目', { 栏目: '日程' });
+        if (!preview && next === '设定') characterLaunch.request({ charId: character.id, detailTab: 'identity' });
         setTab(next);
         tablist.current?.querySelector<HTMLButtonElement>(`[data-tab="${next}"]`)?.focus({ preventScroll: true });
     };
@@ -125,11 +127,6 @@ export default function ChatCharacterProfile({ character, schedule, initialTab =
                         <p className="chat-profile-remark"><span>备注</span>{characterRemark(character.description) || '未填写'}</p>
                         <span className="chat-profile-divider" aria-hidden="true">✦</span>
                     </header>
-                    {(character.systemPrompt?.trim() || character.worldview?.trim()) && <section className="chat-profile-character-info" aria-label="角色个人信息">
-                        <h3>角色个人信息</h3>
-                        {character.systemPrompt?.trim() && <div><h4>核心设定</h4><p>{character.systemPrompt}</p></div>}
-                        {character.worldview?.trim() && <div><h4>世界观 / 设定补充</h4><p>{character.worldview}</p></div>}
-                    </section>}
                     {scheduleOn && character.emotionConfig?.enabled && <ProfileEmotion preview={preview} key={character.id} character={character} fallback={slots[current]?.innerThought} />}
                 </div> : <>
                     <header className="chat-profile-page-heading"><p>{character.name}</p><h2>{tab === '设定' ? '角色设定' : '今日日程'}</h2></header>
