@@ -23,7 +23,7 @@ import {PSYCHE_STYLE_LIST} from '../../utils/psycheStyleCatalog';
 import {PROFILE_PRESETS} from '../../presets/chat/profilePresets';
 import React, { useEffect, useState, useRef, useMemo, lazy, Suspense } from 'react';
 import {createPortal} from 'react-dom';
-import { AppID, type AppearancePreset } from '../../types';
+import { AppID, type CharacterProfile, type AppearancePreset } from '../../types';
 import { useOS, DEFAULT_PAPER_APPEARANCE, DEFAULT_WALLPAPER } from '../../context/OSContext';
 import { resetChatDecoration } from '../../utils/decorationReset';
 import { DB } from '../../utils/db';
@@ -44,8 +44,7 @@ import { BeautyRepoLibrary } from '../share/BeautyRepoInvitation';
 import BeautyWardrobe, { type WardrobeEntry } from './BeautyWardrobe';
 import DecorationDraftEditor from '../chat/DecorationDraftEditor';
 import {readDecorationFile,portableDecoration,readBubbleDecoration} from '../../utils/chatDecoration';
-import {decorationPatches} from '../../utils/chatDecoration';
-import type {ChatDecorationTrial} from '../chat/ChatDecorationTrial';
+import {DecorationTrialContext, type ChatDecorationTrial} from '../chat/ChatDecorationTrial';
 import {readDecorationOrigin,writeDecorationOrigin,saveLibraryDecoration,saveLibraryDecorationBatch,canEditDecoration,importedOrigin,type DecorationOrigin} from '../../utils/decorationLibrary';
 import {shareOrDownloadBlob} from '../../utils/shareExport';
 import {safeShareFileName,isPng,pngHasShare,extractShareFromPng} from '../../utils/pngShare';
@@ -228,6 +227,79 @@ export default function BeautyShareChannel({ presets, onExport, onImport, onBusy
     setApplyAll(false);
     setReceived({ kind: 'chat-decoration', preset, name: preset.name });
   };
+  const prepareForCharacters = (appliedPreset: DecorationPreset, targets: CharacterProfile[], origin: DecorationOrigin, mode: 'trial'|'apply') => {
+    const parts = Object.keys(appliedPreset.parts) as DecorationPart[];
+    const available = [...customThemes,...Object.values(PRESET_THEMES)];
+    return prepareDecorationApplication(appliedPreset,parts,targets,theme,available,origin,
+      id=>customThemes.some(b=>b.id===id)?readDecorationOrigin('bubble-'+id):Promise.resolve({kind:'builtin'}),mode);
+  };
+  const applyToCharacters = async (preset: DecorationPreset, targets: CharacterProfile[], origin: DecorationOrigin, frameTarget: AvatarFrameTarget) => {
+    const appliedPreset=hasAvatarFrameCss(preset)&&!hasSplitAvatarFrames(preset)?withAvatarFrameTarget(preset,frameTarget):preset;
+    const key=await decorationSourceKey(preset);
+    const parts=Object.keys(preset.parts) as DecorationPart[];
+    const {prepared,bubbles,bubbleOrigins}=await prepareForCharacters(appliedPreset,targets,origin,'apply');
+    for(const bubble of bubbles){await addCustomTheme(bubble);await writeDecorationOrigin('bubble-'+bubble.id,bubbleOrigins.get(bubble.id)||origin);}
+    for(const {character,changes} of prepared){
+      await updateCharacter(character.id,changes.character);
+      await DB.saveAsset('decoration_applied_'+character.id,key);
+      const rawSlots=await DB.getAsset('decoration_slots_'+character.id);
+      const slots:Record<string,string>=rawSlots?JSON.parse(rawSlots):{};
+      const css=appliedPreset.parts.css;
+      const componentBlocks=css?[...css.matchAll(/\/\* sully-composer:(avatar|background) \*\/[\s\S]*?\/\* end-sully-composer:\1 \*\//g)]:[];
+      const extraCss=css?css.replace(/\/\* sully-composer:(avatar|background) \*\/[\s\S]*?\/\* end-sully-composer:\1 \*\//g,'').trim():'';
+      const isFullOutfit=Boolean(appliedPreset.parts.layout||extraCss||Object.keys(appliedPreset.parts).filter(k=>k!=='css').length>1);
+      const componentOnly=!isFullOutfit&&componentBlocks.length>0;
+      for(const part of parts){
+        if(part==='css'&&componentOnly){
+          if(componentBlocks.some(block=>block[1]==='background'))slots['css:background']=key;
+          if(componentBlocks.some(block=>block[1]==='avatar')){
+            const frameSlots=readAvatarFrameSlots(css!);
+            if(frameSlots.shared){
+              slots['css:avatar:user']=key;slots['css:avatar:ai']=key;delete slots['css:avatar'];
+            }else{
+              // Migrate any legacy shared slot before overwriting only one side so the other side's attribution survives.
+              if(slots['css:avatar']){slots['css:avatar:user']??=slots['css:avatar'];slots['css:avatar:ai']??=slots['css:avatar'];delete slots['css:avatar'];}
+              if(frameSlots.user)slots['css:avatar:user']=key;
+              if(frameSlots.ai)slots['css:avatar:ai']=key;
+            }
+          }
+        }else{
+          slots[part]=key;
+          if(part==='css'){delete slots['css:avatar'];delete slots['css:avatar:user'];delete slots['css:avatar:ai'];delete slots['css:background'];}
+          if(part==='bubbles'&&!appliedPreset.parts.css&&!appliedPreset.parts.layout&&appliedPreset.parts.bubbles){
+            for(const side of ['user','ai'] as const)if(appliedPreset.parts.bubbles[side].avatarDecoration){
+              if(slots['css:avatar']){slots['css:avatar:user']??=slots['css:avatar'];slots['css:avatar:ai']??=slots['css:avatar'];delete slots['css:avatar'];}
+              delete slots['css:avatar:'+side];
+            }
+          }
+        }
+      }
+      await DB.saveAsset('decoration_slots_'+character.id,JSON.stringify(slots));
+      await startBeautyUsage(key,'chat:'+character.id);
+    }
+  };
+  const live = useRef({characters,applyToCharacters});
+  live.current = {characters,applyToCharacters};
+  const mounted = useRef(false);
+  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;};},[]);
+  const startTrial = async (preset: DecorationPreset, origin: DecorationOrigin, beforeCommit?: () => Promise<void>) => {
+    if (!onTrial || !targetCharacter) throw Error('请选择试用角色');
+    const frameTarget = readAvatarFrameTarget(preset.parts.css || '');
+    const visual = hasAvatarFrameCss(preset)&&!hasSplitAvatarFrames(preset)?withAvatarFrameTarget(preset,frameTarget):preset;
+    const {prepared,bubbles} = await prepareForCharacters(visual,[targetCharacter],origin,'trial');
+    if (!mounted.current) return;
+    const patch = prepared[0].changes.character;
+    onTrial({characterId:targetCharacter.id,patch,bubble:bubbles.find(b=>b.id===patch.bubbleStyle),showProfile:!!preset.parts.profile && Object.keys(preset.parts).length===1,
+      commit: async () => {
+        await beforeCommit?.();
+        const character = live.current.characters.find(item=>item.id===targetCharacter.id);
+        if (!character || !mounted.current) throw Error('试用角色已切换，请重新打开预览');
+        await writeDecorationOrigin(await decorationSourceKey(preset),origin);
+        await live.current.applyToCharacters(preset,[character],origin,frameTarget);
+        trackBeauty('apply','chat');
+      }});
+  };
+  const trialContext = onTrial ? {active:!!trialActive,start:startTrial} : null;
   const applyReceived = async () => {
     if (!received || applying) return;
     setApplying(true); onBusyChange(true); setApplyError('');
@@ -238,85 +310,14 @@ export default function BeautyShareChannel({ presets, onExport, onImport, onBusy
         closeApp();
       } else if(received.preset.parts.collaboration){
         await applyCollaboration(received.preset.parts.collaboration);
-        const key=await decorationSourceKey(received.preset);await DB.saveAsset('decoration_global_collaboration',key);await startBeautyUsage(key,'collaboration');
-        setNotice('已应用到协同工作，所有协同窗口共用此外观');
-      } else if(received.preset.parts.story){
-        await updateTheme({storyAppearance:{...received.preset.parts.story,name:received.name}});
-        setNotice('已应用剧情界面美化');
-      } else if(isAppDecoration(received.preset)){
-        const p=validateDecoration(received.preset).parts;await updateTheme({...p.schedule?{scheduleCardAppearance:p.schedule}:{},...p.journal?{journalAppearance:p.journal}:{}});
-        const key=await decorationSourceKey(received.preset);for(const part of ['schedule','journal'] as const)if(p[part]){await DB.saveAsset('decoration_global_'+part,key);await startBeautyUsage(key,'appearance:'+part);}setNotice('已同步全局 App 样式，内容保持不变');
-      } else {
-        const targets=applyAll?characters:characters.filter(item=>item.id===target);
-        if (!targets.length) throw Error('请选择要应用的角色');
-        const key=await decorationSourceKey(received.preset);
-        const parts=Object.keys(received.preset.parts) as DecorationPart[];
-        // Prepare every patch before writing, so malformed input cannot partly apply.
-        const origin=await readDecorationOrigin(key);
-        const customIds=new Set(customThemes.map(item=>item.id));
-        const appliedPreset=hasAvatarFrameCss(received.preset)&&!hasSplitAvatarFrames(received.preset)?withAvatarFrameTarget(received.preset,avatarTarget):received.preset;
-        const {prepared,bubbles,bubbleOrigins}=await prepareDecorationApplication(appliedPreset,parts,targets,theme,
-          [...customThemes,...Object.values(PRESET_THEMES)],origin,
-          id=>customIds.has(id)?readDecorationOrigin('bubble-'+id):Promise.resolve({kind:'builtin'}));
-        for(const bubble of bubbles){await addCustomTheme(bubble);await writeDecorationOrigin('bubble-'+bubble.id,bubbleOrigins.get(bubble.id)||origin);}
-        for(const {character,changes} of prepared){
-          await updateCharacter(character.id,changes.character);
-          await DB.saveAsset('decoration_applied_'+character.id,key);
-          const rawSlots=await DB.getAsset('decoration_slots_'+character.id);
-          const slots:Record<string,string>=rawSlots?JSON.parse(rawSlots):{};
-          const css=appliedPreset.parts.css;
-          const componentBlocks=css?[...css.matchAll(/\/\* sully-composer:(avatar|background) \*\/[\s\S]*?\/\* end-sully-composer:\1 \*\//g)]:[];
-          const extraCss=css?css.replace(/\/\* sully-composer:(avatar|background) \*\/[\s\S]*?\/\* end-sully-composer:\1 \*\//g,'').trim():'';
-          const isFullOutfit=Boolean(appliedPreset.parts.layout||extraCss||Object.keys(appliedPreset.parts).filter(k=>k!=='css').length>1);
-          const componentOnly=!isFullOutfit&&componentBlocks.length>0;
-          for(const part of parts){
-            if(part==='css'&&componentOnly){
-              if(componentBlocks.some(block=>block[1]==='background'))slots['css:background']=key;
-              if(componentBlocks.some(block=>block[1]==='avatar')){
-                const frameSlots=readAvatarFrameSlots(css!);
-                if(frameSlots.shared){
-                  slots['css:avatar:user']=key;slots['css:avatar:ai']=key;delete slots['css:avatar'];
-                }else{
-                  // Migrate any legacy shared slot before overwriting only one side so the other side's attribution survives.
-                  if(slots['css:avatar']){slots['css:avatar:user']??=slots['css:avatar'];slots['css:avatar:ai']??=slots['css:avatar'];delete slots['css:avatar'];}
-                  if(frameSlots.user)slots['css:avatar:user']=key;
-                  if(frameSlots.ai)slots['css:avatar:ai']=key;
-                }
-              }
-            }else{
-              slots[part]=key;
-              if(part==='css'){delete slots['css:avatar'];delete slots['css:avatar:user'];delete slots['css:avatar:ai'];delete slots['css:background'];}
-              if(part==='bubbles'&&!appliedPreset.parts.css&&!appliedPreset.parts.layout&&appliedPreset.parts.bubbles){
-                for(const side of ['user','ai'] as const)if(appliedPreset.parts.bubbles[side].avatarDecoration){
-                  if(slots['css:avatar']){slots['css:avatar:user']??=slots['css:avatar'];slots['css:avatar:ai']??=slots['css:avatar'];delete slots['css:avatar'];}
-                  delete slots['css:avatar:'+side];
-                }
-              }
-            }
-          }
-          await DB.saveAsset('decoration_slots_'+character.id,JSON.stringify(slots));
-          await startBeautyUsage(key,'chat:'+character.id);
-        }
+        const origin=await readDecorationOrigin(await decorationSourceKey(received.preset));
+        await applyToCharacters(received.preset,targets,origin,avatarTarget);
         setNotice(applyAll?`已应用到全部 ${targets.length} 个角色`:`已应用给 ${targets[0].name}`);
       }
       trackBeauty('apply',received.kind==='appearance'?'appearance':received.preset.parts.collaboration?'collaboration':isAppDecoration(received.preset)?(received.preset.parts.schedule?'schedule':'journal'):'chat');
       setReceived(null);
     } catch (error) { setApplyError(error instanceof Error ? error.message : '应用失败，请重试'); }
     finally { setApplying(false); onBusyChange(false); }
-  };
-  const startTrial = async () => {
-    if (!received || received.kind !== 'chat-decoration' || !onTrial || !targetCharacter) return;
-    const preset = hasAvatarFrameCss(received.preset) && !hasSplitAvatarFrames(received.preset)
-      ? withAvatarFrameTarget(received.preset, avatarTarget) : received.preset;
-    const parts = Object.keys(preset.parts) as DecorationPart[];
-    const changes = await decorationPatches(preset, parts, 'character', targetCharacter, theme, 'trial');
-    onTrial({
-      characterId: targetCharacter.id,
-      patch: changes.character,
-      bubble: changes.bubble,
-      showProfile: parts.length === 1 && parts.includes('profile'),
-      commit: async () => { await applyReceived(); },
-    });
   };
   const entries: (WardrobeEntry & { categories: BeautyCategory[] })[] = [
     ...presets.map(preset => ({ id: preset.id, bindingId:preset.id, name: preset.name, kind: 'appearance' as const, categories: ['appearance'] as BeautyCategory[], contents: '作者保存的桌面主题与搭配', revision: preset, attributionKey: async () => preset.id, read: async () => readBeautyPackage(new File([await onExport(preset.id)], 'preset.zip'), 'appearance') })),
@@ -390,8 +391,8 @@ export default function BeautyShareChannel({ presets, onExport, onImport, onBusy
     (onBack || closeApp)();
   };
   useLocalBackHandler(() => { goBack(); return true; }, 20);
-  if(page==='catalog')return <Suspense fallback={<p role="status" className="text-slate-700 p-4">正在打开装扮库…</p>}><BeautyCatalog onBack={()=>setPage('library')} onReceive={async(data,share)=>{await receive(data,share);setPage('library');}}/></Suspense>;
-  return <div className="beauty-wardrobe" style={trialActive ? {display:'none'} : undefined}>
+  if(page==='catalog')return <DecorationTrialContext.Provider value={trialContext}><Suspense fallback={<p role="status" className="text-slate-700 p-4">正在打开装扮库…</p>}><BeautyCatalog initialCategory={category} onBack={()=>setPage('library')} onReceive={async(data,share)=>{await receive(data,share);setPage('library');}}/></Suspense></DecorationTrialContext.Provider>;
+  return <DecorationTrialContext.Provider value={trialContext}><div className="beauty-wardrobe">
     <div className="wardrobe-navigation">
       <header className="wardrobe-topline">
         <button className="wardrobe-back" disabled={busy || applying} aria-label={page === 'library' ? initialCategory==='collaboration' ? '返回协同设置' : targetCharacterId ? '返回聊天' : '返回外观设置' : '返回我的装扮'} onClick={goBack}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 4-8 8 8 8"/></svg></button>
@@ -474,10 +475,10 @@ export default function BeautyShareChannel({ presets, onExport, onImport, onBusy
         {applyError && <p role="alert" className="text-sm text-red-600 mt-3">{applyError}</p>}
         <div className="flex justify-end gap-3 mt-5">
           <button disabled={applying} onClick={() => setReceived(null)} className="px-3 py-2 text-sm">暂不应用</button>
-          {received.kind === 'chat-decoration' && onTrial && targetCharacterId && !isAppDecoration(received.preset) && !received.preset.parts.story && !received.preset.parts.collaboration && <button disabled={applying || !target} onClick={() => void startTrial()} className="px-3 py-2 text-sm">先试用</button>}
+          {received.kind === 'chat-decoration' && onTrial && targetCharacterId && !isAppDecoration(received.preset) && !received.preset.parts.story && !received.preset.parts.collaboration && <button disabled={applying || !target} onClick={async () => { if (received.kind !== 'chat-decoration') return; setApplying(true); setApplyError(''); try { const preset = hasAvatarFrameCss(received.preset) && !hasSplitAvatarFrames(received.preset) ? withAvatarFrameTarget(received.preset, avatarTarget) : received.preset; await startTrial(preset, await readDecorationOrigin(await decorationSourceKey(received.preset))); } catch (error) { setApplyError(error instanceof Error ? error.message : '试用失败'); } finally { setApplying(false); } }} className="px-3 py-2 text-sm">先试用</button>}
           <button disabled={applying || (received.kind === 'chat-decoration' && !isAppDecoration(received.preset) && !received.preset.parts.story && !received.preset.parts.collaboration && !target)} onClick={applyReceived} className="px-4 py-2 rounded-xl bg-slate-800 text-white text-sm disabled:opacity-40">{applying ? '正在应用…' : received.kind === 'appearance' ? '应用并查看桌面' : '立即应用'}</button>
         </div>
       </div>
     </div>}
-  </div>;
+  </div></DecorationTrialContext.Provider>;
 }

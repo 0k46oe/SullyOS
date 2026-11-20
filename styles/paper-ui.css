@@ -20,6 +20,18 @@ html[data-paper-ui-style="sage-cream"] {
   --sp-active: #82966c;
 }
 
+/* Amsg uses authored CSS as well as utility classes, including nested pages and dialogs. */
+html[data-paper-ui-style="sage-cream"] [data-paper-ui],
+html[data-paper-ui-style="sage-cream"] .amsg-settings-entry-row {
+  --amsg-paper: var(--sp-paper); --amsg-paper-rgb: var(--sp-paper-rgb);
+  --amsg-surface: var(--sp-surface); --amsg-surface-rgb: var(--sp-surface-rgb);
+  --amsg-ink: var(--sp-ink); --amsg-ink-rgb: var(--sp-ink-rgb);
+  --amsg-muted: var(--sp-muted); --amsg-muted-rgb: var(--sp-muted-rgb);
+  --amsg-soft: var(--sp-green-soft); --amsg-soft-rgb: var(--sp-green-soft-rgb);
+  --amsg-line: var(--sp-line); --amsg-line-rgb: var(--sp-line-rgb);
+  --amsg-active: var(--sp-active); --amsg-active-rgb: 130, 150, 108;
+}
+
 /* Pixel scenes, user decoration previews and images keep their authored colors. */
 html[data-paper-ui-style="sage-cream"] [data-paper-ui-exempt] {
   --primary-hue: var(--sp-source-primary-hue);

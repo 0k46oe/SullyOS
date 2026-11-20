@@ -850,7 +850,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                             placeholder="Message..."
                             style={{ height: 'auto' }}
                         />
-                        <button hidden={compactHome} onClick={() => setShowPanel(showPanel === 'emojis' ? 'none' : 'emojis')} className={`p-2 shrink-0 ${isDiscordStyle ? 'text-slate-400 hover:text-sky-300' : isPixelStyle ? 'text-[#8f674a] hover:text-[#a16207]' : 'text-slate-400 hover:text-primary'}`}>
+                        <button hidden={compactHome} aria-label="表情" aria-expanded={showPanel === 'emojis'} onClick={() => setShowPanel(showPanel === 'emojis' ? 'none' : 'emojis')} className={`p-2 shrink-0 ${isDiscordStyle ? 'text-slate-400 hover:text-sky-300' : isPixelStyle ? 'text-[#8f674a] hover:text-[#a16207]' : 'text-slate-400 hover:text-primary'}`}>
                             <Smiley className="w-6 h-6" weight="regular" />
                         </button>
                     </div>
@@ -920,11 +920,6 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                     ))}
                                     <button onClick={() => onPanelAction('add-category')} className={categoryAddButtonClass}>+</button>
                                 </div>
-                                {onManageStickers && !compactHome && <button type="button" onClick={onManageStickers}
-                                    aria-label="打开表情库管理" title="管理表情库"
-                                    className="shrink-0 px-3 text-[10px] font-semibold text-slate-500 hover:text-primary border-l border-slate-200/60">
-                                    管理
-                                </button>}
                                 {emojiSelectionMode ? (
                                     <div
                                         className={`absolute inset-0 z-10 flex items-center justify-end px-3 ${
@@ -950,7 +945,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                     /* 编辑按钮占据独立列，滚动区在它左侧结束，末尾的 + 不会再被覆盖。 */
                                     <div className="flex h-10 shrink-0 items-center pl-1 pr-3">
                                         <button
-                                            onClick={(e) => { e.stopPropagation(); setEmojiSelectionMode(true); }}
+                                            onClick={(e) => { e.stopPropagation(); if (onManageStickers) onManageStickers(); else setEmojiSelectionMode(true); }}
                                             aria-label="批量管理表情"
                                             className={`w-6 h-6 rounded-full flex items-center justify-center transition-colors shadow-sm ${
                                                 isPixelStyle ? 'bg-[#c99872] text-[#fff7ed] hover:bg-[#b07d57]' :

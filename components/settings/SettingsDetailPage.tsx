@@ -42,6 +42,7 @@ export default function SettingsDetailPage({ isOpen, hidden = false, title, onCl
   return (
     <section
       ref={page}
+      data-paper-ui="amsg"
       role={embedded ? 'region' : 'dialog'}
       aria-modal={!embedded && visible || undefined}
       aria-labelledby={title ? titleId : undefined}

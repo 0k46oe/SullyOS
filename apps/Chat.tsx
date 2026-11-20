@@ -17,7 +17,6 @@ import { computeTimeSegmentStarts, startsNewMessageGroup, startsNewRoleSegment, 
 import StickerLibrary from '../components/chat/StickerLibrary';
 import ChatCharacterProfile from '../components/chat/ChatCharacterProfile';
 import { ChatTrialControls, type ChatDecorationTrial } from '../components/chat/ChatDecorationTrial';
-import { IdentificationCard } from '@phosphor-icons/react';
 import EmojiExportDialog from '../components/chat/EmojiExportDialog';
 import BlobRefStyle from '../components/chat/BlobRefStyle';
 import React, { useState, useEffect, useRef, useLayoutEffect, useMemo, useCallback, useSyncExternalStore } from 'react';
@@ -185,8 +184,9 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const osAppearanceFonts = useMemo(() => appearancePresets.flatMap(preset => preset.theme.customFont?.startsWith('data:')
         ? [{ name: preset.name, source: preset.theme.customFont }] : []), [appearancePresets]);
     const { activeApp, characters, activeCharacterId: osActiveCharacterId, setActiveCharacterId, addCharacter, updateCharacter, updateUserProfile, apiConfig, updateApiConfig, apiPresets, availableModels, addApiPreset, closeApp, openApp, customThemes, addCustomTheme, removeCustomTheme, addWorldbook, updateTheme, saveAppearancePreset, addToast, showError, userProfile, lastMsgTimestamp, groups, characterGroups, clearUnread, unreadMessages, realtimeConfig, memoryPalaceConfig, updateMemoryPalaceConfig, remoteVectorConfig, syncEmotionApiToAllCharacters, theme: baseOsTheme, proactiveComposingChars, openDateWithChar } = useOS();
-    const [decorationTrial, setDecorationTrial] = useState<ChatDecorationTrial | null>(null);
-    const liveTrial = !homePhone && activeApp === AppID.Chat ? decorationTrial : null;
+    const wardrobeCharacter = characters.find(c => c.id === osActiveCharacterId) || characters[0];
+    const [decorationTrial, setDecorationTrial] = useState<(ChatDecorationTrial & {ownerId: string}) | null>(null);
+    const liveTrial = !homePhone && activeApp === AppID.Chat && decorationTrial?.ownerId === wardrobeCharacter?.id && characters.some(c => c.id === decorationTrial?.characterId) ? decorationTrial : null;
     const activeCharacterId=homePhone?.characterId??liveTrial?.characterId??osActiveCharacterId;
     const savedCharacter = characters.find(c => c.id === activeCharacterId) || characters[0];
     const previewCharacter = liveTrial && savedCharacter?.id === liveTrial.characterId
@@ -280,8 +280,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
 
     const [modalType, setModalType] = useState<'none' | 'transfer' | 'emoji-import' | 'generate-image' | 'chat-settings' | 'message-options' | 'edit-message' | 'delete-emoji' | 'delete-category' | 'add-category' | 'history-manager' | 'archive-settings' | 'archive-legacy-warning' | 'prompt-editor' | 'category-options' | 'category-visibility' | 'emoji-options' | 'rename-emoji' | 'emoji-description' | 'rename-category' | 'schedule' | 'chrome-css' | 'chrome-sound' | 'memory-vectorize-confirm' | 'memory-vectorize-result'>('none');
     useEffect(() => {
-        if (decorationTrial && (modalType !== 'chrome-css' || activeApp !== AppID.Chat || homePhone)) setDecorationTrial(null);
-    }, [decorationTrial, modalType, activeApp, homePhone]);
+        if (decorationTrial && (modalType !== 'chrome-css' || !liveTrial)) setDecorationTrial(null);
+    }, [decorationTrial, modalType, liveTrial]);
     // 「聊天装扮」悬浮态：不走全屏 modal——圆气泡挂在聊天上，点开小面板边看真聊天边调。
     const [decorationTab, setDecorationTab] = useState<DecorationTab>('layout');
     // 切换角色时收掉装扮气泡：定制是 per-character 的，避免误改到下一个角色
@@ -392,6 +392,16 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const [showingTargetIds, setShowingTargetIds] = useState<Set<number>>(new Set());
 
     const char = previewCharacter;
+    const openCharacterProfile = useCallback(() => {
+        if (!char?.id || homePhone) return;
+        setShowPanel('none');
+        setProfileOpen(true);
+    }, [char?.id, !!homePhone]);
+    const openStickerManager = useCallback(() => {
+        setShowPanel('none');
+        setStickerManagerOpen(true);
+    }, []);
+    useEffect(() => { setProfileOpen(false); setStickerManagerOpen(false); }, [char?.id]);
     useEffect(() => { setMeetingHistory([]); }, [activeCharacterId]);
     useEffect(() => {
         let active = true;
@@ -4209,6 +4219,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                             isLastInGroup={breaksWithNext}
                             activeTheme={activeTheme}
                             charAvatar={char.avatar}
+                            onOpenCharacterProfile={homePhone ? undefined : openCharacterProfile}
                             charName={char.name}
                             userAvatar={userProfile.perCharAvatars?.[char.id] || userProfile.avatar}
                             entryAvatarPriority={entryAvatarPriority}
@@ -4307,6 +4318,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                                     isLastInGroup={i === streamingBubbles.length - 1}
                                     activeTheme={activeTheme}
                                     charAvatar={char.avatar}
+                                    onOpenCharacterProfile={homePhone ? undefined : openCharacterProfile}
                                     charName={char.name}
                                     userAvatar={userProfile.perCharAvatars?.[char.id] || userProfile.avatar}
                                     onLongPress={() => {}}
@@ -4333,7 +4345,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 {/* instantChatPending：这一轮在云端跑，本机可以关页面，指示灯靠落盘记录活着。 */}
                 {(isTyping || instantChatPending || recallStatus || searchStatus || diaryStatus) && !selectionMode && (
                     <div className="flex items-end gap-3 px-3 mb-6 animate-fade-in">
-                        <TokenImg value={char.avatar} className={chatPendingAvatarClass} />
+                        <button type="button" onClick={openCharacterProfile} aria-label={char.name + "的角色名片"} className="shrink-0"><TokenImg value={char.avatar} className={chatPendingAvatarClass} /></button>
                         <div className="bg-white px-4 py-3 rounded-2xl shadow-sm">
                             {inboxStatus ? (
                                 <div role="status" className="flex items-center gap-2 text-xs text-slate-500 font-medium">
@@ -4446,7 +4458,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                     emojis={filteredEmojis}
                     emojiSuggestionsEnabled={inputPreferences.emojiSuggestions}
                     suggestionEmojis={aiVisibleEmojis}
-                    onManageStickers={homePhone ? undefined : () => { setShowPanel('none'); setStickerManagerOpen(true); }}
+                    onManageStickers={homePhone ? undefined : openStickerManager}
                     characters={characters} activeCharacterId={activeCharacterId}
                     onCharSelect={handleCharSelectCallback}
                     unreadMessages={unreadMessages}
@@ -4896,7 +4908,6 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 triggerIcon={isTyping || instantChatPending ? 'stop' : 'lightning'}
                 hideTrigger={inputPreferences.sendButtonGenerates}
                 onShowCharsPanel={() => setShowPanel('chars')}
-                extraAction={{ label: '角色名片', icon: <IdentificationCard size={20} />, onClick: () => { setShowPanel('none'); setProfileOpen(true); } }}
                 onDeleteBuff={(buffId) => {
                     const currentBuffs = char.activeBuffs || [];
                     updateCharacter(char.id, { activeBuffs: currentBuffs.filter(b => b.id !== buffId), buffInjection: '' });
@@ -4991,6 +5002,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                             isLastInGroup={breaksWithNext}
                             activeTheme={activeTheme}
                             charAvatar={char.avatar}
+                            onOpenCharacterProfile={homePhone ? undefined : openCharacterProfile}
                             charName={char.name}
                             userAvatar={userProfile.perCharAvatars?.[char.id] || userProfile.avatar}
                             entryAvatarPriority={entryAvatarPriority}
@@ -5091,6 +5103,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                                     isLastInGroup={i === streamingBubbles.length - 1}
                                     activeTheme={activeTheme}
                                     charAvatar={char.avatar}
+                                    onOpenCharacterProfile={homePhone ? undefined : openCharacterProfile}
                                     charName={char.name}
                                     userAvatar={userProfile.perCharAvatars?.[char.id] || userProfile.avatar}
                                     onLongPress={() => {}}
@@ -5119,7 +5132,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 {/* instantChatPending：这一轮在云端跑，本机可以关页面，指示灯靠落盘记录活着。 */}
                 {(isTyping || instantChatPending || recallStatus || searchStatus || diaryStatus || isProactiveComposing) && !selectionMode && (
                     <div className="flex items-end gap-3 px-3 mb-6 animate-fade-in">
-                        <TokenImg value={char.avatar} className={chatPendingAvatarClass} />
+                        <button type="button" onClick={openCharacterProfile} aria-label={char.name + "的角色名片"} className="shrink-0"><TokenImg value={char.avatar} className={chatPendingAvatarClass} /></button>
                         <div className="bg-white px-4 py-3 rounded-2xl shadow-sm">
                             {inboxStatus ? (
                                 <div role="status" className="flex items-center gap-2 text-xs text-slate-500 font-medium">
@@ -5235,6 +5248,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                     emojis={filteredEmojis}
                     emojiSuggestionsEnabled={inputPreferences.emojiSuggestions}
                     suggestionEmojis={aiVisibleEmojis}
+                    onManageStickers={homePhone ? undefined : openStickerManager}
                     characters={characters} activeCharacterId={activeCharacterId}
                     onCharSelect={handleCharSelectCallback}
                     unreadMessages={unreadMessages}
@@ -5368,9 +5382,9 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             )}
 
             {char && modalType === 'chrome-css' && <ChatAppearanceWardrobe
-                key={`appearance-wardrobe:${char.id}`}
-                onTrial={setDecorationTrial} trialActive={!!liveTrial}
-                character={char} theme={baseOsTheme} onSaveBubble={addCustomTheme} themes={[...Object.values(PRESET_THEMES), ...customThemes]}
+                key={`appearance-wardrobe:${wardrobeCharacter?.id || char.id}`}
+                onTrial={homePhone ? undefined : next => setDecorationTrial({...next, ownerId: wardrobeCharacter.id})} trialActive={!!liveTrial}
+                character={homePhone ? char : wardrobeCharacter} theme={baseOsTheme} onSaveBubble={addCustomTheme} themes={[...Object.values(PRESET_THEMES), ...customThemes]}
                 initialTab={decorationTab} updateCharacter={patch=>updateCharacter(char.id,patch)}
                 updateTheme={updateTheme} onBgUpload={handleBgUpload} backgroundUrl={resolvedChatBackground}
                 onOpenWorkshop={()=>{setModalType('none');openApp(AppID.ThemeMaker);}}

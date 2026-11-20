@@ -1164,6 +1164,7 @@ interface MessageItemProps {
     isLastInGroup: boolean;
     activeTheme: ChatTheme;
     charAvatar: string;
+    onOpenCharacterProfile?: () => void;
     charName: string;
     userAvatar: string;
     /** 当前窗口里的最后一条消息；最新图片需要立即解码，避免移动端懒加载卡在滚动容器底部。 */
@@ -1242,6 +1243,7 @@ const MessageItem = React.memo(({
     isLastInGroup,
     activeTheme,
     charAvatar,
+    onOpenCharacterProfile,
     charName,
     userAvatar,
     isLatestMessage = false,
@@ -1501,8 +1503,16 @@ const MessageItem = React.memo(({
         // 组首的白框头像是另一份隐藏副本，不应抢占登场阶段的图片优先级或阻塞可见头像解码。
         const prioritizeEntryAvatar = entryAvatarPriority &&
             options?.className !== 'sully-chat-turn-avatar' && isImageValue(src);
+        const opensProfile = visible && !isUser && !selectionMode && !!onOpenCharacterProfile;
+        const Wrap = opensProfile ? 'button' : 'div';
         return (
-            <div className={`${visible ? 'sully-chat-avatar-wrap' : ''} relative ${avatarSizeClass} z-0 ${options?.className || ''}`}>
+            <Wrap type={opensProfile ? 'button' : undefined}
+                aria-label={opensProfile ? `查看${charName}的角色名片` : undefined}
+                onPointerDown={opensProfile ? event => event.stopPropagation() : undefined}
+                onTouchStart={opensProfile ? event => event.stopPropagation() : undefined}
+                onMouseDown={opensProfile ? event => event.stopPropagation() : undefined}
+                onClick={opensProfile ? event => { event.stopPropagation(); onOpenCharacterProfile?.(); } : undefined}
+                className={`${visible ? 'sully-chat-avatar-wrap' : ''} relative ${avatarSizeClass} z-0 ${options?.className || ''}`}>
                 {visible && (
                     <>
                         <TokenImg
@@ -1543,7 +1553,7 @@ const MessageItem = React.memo(({
                         )}
                     </>
                 )}
-            </div>
+            </Wrap>
         );
     };
 
@@ -3845,6 +3855,7 @@ const MessageItem = React.memo(({
            prev.isLastInGroup === next.isLastInGroup &&
            prev.activeTheme === next.activeTheme &&
            prev.charAvatar === next.charAvatar &&
+           prev.onOpenCharacterProfile === next.onOpenCharacterProfile &&
            prev.charName === next.charName &&
            prev.userAvatar === next.userAvatar &&
            prev.isLatestMessage === next.isLatestMessage &&

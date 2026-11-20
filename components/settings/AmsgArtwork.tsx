@@ -21,10 +21,10 @@ export function AmsgIcon({ name, className = '' }: { name: 'message' | 'layers' 
 export function AmsgNotificationArt() {
   const id = useId().replace(/:/g, '');
   return <svg className="amsg-notification-art" viewBox="0 0 220 160" fill="none" aria-hidden="true">
-    <defs><linearGradient id={`${id}-paper`} x1="65" y1="62" x2="152" y2="127" gradientUnits="userSpaceOnUse"><stop stopColor="#e9dbff" /><stop offset="1" stopColor="#c8a5ee" stopOpacity=".5" /></linearGradient><linearGradient id={`${id}-bell`} x1="132" y1="26" x2="159" y2="80"><stop stopColor="#f2e9ff" /><stop offset="1" stopColor="#d9c0f7" /></linearGradient></defs>
-    <ellipse cx="112" cy="96" rx="103" ry="27" transform="rotate(-14 112 96)" stroke="#cfb4f6" strokeWidth="1.8" />
-    <g transform="rotate(-10 111 93)"><rect x="60" y="61" width="104" height="70" rx="8" fill={`url(#${id}-paper)`} stroke="#b18bdc" strokeWidth="2" /><path d="m63 65 42 36a10 10 0 0 0 13 0l43-36M63 128l35-32m63 32-34-32" stroke="#bba0df" strokeWidth="2" /></g>
-    <path d="M140 37c-1-10 7-15 8-6 14 0 21 10 21 25 0 10 5 14 8 17 3 5-7 7-19 7s-26 1-26-5 8-10 8-20V37Z" fill={`url(#${id}-bell)`} stroke="#a474d7" strokeWidth="2.5" strokeLinejoin="round" /><path d="M151 81c1 7 10 7 11 0" stroke="#a474d7" strokeWidth="2.5" />
-    <g fill="#b68ce6"><path d="m33 45 2 7 6 2-6 2-2 7-2-7-6-2 6-2Z" /><path d="m182 15 2 7 6 2-6 2-2 7-2-7-6-2 6-2Z" /><path d="m192 120 2 6 5 2-5 2-2 6-2-6-5-2 5-2Z" /></g>
+    <defs><linearGradient id={`${id}-paper`} x1="65" y1="62" x2="152" y2="127" gradientUnits="userSpaceOnUse"><stop stopColor="var(--amsg-soft, #e9dbff)" /><stop offset="1" stopColor="var(--amsg-soft, #c8a5ee)" stopOpacity=".5" /></linearGradient><linearGradient id={`${id}-bell`} x1="132" y1="26" x2="159" y2="80"><stop stopColor="var(--amsg-soft, #f2e9ff)" /><stop offset="1" stopColor="var(--amsg-soft, #d9c0f7)" /></linearGradient></defs>
+    <ellipse cx="112" cy="96" rx="103" ry="27" transform="rotate(-14 112 96)" stroke="var(--amsg-active, #cfb4f6)" strokeWidth="1.8" />
+    <g transform="rotate(-10 111 93)"><rect x="60" y="61" width="104" height="70" rx="8" fill={`url(#${id}-paper)`} stroke="var(--amsg-active, #b18bdc)" strokeWidth="2" /><path d="m63 65 42 36a10 10 0 0 0 13 0l43-36M63 128l35-32m63 32-34-32" stroke="var(--amsg-active, #bba0df)" strokeWidth="2" /></g>
+    <path d="M140 37c-1-10 7-15 8-6 14 0 21 10 21 25 0 10 5 14 8 17 3 5-7 7-19 7s-26 1-26-5 8-10 8-20V37Z" fill={`url(#${id}-bell)`} stroke="var(--amsg-active, #a474d7)" strokeWidth="2.5" strokeLinejoin="round" /><path d="M151 81c1 7 10 7 11 0" stroke="var(--amsg-active, #a474d7)" strokeWidth="2.5" />
+    <g fill="var(--amsg-active, #b68ce6)"><path d="m33 45 2 7 6 2-6 2-2 7-2-7-6-2 6-2Z" /><path d="m182 15 2 7 6 2-6 2-2 7-2-7-6-2 6-2Z" /><path d="m192 120 2 6 5 2-5 2-2 6-2-6-5-2 5-2Z" /></g>
   </svg>;
 }

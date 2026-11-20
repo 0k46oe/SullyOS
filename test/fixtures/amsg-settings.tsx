@@ -11,6 +11,7 @@ import { OSProvider } from '../../context/OSContext';
 import Settings from '../../apps/Settings';
 import InstantChatSendHelp from '../../components/chat/InstantChatSendHelp';
 import SendProgressPreview from './chat-send-progress';
+import '../../styles/paper-ui.css';
 
 const params = new URLSearchParams(location.search);
 const characterGroups = [{ id: 'friends', name: '朋友', order: 0 }, { id: 'story', name: '故事', order: 1 }, { id: 'empty', name: '空分类', order: 2 }];
