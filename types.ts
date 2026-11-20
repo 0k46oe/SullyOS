@@ -206,6 +206,7 @@ export interface OSTheme {
   /** 聊天「白框」自定义 CSS：作用于 .sully-chat-root 下的顶栏、输入栏与消息布局钩子。
    *  可换色 / 贴图 / 改外形 / 挪位；稳定选择器清单见 ChromeCssEditor。 */
   chatChromeCustomCss?: string;
+  chatProfileAppearance?: import('./utils/chatProfileAppearance').ChatProfileAppearance;
   /** 心象外观的全局默认值；不包含显示开关或生成提示词。 */
   chatPsyche?: import('./utils/psycheAppearance').PsycheAppearance;
   /** 全局默认「白框提示音」：某角色未单独设提示音时回落到这里。src 同角色版（内置 key / 音频直链 / data:audio）。 */
@@ -2840,6 +2841,9 @@ export interface TavernStoryTimeConfig {
 }
 
 export interface CharacterProfile {
+  /** Send this character's stickers with optional vision descriptions. */
+  stickerVision?: boolean;
+  chatProfileAppearance?: import('./utils/chatProfileAppearance').ChatProfileAppearance;
   userPersona?: import('./utils/userPersona').CharacterUserPersona;
   /** Local default for this character's dialogue; absent means follow Settings. Never shared in cards. */
   dialogueApi?: DialogueApiConfig;
@@ -4054,6 +4058,7 @@ export interface Message {
 }
 
 export interface EmojiCategory {
+    personalOnly?: boolean;
     id: string;
     name: string;
     isSystem?: boolean;
@@ -4061,6 +4066,7 @@ export interface EmojiCategory {
 }
 
 export interface Emoji {
+    contentHash?: string;
     name: string;
     url: string;
     categoryId?: string;

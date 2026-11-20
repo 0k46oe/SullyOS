@@ -51,6 +51,7 @@ interface ChatInputAreaProps {
     emojiSuggestionsEnabled?: boolean;
     /** Visible library across all categories; also invalidates removed/replaced cached thumbnails. */
     suggestionEmojis?: Emoji[];
+    onManageStickers?: () => void;
     /** 以下会话切换/主题 props 仅私聊使用；群聊等复用方不传（'chars' 面板不会被打开） */
     characters?: CharacterProfile[];
     activeCharacterId?: string;
@@ -97,7 +98,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     sendButtonGenerates = false, enterToSend = true, onGenerate,
     autoReplyEnabled = false, autoReplySeconds = null, onCancelAutoReply, onInputFocusChange,
     emojis, characters = [], activeCharacterId = '', onCharSelect = () => {},
-    emojiSuggestionsEnabled = false, suggestionEmojis = emojis,
+    emojiSuggestionsEnabled = false, suggestionEmojis = emojis, onManageStickers,
     unreadMessages = {},
     customThemes = [], onUpdateTheme = () => {}, onRemoveTheme = () => {}, activeThemeId = '',
     actionsContent,
@@ -919,6 +920,11 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                                     ))}
                                     <button onClick={() => onPanelAction('add-category')} className={categoryAddButtonClass}>+</button>
                                 </div>
+                                {onManageStickers && !compactHome && <button type="button" onClick={onManageStickers}
+                                    aria-label="打开表情库管理" title="管理表情库"
+                                    className="shrink-0 px-3 text-[10px] font-semibold text-slate-500 hover:text-primary border-l border-slate-200/60">
+                                    管理
+                                </button>}
                                 {emojiSelectionMode ? (
                                     <div
                                         className={`absolute inset-0 z-10 flex items-center justify-end px-3 ${

@@ -69,6 +69,7 @@ import { exportUserLocationSettings } from '../utils/userLocationBackup';
 import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedResponse } from '../utils/streamUpgrade';
 import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
 import { buildFetchFailureDetail, classifyFetchFailure, describeReachabilityProbe, parseTargetUrl, probeOriginReachability, shouldProbeReachability, summarizeFetchRequestBody } from '../utils/networkFailureDiagnosis';
+import { captureCallerHint, identifyApplicationErrorSource, identifyNetworkRequestSource, redactRelayTokensInText } from '../utils/networkRequestSource';
 import { INSTALLED_APPS, HIDDEN_APP_NAMES } from '../constants';
 import { isAnalyticsRequestUrl, trackEvent, shouldReportSnapshot, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, trackCurrentFeaturesOnce, trackCurrentSARFeaturesOnce } from '../utils/analytics';
 import { loadChatInputPreferences, saveChatInputPreferences } from '../utils/chatInputPreferences';
@@ -1343,18 +1344,18 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                               id: `log-${Date.now()}`,
                               timestamp: Date.now(),
                               type: 'network',
-                              source: 'API Request',
+                              source: identifyNetworkRequestSource({ url: urlStr, method, body: (sendArgs[1] as any)?.body, explicitMeta: (sendArgs[1] as any)?.__sullyMeta, ambientMeta: ambientMetaAtStart }).source,
                               message: `HTTP ${response.status} Error`,
-                              detail: `URL: ${urlStr}\nResponse: ${text.substring(0, 500)}${reqSummary}`
+                              detail: redactRelayTokensInText(`URL: ${urlStr}\nResponse: ${text.substring(0, 500)}${reqSummary}`)
                           }, ...prev.slice(0, 49)]); // Keep last 50
                       } catch (e) {
                           setSystemLogs(prev => [{
                               id: `log-${Date.now()}`,
                               timestamp: Date.now(),
                               type: 'network',
-                              source: 'API Request',
+                              source: identifyNetworkRequestSource({ url: urlStr, method, body: (sendArgs[1] as any)?.body, explicitMeta: (sendArgs[1] as any)?.__sullyMeta, ambientMeta: ambientMetaAtStart }).source,
                               message: `HTTP ${response.status} (Unreadable Body)`,
-                              detail: `URL: ${urlStr}`
+                              detail: redactRelayTokensInText(`URL: ${urlStr}`)
                           }, ...prev.slice(0, 49)]);
                       }
                   }
@@ -1376,8 +1377,15 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   // 完全相反，不分开的话用户只能瞎试。详见 utils/networkFailureDiagnosis.ts。
                   const logId = `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
                   const requestMeta = (sendArgs[1] as any)?.__sullyMeta || ambientMetaAtStart;
+                  const requestSource = identifyNetworkRequestSource({
+                      url: urlStr,
+                      method,
+                      body: (sendArgs[1] as any)?.body,
+                      explicitMeta: (sendArgs[1] as any)?.__sullyMeta,
+                      ambientMeta: ambientMetaAtStart,
+                  });
                   const recentSuccess = recentSuccessfulFetches.get(requestComparisonKey);
-                  const baseDetail = buildFetchFailureDetail({
+                  const baseDetail = redactRelayTokensInText(buildFetchFailureDetail({
                       url: urlStr,
                       method,
                       durationMs: Date.now() - fetchStartedAt,
@@ -1385,13 +1393,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       requestSummary: summarizeFetchRequestBody((sendArgs[1] as any)?.body),
                       requestPurpose: requestMeta?.purpose,
                       recentSuccessfulSameRequest: recentSuccess,
-                  }, { startedAt: fetchStartedAtPerf });
+                  }, { startedAt: fetchStartedAtPerf }));
                   setSystemLogs(prev => [{
                       id: logId,
                       timestamp: Date.now(),
                       type: 'network',
-                      source: 'Network',
-                      message: err.message || 'Fetch Failed',
+                      source: requestSource.source,
+                      message: redactRelayTokensInText(err.message || 'Fetch Failed'),
                       detail: baseDetail,
                   }, ...prev.slice(0, 49)]);
 
@@ -1428,7 +1436,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
       const originalConsoleError = console.error;
       console.error = (...args) => {
-          const msg = args.map(a => (a instanceof Error ? a.message : String(a))).join(' ');
+          const rawMsg = args.map(a => (a instanceof Error ? a.message : String(a))).join(' ');
+          const msg = redactRelayTokensInText(rawMsg);
           // MediaPipe/TFLite 把这条成功初始化信息写到了 stderr，浏览器因而走
           // console.error；改回 info，避免系统日志把“CPU 加速创建成功”报成红色错误。
           if (isBenignApplicationConsoleMessage(msg)) {
@@ -1451,9 +1460,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               id: `log-${Date.now()}-${Math.random()}`,
               timestamp: Date.now(),
               type: 'error',
-              source: 'Application',
+              source: identifyApplicationErrorSource(msg, getApiCallAmbientContext(), captureCallerHint()),
               message: msg.substring(0, 100),
-              detail: stacks || msg
+              detail: redactRelayTokensInText(stacks || msg)
           }, ...prev.slice(0, 49)]);
       };
   }, []);

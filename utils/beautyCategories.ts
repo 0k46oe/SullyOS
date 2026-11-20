@@ -1,5 +1,5 @@
 import type { DecorationPreset } from './chatDecoration';
-export const BEAUTY_CATEGORIES = [['all', '全部'], ['appearance', '桌面主题'], ['chat', '全部聊天'], ['whitebox', '白框'], ['bubbles', '气泡'], ['avatar', '头像框'], ['background', '聊天背景'], ['psyche', '心象'], ['sound', '提示音'], ['collaboration', '协同工作'], ['date', '见面界面'], ['story', '剧情界面'], ['schedule', '日程表'], ['journal', '交换日记']] as const;
+export const BEAUTY_CATEGORIES = [['all', '全部'], ['appearance', '桌面主题'], ['chat', '全部聊天'], ['whitebox', '白框'], ['bubbles', '气泡'], ['avatar', '头像框'], ['background', '聊天背景'], ['psyche', '心象'], ['profile', '角色名片'], ['sound', '提示音'], ['collaboration', '协同工作'], ['date', '见面界面'], ['story', '剧情界面'], ['schedule', '日程表'], ['journal', '交换日记']] as const;
 export type BeautyCategory = typeof BEAUTY_CATEGORIES[number][0];
 /** Classify structured content only. Never try to split or infer the scope of arbitrary CSS. */
 export function decorationCategories(preset: DecorationPreset): BeautyCategory[] {
@@ -7,6 +7,7 @@ export function decorationCategories(preset: DecorationPreset): BeautyCategory[]
   const extraCss=(p.css||'').replace(/\/\* sully-composer:(avatar|background) \*\/[\s\S]*?\/\* end-sully-composer:\1 \*\//g,'').trim();
   if (p.layout || extraCss || Object.keys(p).filter(key=>key!=='css').length > 1) categories.push('whitebox');
   if (p.psyche) categories.push('psyche');
+  if (p.profile) categories.push('profile');
   if (p.bubbles) categories.push('bubbles');
   if (p.bubbles?.user.avatarDecoration || p.bubbles?.ai.avatarDecoration || p.css?.includes('/* sully-composer:avatar */')) categories.push('avatar');
   if (p.background || p.css?.includes('/* sully-composer:background */')) categories.push('background');
@@ -19,6 +20,7 @@ export function decorationContents(preset: DecorationPreset): string {
   if (p.journal) labels.push('交换日记（全局）');
   if (p.schedule) labels.push('日程表（全局）');
   if (p.psyche) labels.push('心象');
+  if (p.profile) labels.push('角色名片');
   if (p.layout) labels.push('界面布局');
   if (p.bubbles) labels.push('气泡');
   if (p.bubbles?.user.avatarDecoration || p.bubbles?.ai.avatarDecoration || p.css?.includes('/* sully-composer:avatar */')) labels.push('头像框');

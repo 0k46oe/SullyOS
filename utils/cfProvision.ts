@@ -338,6 +338,9 @@ export function explainCfError(status: number, body: unknown, request?: string):
 
   const explain = (): string => {
     if (code === 6003 || code === 6111) return 'Token 格式不对，多半是复制时多带了空格或换行。';
+    if (code === 1000) {
+      return 'Cloudflare 不认这枚 Token。检查是否粘贴完整或仍有效；确认无误后，请重新创建一枚以 cfut_ 开头的用户 API Token。';
+    }
     if (code === 9109 || code === 10000 || status === 401 || status === 403) return PERMISSION_HINT;
     if (code === 10016) return 'Worker 名字不合法。';
     if (code === 10027) return 'Worker 代码超过 Cloudflare 的体积上限，装不上去。';
@@ -523,7 +526,7 @@ export async function verifyToken(
       code: 'TOKEN_INVALID',
       message:
         '这是一枚账号令牌（cfat_ 开头），这里用不了。'
-        + '去 Cloudflare 右上角头像 → My Profile → API Tokens 建一枚普通的 API Token，'
+        + '去 Cloudflare 右上角头像 → My Profile → API Tokens 建一枚普通的用户 API Token（cfut_ 开头），'
         + '建的时候在 Account Resources 里选上你要装到的那个账号就行。',
     };
   }

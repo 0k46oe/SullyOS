@@ -582,8 +582,6 @@ const Settings: React.FC = () => {
   const [editPresetCustomTemperature, setEditPresetCustomTemperature] = useState(false);
   const [editPresetOpenaiPromptCache, setEditPresetOpenaiPromptCache] = useState(true);
   const [editPresetMaxTokens, setEditPresetMaxTokens] = useState(8000);
-  const [holdingDeletePresetId, setHoldingDeletePresetId] = useState<string | null>(null);
-  const presetDeleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
   // UI States
   const [showModelModal, setShowModelModal] = useState(false);
@@ -1092,7 +1090,6 @@ const Settings: React.FC = () => {
   };
 
   const openEditPreset = (preset: typeof apiPresets[0]) => {
-      cancelPresetDeleteHold();
       const isActive = activePresetId === preset.id;
       setEditingPresetId(preset.id);
       setEditPresetName(preset.name);
@@ -1148,48 +1145,19 @@ const Settings: React.FC = () => {
       addToast(wasActive ? `「${name}」已更新，当前配置同步生效` : `「${name}」已更新`, 'success');
   };
 
-  const cancelPresetDeleteHold = useCallback(() => {
-      if (presetDeleteTimerRef.current) {
-          clearTimeout(presetDeleteTimerRef.current);
-          presetDeleteTimerRef.current = null;
-      }
-      setHoldingDeletePresetId(null);
-  }, []);
-
-  useEffect(() => () => {
-      if (presetDeleteTimerRef.current) clearTimeout(presetDeleteTimerRef.current);
-  }, []);
-
   // 删预设只是把这张「存档卡」扔掉：当前生效的配置是拷贝，不受影响。
-  const deleteApiPreset = (id: string, name: string) => {
-      cancelPresetDeleteHold();
-      const wasActive = activePresetId === id;
-      removeApiPreset(id);
-      setEditingPresetId(current => (current === id ? null : current));
+  const deleteEditedPreset = () => {
+      const preset = apiPresets.find(item => item.id === editingPresetId);
+      if (!preset || !window.confirm(`确定删除预设「${preset.name}」？`)) return;
+      const wasActive = activePresetId === preset.id;
+      removeApiPreset(preset.id);
+      setEditingPresetId(null);
       addToast(
           wasActive
-              ? `已删除预设: ${name}（当前生效配置未清空，如需停用请修改下方地址或密钥）`
-              : `已删除预设: ${name}`,
+              ? `已删除预设「${preset.name}」（当前生效配置未清空，如需停用请修改下方地址或密钥）`
+              : `已删除预设「${preset.name}」`,
           'success',
       );
-  };
-
-  const beginPresetDeleteHold = (id: string, name: string) => {
-      cancelPresetDeleteHold();
-      setHoldingDeletePresetId(id);
-      presetDeleteTimerRef.current = setTimeout(() => {
-          presetDeleteTimerRef.current = null;
-          setHoldingDeletePresetId(null);
-          const wasActive = activePresetId === id;
-          removeApiPreset(id);
-          setEditingPresetId(current => (current === id ? null : current));
-          addToast(
-              wasActive
-                  ? `已删除预设: ${name}（当前生效配置未清空，如需停用请修改下方地址或密钥）`
-                  : `已删除预设: ${name}`,
-              'success',
-          );
-      }, 700);
   };
 
   const handleSavePreset = () => {
@@ -2677,24 +2645,15 @@ const Settings: React.FC = () => {
                                 </button>
                                 <button
                                     type="button"
-                                    aria-label={`长按或双击删除预设 ${preset.name}`}
-                                    title="长按或双击删除"
-                                    onPointerDown={(event) => { event.stopPropagation(); beginPresetDeleteHold(preset.id, preset.name); }}
-                                    onPointerUp={cancelPresetDeleteHold}
-                                    onPointerCancel={cancelPresetDeleteHold}
-                                    onPointerLeave={cancelPresetDeleteHold}
-                                    onDoubleClick={(event) => { event.stopPropagation(); deleteApiPreset(preset.id, preset.name); }}
-                                    onContextMenu={(event) => event.preventDefault()}
-                                    className={`p-1 rounded-full transition-colors select-none touch-none ${
-                                        holdingDeletePresetId === preset.id
-                                            ? 'bg-red-100 text-red-500 scale-110'
-                                            : 'text-slate-300 hover:bg-red-50 hover:text-red-400'
-                                    }`}>
+                                    aria-label={`管理预设 ${preset.name}`}
+                                    title="编辑和管理预设"
+                                    onClick={(event) => { event.stopPropagation(); openEditPreset(preset); }}
+                                    className="p-1 rounded-full text-slate-300 hover:bg-primary/10 hover:text-primary transition-colors">
                                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
                                 </button>
                             </div>
                         )}</ApiPresetGroups>
-                    <p className="text-[9px] text-slate-300 mt-1.5 pl-1">点名称直接切换并生效；铅笔改这条预设的内容；长按或双击 × 才会删除。</p>
+                    <p className="text-[9px] text-slate-300 mt-1.5 pl-1">点名称直接切换并生效；编辑按钮打开预设管理。</p>
                 </div>
             )}
 
@@ -4211,6 +4170,9 @@ const Settings: React.FC = () => {
           footer={<button onClick={handleUpdatePreset} className="w-full py-3 bg-primary text-white font-bold rounded-2xl">保存</button>}
       >
           <div className="space-y-3">
+              <div className="flex justify-end">
+                  <button type="button" onClick={deleteEditedPreset} className="rounded-xl px-3 py-2 text-sm text-red-600 hover:bg-red-50">删除预设</button>
+              </div>
               <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">名称</label>
                   <input value={editPresetName} onChange={e => setEditPresetName(e.target.value)} placeholder="预设名称" className="w-full bg-slate-100 rounded-xl px-4 py-2.5 text-sm focus:outline-primary" />

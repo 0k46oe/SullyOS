@@ -14,6 +14,10 @@ import {resolvePsycheAppearance} from '../utils/psycheAppearance';
 import { translateThinkingMessage } from '../utils/thinkingTranslation';
 import { resolveDialogueApi } from '../utils/characterApi';
 import { computeTimeSegmentStarts, startsNewMessageGroup, startsNewRoleSegment, startsNewTimeSegment } from '../utils/chatMessageGrouping';
+import StickerLibrary from '../components/chat/StickerLibrary';
+import ChatCharacterProfile from '../components/chat/ChatCharacterProfile';
+import { ChatTrialControls, type ChatDecorationTrial } from '../components/chat/ChatDecorationTrial';
+import { IdentificationCard } from '@phosphor-icons/react';
 import EmojiExportDialog from '../components/chat/EmojiExportDialog';
 import BlobRefStyle from '../components/chat/BlobRefStyle';
 import React, { useState, useEffect, useRef, useLayoutEffect, useMemo, useCallback, useSyncExternalStore } from 'react';
@@ -181,10 +185,16 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const osAppearanceFonts = useMemo(() => appearancePresets.flatMap(preset => preset.theme.customFont?.startsWith('data:')
         ? [{ name: preset.name, source: preset.theme.customFont }] : []), [appearancePresets]);
     const { activeApp, characters, activeCharacterId: osActiveCharacterId, setActiveCharacterId, addCharacter, updateCharacter, updateUserProfile, apiConfig, updateApiConfig, apiPresets, availableModels, addApiPreset, closeApp, openApp, customThemes, addCustomTheme, removeCustomTheme, addWorldbook, updateTheme, saveAppearancePreset, addToast, showError, userProfile, lastMsgTimestamp, groups, characterGroups, clearUnread, unreadMessages, realtimeConfig, memoryPalaceConfig, updateMemoryPalaceConfig, remoteVectorConfig, syncEmotionApiToAllCharacters, theme: baseOsTheme, proactiveComposingChars, openDateWithChar } = useOS();
-    const activeCharacterId=homePhone?.characterId??osActiveCharacterId;
+    const [decorationTrial, setDecorationTrial] = useState<ChatDecorationTrial | null>(null);
+    const liveTrial = !homePhone && activeApp === AppID.Chat ? decorationTrial : null;
+    const activeCharacterId=homePhone?.characterId??liveTrial?.characterId??osActiveCharacterId;
+    const savedCharacter = characters.find(c => c.id === activeCharacterId) || characters[0];
+    const previewCharacter = liveTrial && savedCharacter?.id === liveTrial.characterId
+        ? { ...savedCharacter, ...liveTrial.patch }
+        : savedCharacter;
     const isProactiveComposing = !!(activeCharacterId && proactiveComposingChars[activeCharacterId]);
     const sendProgress = useSyncExternalStore(subscribeChatSendProgress, () => getChatSendProgress(activeCharacterId), () => null);
-    const osTheme = useMemo(()=>homePhone?homePhoneAppearance(baseOsTheme):resolveDecorationTheme(baseOsTheme,characters.find(c=>c.id===activeCharacterId)||characters[0]),[baseOsTheme,characters,activeCharacterId,!!homePhone]);
+    const osTheme = useMemo(()=>homePhone?homePhoneAppearance(baseOsTheme):resolveDecorationTheme(baseOsTheme,previewCharacter),[baseOsTheme,previewCharacter,!!homePhone]);
     const localDateKey = useLocalDateKey();
 
     // 记忆宫殿高水位（用于清空聊天时的安全检查）
@@ -224,6 +234,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const [collaborationOpen, setCollaborationOpen] = useState(false);
     const [collaborationPreviewAssetId, setCollaborationPreviewAssetId] = useState<string | null>(null);
     const [memoryRepairOpen, setMemoryRepairOpen] = useState(false);
+    const [profileOpen, setProfileOpen] = useState(false);
     const [favoritesOpen, setFavoritesOpen] = useState(false);
     
     // Emoji State
@@ -232,6 +243,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const [activeCategory, setActiveCategory] = useState<string>('default');
     const [newCategoryName, setNewCategoryName] = useState('');
     const [emojiExport, setEmojiExport] = useState<{ emojis: Emoji[]; title: string } | null>(null);
+    const [stickerManagerOpen, setStickerManagerOpen] = useState(false);
     const [newEmojiName, setNewEmojiName] = useState(''); // 表情包重命名输入框
 
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -267,6 +279,9 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const [replyTarget, setReplyTarget] = useState<Message | null>(null);
 
     const [modalType, setModalType] = useState<'none' | 'transfer' | 'emoji-import' | 'generate-image' | 'chat-settings' | 'message-options' | 'edit-message' | 'delete-emoji' | 'delete-category' | 'add-category' | 'history-manager' | 'archive-settings' | 'archive-legacy-warning' | 'prompt-editor' | 'category-options' | 'category-visibility' | 'emoji-options' | 'rename-emoji' | 'emoji-description' | 'rename-category' | 'schedule' | 'chrome-css' | 'chrome-sound' | 'memory-vectorize-confirm' | 'memory-vectorize-result'>('none');
+    useEffect(() => {
+        if (decorationTrial && (modalType !== 'chrome-css' || activeApp !== AppID.Chat || homePhone)) setDecorationTrial(null);
+    }, [decorationTrial, modalType, activeApp, homePhone]);
     // 「聊天装扮」悬浮态：不走全屏 modal——圆气泡挂在聊天上，点开小面板边看真聊天边调。
     const [decorationTab, setDecorationTab] = useState<DecorationTab>('layout');
     // 切换角色时收掉装扮气泡：定制是 per-character 的，避免误改到下一个角色
@@ -376,7 +391,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     // Which messages are currently showing "译" version (toggle state only, no API calls)
     const [showingTargetIds, setShowingTargetIds] = useState<Set<number>>(new Set());
 
-    const char = characters.find(c => c.id === activeCharacterId) || characters[0];
+    const char = previewCharacter;
     useEffect(() => { setMeetingHistory([]); }, [activeCharacterId]);
     useEffect(() => {
         let active = true;
@@ -461,8 +476,8 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
     const currentThemeId = char?.bubbleStyle || osTheme.chatDefaultBubbleStyle || 'default';
     // 解析逻辑抽到 utils/groupChat/theme.ts（群聊共用），行为不变
     const activeTheme = useMemo(
-        () => homePhone?HOME_PHONE_BUBBLES:resolveChatTheme(currentThemeId, customThemes, PRESET_THEMES),
-        [currentThemeId, customThemes,!!homePhone],
+        () => homePhone?HOME_PHONE_BUBBLES:liveTrial?.bubble || resolveChatTheme(currentThemeId, customThemes, PRESET_THEMES),
+        [currentThemeId, customThemes,!!homePhone,liveTrial],
     );
     const draftKey = `chat_draft_${activeCharacterId}`;
 
@@ -4431,6 +4446,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                     emojis={filteredEmojis}
                     emojiSuggestionsEnabled={inputPreferences.emojiSuggestions}
                     suggestionEmojis={aiVisibleEmojis}
+                    onManageStickers={homePhone ? undefined : () => { setShowPanel('none'); setStickerManagerOpen(true); }}
                     characters={characters} activeCharacterId={activeCharacterId}
                     onCharSelect={handleCharSelectCallback}
                     unreadMessages={unreadMessages}
@@ -4570,6 +4586,11 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             )}
 
             {showHistoryCleanup && <ChatHistoryCleanupModal key={`history-cleanup:${char.id}`} character={char} onClose={() => setShowHistoryCleanup(false)} onDeleted={handleHistoryCleanupDone} />}
+            {stickerManagerOpen && !homePhone && <StickerLibrary key={`sticker-library:${char.id}`} emojis={emojis} groups={categories}
+                characters={characters} characterGroups={characterGroups} characterId={char.id} api={apiConfig}
+                onClose={() => setStickerManagerOpen(false)}
+                onChange={async () => { await loadEmojiData(); markEmojiLibraryChanged(); }}
+                onVision={async (id, enabled) => { await updateCharacter(id, { stickerVision: enabled }); }} />}
             {emojiExport && <EmojiExportDialog {...emojiExport} onClose={() => setEmojiExport(null)} />}
             <ConfirmDialog isOpen={linkCardQuestion !== null}
                 title={linkCardQuestion === 'xhsCards' ? '小红书链接解析' : '分享链接解析'}
@@ -4875,6 +4896,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 triggerIcon={isTyping || instantChatPending ? 'stop' : 'lightning'}
                 hideTrigger={inputPreferences.sendButtonGenerates}
                 onShowCharsPanel={() => setShowPanel('chars')}
+                extraAction={{ label: '角色名片', icon: <IdentificationCard size={20} />, onClick: () => { setShowPanel('none'); setProfileOpen(true); } }}
                 onDeleteBuff={(buffId) => {
                     const currentBuffs = char.activeBuffs || [];
                     updateCharacter(char.id, { activeBuffs: currentBuffs.filter(b => b.id !== buffId), buffInjection: '' });
@@ -4889,6 +4911,14 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                 hideBuffs={osTheme.chatHideHeaderBuffs}
                 acnh={acnh}
              />}
+
+            {(profileOpen || !!liveTrial?.showProfile) && !homePhone && <ChatCharacterProfile character={char}
+                customCss={(char.chatProfileAppearance ?? osTheme.chatProfileAppearance)?.customCss}
+                schedule={scheduleData?.charId === char.id && scheduleData.date === charDateKey ? scheduleData : null}
+                onClose={() => setProfileOpen(false)}
+                onSchedule={() => { setProfileOpen(false); setModalType('schedule'); }}
+                onPlayTheater={index => { setProfileOpen(false); handlePlayTheater(index); }}
+                onMemory={() => { setProfileOpen(false); setMemoryRepairOpen(true); }} />}
 
             <StreamingVoiceBar state={streamingVoice.state} onStop={stopStreamingVoice} />
              <div ref={scrollRef} onScroll={handleChatScroll} onClick={() => { if (inputPreferences.autoReply) setShowPanel('none'); }} className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden overscroll-contain pt-6 pb-6 no-scrollbar" style={{ backgroundImage: activeTheme.type === 'custom' && activeTheme.user.backgroundImage ? 'none' : undefined }}>
@@ -5339,12 +5369,20 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
 
             {char && modalType === 'chrome-css' && <ChatAppearanceWardrobe
                 key={`appearance-wardrobe:${char.id}`}
+                onTrial={setDecorationTrial} trialActive={!!liveTrial}
                 character={char} theme={baseOsTheme} onSaveBubble={addCustomTheme} themes={[...Object.values(PRESET_THEMES), ...customThemes]}
                 initialTab={decorationTab} updateCharacter={patch=>updateCharacter(char.id,patch)}
                 updateTheme={updateTheme} onBgUpload={handleBgUpload} backgroundUrl={resolvedChatBackground}
                 onOpenWorkshop={()=>{setModalType('none');openApp(AppID.ThemeMaker);}}
                 onClose={()=>setModalType('none')}
             />}
+
+            {liveTrial && <ChatTrialControls onReturn={() => setDecorationTrial(null)} onScroll={pixels => scrollRef.current?.scrollBy(0, pixels)} onUse={async () => {
+                await liveTrial.commit();
+                if (liveTrial.characterId !== osActiveCharacterId) setActiveCharacterId(liveTrial.characterId);
+                setDecorationTrial(null);
+                setModalType('none');
+            }} />}
 
             {/* 情绪设置已嵌入日程 Modal（与日程强制同步开/关），不再单独渲染 */}
 

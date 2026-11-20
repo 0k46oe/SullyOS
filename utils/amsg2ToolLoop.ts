@@ -42,14 +42,37 @@ export const extractToolRoundLeadIn = (content: unknown): string => {
  * 重复；几轮之间一字不差的也只留一份。
  */
 export const mergeToolRoundLeadIns = (leadIns: string[], finalContent: string): string => {
-  const finalText = extractToolRoundLeadIn(finalContent);
+  const segments = [...leadIns, finalContent].map(extractToolRoundLeadIn).filter(Boolean);
   const kept: string[] = [];
-  for (const raw of leadIns) {
-    const text = extractToolRoundLeadIn(raw);
-    if (!text || kept.includes(text) || (finalText && finalText.includes(text))) continue;
+  for (let i = 0; i < segments.length; i++) {
+    const text = segments[i];
+    const laterSegments = segments.slice(i + 1);
+    const repeatedLater = laterSegments.some((later) => {
+      const earlierLines = text.split('\n').map(line => line.trim()).filter(Boolean);
+      const laterLines = later.split('\n').map(line => line.trim()).filter(Boolean);
+      if (earlierLines.length <= laterLines.length) {
+        for (let start = 0; start <= laterLines.length - earlierLines.length; start++) {
+          if (earlierLines.every((line, index) => laterLines[start + index] === line)) return true;
+        }
+      }
+      return earlierLines.length === 1
+        && Array.from(earlierLines[0].replace(/[\s\p{P}\p{S}]/gu, '')).length >= 6
+        && laterLines.some(line => line.includes(earlierLines[0]));
+    });
+    if (kept.includes(text) || repeatedLater) continue;
     kept.push(text);
   }
-  return [...kept, finalText].filter(Boolean).join('\n');
+  const lines: string[] = [];
+  for (const segment of kept) {
+    const next = segment.split('\n');
+    let overlap = 0;
+    for (let length = Math.min(lines.length, next.length); length > 0; length--) {
+      const matches = lines.slice(-length).every((line, index) => line.trim() === next[index].trim());
+      if (matches && next.slice(0, length).some(line => line.trim())) { overlap = length; break; }
+    }
+    lines.push(...next.slice(overlap));
+  }
+  return lines.join('\n');
 };
 
 /**

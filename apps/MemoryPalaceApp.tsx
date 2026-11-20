@@ -4480,7 +4480,7 @@ create table if not exists memory_vectors (
                                 {/* 底部操作 */}
                                 <div style={paperStyle({ borderTop: '1px solid #f1f5f9', padding: '10px 14px 14px' })}>
                                     {rangeRunning && rangeProgress && (
-                                        <div style={paperStyle({ fontSize: 11, color: '#7c3aed', marginBottom: 8, textAlign: 'center' })}>{rangeProgress}</div>
+                                        <div style={paperStyle({ fontSize: 11, color: '#71856a', marginBottom: 8, textAlign: 'center' })}>{rangeProgress}</div>
                                     )}
                                     {!rangeRunning && rangeResult && (
                                         <div style={paperStyle({ fontSize: 12, marginBottom: 8, color: rangeResult.startsWith('[ok]') ? '#16a34a' : rangeResult.startsWith('[warn]') ? '#d97706' : '#dc2626' })}>
@@ -4509,7 +4509,7 @@ create table if not exists memory_vectors (
                                         style={paperStyle({
                                             width: '100%', padding: '11px 0', borderRadius: 12,
                                             border: 'none', fontWeight: 700, fontSize: 13, color: 'white',
-                                            background: (rangeRunning || !bothSet) ? '#cbd5e1' : '#7c3aed',
+                                            background: (rangeRunning || !bothSet) ? '#cbd5e1' : '#71856a',
                                             cursor: (rangeRunning || !bothSet) ? 'not-allowed' : 'pointer',
                                         })}
                                     >
@@ -4547,10 +4547,10 @@ create table if not exists memory_vectors (
                                 <div style={paperStyle({
                                     width: 54, height: 54, margin: '0 auto 12px', borderRadius: 18,
                                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                    background: 'linear-gradient(135deg, rgba(124,58,237,0.14), rgba(167,139,250,0.06))',
-                                    border: '1px solid rgba(124,58,237,0.15)', fontSize: 26,
+                                    background: 'linear-gradient(135deg, rgba(113,133,106,0.16), rgba(220,229,205,0.28))',
+                                    border: '1px solid rgba(113,133,106,0.2)', fontSize: 26,
                                 })}>🗂️</div>
-                                <div style={paperStyle({ fontSize: 10, fontWeight: 700, letterSpacing: '0.25em', textTransform: 'uppercase', color: '#7c3aed' })}>Manual Summary</div>
+                                <div style={paperStyle({ fontSize: 10, fontWeight: 700, letterSpacing: '0.25em', textTransform: 'uppercase', color: '#71856a' })}>Manual Summary</div>
                                 <div style={paperStyle({ fontSize: 17, fontWeight: 800, color: '#0f172a', marginTop: 4 })}>手动总结完成</div>
                                 <div style={paperStyle({ fontSize: 11, color: '#94a3b8', marginTop: 4 })}>
                                     新增 {rangeResultData.stored} 条 · 去重跳过 {rangeResultData.skipped} 条
@@ -4613,8 +4613,8 @@ create table if not exists memory_vectors (
                                     style={paperStyle({
                                         width: '100%', padding: '12px 0', borderRadius: 14, border: 'none',
                                         color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer',
-                                        background: 'linear-gradient(135deg, #7c3aed, #6d28d9)',
-                                        boxShadow: '0 6px 18px -6px rgba(124,58,237,0.5)',
+                                        background: 'linear-gradient(135deg, #71856a, #5f7559)',
+                                        boxShadow: '0 6px 18px -6px rgba(113,133,106,0.35)',
                                     })}
                                 >
                                     确认
