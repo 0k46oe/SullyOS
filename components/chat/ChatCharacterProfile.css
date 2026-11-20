@@ -124,6 +124,11 @@
 .chat-profile-identity h2 { margin: 5px 0 0; padding-left: .13em; font: 500 clamp(20px,5.6vw,24px)/1.2 var(--serif); letter-spacing: .13em; }
 .chat-profile-remark { margin: 4px 0 0; color: var(--muted); font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
 .chat-profile-remark span { margin-right: .65em; font-size: 11px; }
+.chat-profile-character-info { margin: 14px 0 4px; padding: 12px 14px; border-top: 1px solid var(--line); text-align: left; }
+.chat-profile-character-info h3 { margin: 0 0 8px; color: var(--ink); font-size: 12px; font-weight: 600; }
+.chat-profile-character-info div + div { margin-top: 10px; }
+.chat-profile-character-info h4 { margin: 0 0 4px; color: var(--muted); font-size: 11px; font-weight: 500; }
+.chat-profile-character-info p { margin: 0; color: var(--ink); font: 12px/1.65 system-ui,sans-serif; white-space: pre-wrap; overflow-wrap: anywhere; }
 .chat-profile-divider { display: flex; align-items: center; justify-content: center; gap: 9px; margin: 8px auto 0; color: #686077; font: 16px/1 Georgia,serif; }
 .chat-profile-divider::before, .chat-profile-divider::after { content: ""; width: 42px; height: 1px; background: linear-gradient(90deg,transparent,#797387); }
 .chat-profile-divider::after { transform: rotate(180deg); }
