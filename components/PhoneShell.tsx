@@ -686,11 +686,10 @@ const PhoneShell: React.FC = () => {
   // Ta-da 周年赠礼先于更新公告，等基础启动提示、开机动画与解锁完成。
   const [showAnniversaryGift, setShowAnniversaryGift] = useState(false);
   const anniversaryAsked = useRef(false);
-  const firstUseGuideActive = useFirstUseGuideStep() !== null;
-  const anniversaryBlocked = firstUseGuideActive || startupNoticesBlocked || showImportRecoveryPrompt || showAuthorLetter;
+  const anniversaryBlocked = startupNoticesBlocked || showImportRecoveryPrompt || showAuthorLetter;
   // 待展示也占住顺序，避免同一轮 effects 同时开启赠礼和更新公告。
   // Complete setup before promotional/release popups; disclaimer/recovery still have priority.
-  const anniversaryHasPriority = firstUseGuideActive || showAnniversaryGift || (!anniversaryAsked.current && shouldShowAnniversaryGift());
+  const anniversaryHasPriority = showAnniversaryGift || (!anniversaryAsked.current && shouldShowAnniversaryGift());
   useEffect(() => {
     if (anniversaryAsked.current || anniversaryBlocked || !isDataLoaded || isLocked || (!bootDone && bootAnimationEnabled)) return;
     if (shouldShowAnniversaryGift()) {
