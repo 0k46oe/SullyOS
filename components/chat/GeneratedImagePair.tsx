@@ -10,7 +10,7 @@ export default function GeneratedImagePair({ value, prompt, isUser, selectionMod
     const [viewer, setViewer] = useState<string>();
     const textImage = useMemo(() => expanded || showText ? createImageTextCard(prompt).toDataURL('image/png') : '', [prompt, expanded, showText]);
     const face = (kind: 'image' | 'text', className: string) => <span className={className}>
-        {kind === 'image' ? <TokenImg value={value} alt="生成的图片" onLoad={onLoad} /> : textImage ? <img src={textImage} alt="图片画面描述" /> : null}
+        {kind === 'image' ? <TokenImg className="sully-chat-generated-photo" value={value} alt="生成的图片" onLoad={onLoad} /> : textImage ? <img src={textImage} alt="图片画面描述" /> : null}
     </span>;
     const open = (event: React.MouseEvent, image: string) => { if (selectionMode) return; event.stopPropagation(); setViewer(image); };
     return <div className={`sully-chat-generated-pair ${isUser ? 'is-user' : 'is-ai'} ${expanded ? 'is-expanded' : ''}`}>
