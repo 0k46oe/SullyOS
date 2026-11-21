@@ -66,6 +66,7 @@ interface ChatInputAreaProps {
     actionsContent?: React.ReactNode;
     onPanelAction: (type: string, payload?: any) => void;
     onImageSelect: (file: File) => void;
+    onImageFilesSelect?: (files: File[]) => void;
     onJsonSelect?: (file: File) => void;
     isSummarizing: boolean;
     // Categories Support
@@ -103,7 +104,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     customThemes = [], onUpdateTheme = () => {}, onRemoveTheme = () => {}, activeThemeId = '',
     actionsContent,
     previewActionsPage=0,
-    onPanelAction, onImageSelect, onJsonSelect, isSummarizing,
+    onPanelAction, onImageSelect, onImageFilesSelect, onJsonSelect, isSummarizing,
     categories = [], activeCategory = 'default',
     onReroll, canReroll,
     mcdConfigured = false,
@@ -268,10 +269,11 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     };
 
     const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>, type: 'chat' | 'bg') => {
-        const file = e.target.files?.[0];
+        const files = Array.from(e.target.files || []);
         if (e.target) e.target.value = '';
-        if (file) {
-            onImageSelect(file);
+        if (files.length) {
+            if (files.length > 1 && onImageFilesSelect) onImageFilesSelect(files);
+            else onImageSelect(files[0]);
         }
     };
 
@@ -767,7 +769,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
         )}
         {exportEmojis && <EmojiExportDialog emojis={exportEmojis} onClose={() => setExportEmojis(null)} />}
         {/* 选图 input 常驻在输入栏外：面板收起时不会随条件分支卸载而丢失点击或回传事件，也不改变 .sully-chat-inputbar 子节点序号。 */}
-        <input type="file" ref={chatImageInputRef} className="hidden" accept="image/*" onChange={(e) => handleImageChange(e, 'chat')} />
+        <input type="file" ref={chatImageInputRef} className="hidden" accept="image/*" multiple={!!onImageFilesSelect} onChange={(e) => handleImageChange(e, 'chat')} />
         {cameraOpen && <ChatCamera character={characters.find(c => c.id === activeCharacterId)} onClose={() => setCameraOpen(false)} onCapture={onImageSelect} onGallery={() => { chatImageInputRef.current?.click(); setCameraOpen(false); }} />}
         {/* 辅助提示保持在输入栏外，避免改变社区 CSS 的 > div:first-child / nth-child 目标。 */}
             {suggestedEmojis.length > 0 && (
@@ -1058,7 +1060,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                             onTouchEnd={handleActionsSwipeEnd}
                             onClickCapture={handleActionsClickCapture}
                         >
-                          <input type="file" ref={chatImageInputRef} className="hidden" accept="image/*" onChange={(e) => handleImageChange(e, 'chat')} />
+                          <input type="file" ref={chatImageInputRef} className="hidden" accept="image/*" multiple={!!onImageFilesSelect} onChange={(e) => handleImageChange(e, 'chat')} />
                           <input type="file" ref={chatJsonInputRef} className="hidden" accept=".json,application/json,text/json" onChange={(e) => { const file = e.target.files?.[0]; if (file) onJsonSelect?.(file); e.target.value = ''; }} />
                           {!compactHome && <div className="flex items-center justify-end px-5 pt-2">
                             <button type="button" onClick={() => setEditingActionOrder(true)} className={`rounded-lg px-2 py-1.5 text-[11px] ${isDiscordStyle ? 'text-slate-400' : 'text-slate-500'}`}>整理工具</button>

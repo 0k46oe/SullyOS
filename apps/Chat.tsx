@@ -1900,17 +1900,21 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         triggerAI(newHistory, undefined, { skipEmotionInjection: true });
     };
 
-    const handleImageSelect = async (file: File) => {
+    const handleImageSelect = async (selection: File | File[]) => {
+        const files = Array.isArray(selection) ? selection : [selection];
         const finishImage = autoReply.beginSend(char?.id || null);
         try {
-            const blob = await processImageToBlob(file, { maxWidth: 600, quality: 0.6, forceJpeg: true });
-            const { token } = await putImageBlobDeduped(blob);
+            const tokens: string[] = [];
+            for (const file of files) {
+                const blob = await processImageToBlob(file, { maxWidth: 600, quality: 0.6, forceJpeg: true });
+                const { token } = await putImageBlobDeduped(blob);
+                tokens.push(token);
+            }
             if (!inputPreferences.autoReply) setShowPanel('none');
-            await handleSendText(token, 'image');
+            await handleSendText(tokens[0], 'image', tokens.length > 1 ? { imageGallery: tokens } : undefined);
         } catch (err: any) {
             addToast(err.message || '图片处理失败', 'error');
         } finally {
-            // 是否真正发出由 handleSendText 标记；这里仅解除图片处理期间的暂停。
             finishImage(false);
         }
     };
@@ -4472,6 +4476,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                     onRemoveTheme={removeCustomTheme} activeThemeId={currentThemeId}
                     onPanelAction={handlePanelAction}
                     onImageSelect={handleImageSelect}
+                    onImageFilesSelect={files => { void handleImageSelect(files); }}
                     isSummarizing={isSummarizing}
                     categories={visibleCategories}
                     activeCategory={activeCategory}
@@ -5262,6 +5267,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                     onRemoveTheme={removeCustomTheme} activeThemeId={currentThemeId}
                     onPanelAction={handlePanelAction}
                     onImageSelect={handleImageSelect}
+                    onImageFilesSelect={files => { void handleImageSelect(files); }}
                     onJsonSelect={handleJsonSelect}
                     isSummarizing={isSummarizing}
                     categories={visibleCategories}

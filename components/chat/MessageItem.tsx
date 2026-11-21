@@ -24,6 +24,7 @@ import { buildReplySnapshotContent } from '../../utils/applyAssistantPostProcess
 import { stripLeakedSourceTags } from '../../utils/sanitize';
 import TokenImg from '../os/TokenImg';
 import ChatImage from './ChatImage';
+import ChatImageGallery from './ChatImageGallery';
 import GeneratedImagePair from './GeneratedImagePair';
 import GeneratedImageSaveStatus from './GeneratedImageSaveStatus';
 import { SARSpeechSwitch } from '../sar/SARSpeechSwitch';
@@ -3321,12 +3322,14 @@ const MessageItem = React.memo(({
         return commonLayout(
             <div className="relative group">
                 {m.content ? (
-                    m.metadata?.generatedImage && !m.metadata?.generatedImageFailed && typeof m.metadata?.generatedImagePrompt === 'string' && m.metadata.generatedImagePrompt.trim() ? <GeneratedImagePair value={m.content} prompt={m.metadata.generatedImagePrompt} isUser={isUser} selectionMode={selectionMode} onLoad={() => onMediaLoad?.(m.id)} /> : <ChatImage
-                        value={m.content}
-                        selectionMode={selectionMode}
-                        eager={isLatestMessage}
-                        onLoad={() => onMediaLoad?.(m.id)}
-                    />
+                    m.metadata?.imageGallery?.length > 1
+                        ? <ChatImageGallery values={m.metadata.imageGallery} isUser={isUser} selectionMode={selectionMode} onLoad={() => onMediaLoad?.(m.id)} />
+                        : m.metadata?.generatedImage && !m.metadata?.generatedImageFailed && typeof m.metadata?.generatedImagePrompt === 'string' && m.metadata.generatedImagePrompt.trim() ? <GeneratedImagePair value={m.content} prompt={m.metadata.generatedImagePrompt} isUser={isUser} selectionMode={selectionMode} onLoad={() => onMediaLoad?.(m.id)} /> : <ChatImage
+                            value={m.content}
+                            selectionMode={selectionMode}
+                            eager={isLatestMessage}
+                            onLoad={() => onMediaLoad?.(m.id)}
+                        />
                 ) : (
                     <div className="px-4 py-6 rounded-2xl bg-slate-100 text-slate-400 text-xs italic text-center min-w-[120px]">[图片已丢失]</div>
                 )}

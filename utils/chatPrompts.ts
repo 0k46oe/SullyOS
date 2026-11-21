@@ -1257,16 +1257,17 @@ ${voiceActingGuide()}`;
                      // （二进制在 blob_assets，见 utils/blobRef.ts）。令牌既不以 data: 也不以 http 开头，
                      // 这里认不出来的话，图明明还在，模型收到的却是「图片数据已不可用」——不报错、不破图，最难查。
                      // 令牌原样放进 image_url 就行，发请求时网络出口那层会统一还原成 data URL（utils/apiBlobRefs.ts）。
-                     const hasImageData = typeof m.content === 'string'
-                         && (m.content.startsWith('data:') || m.content.startsWith('http') || isBlobRef(m.content));
+                     const imageValues = [m.content, ...(Array.isArray(m.metadata?.imageGallery) ? m.metadata.imageGallery : [])]
+                         .filter((value): value is string => typeof value === 'string' && (value.startsWith('data:') || value.startsWith('http') || isBlobRef(value)));
+                     const hasImageData = imageValues.length > 0;
                      let textPart = hasImageData
-                         ? `${timeStr} [User sent an image]`
+                         ? `${timeStr} [User sent ${imageValues.length > 1 ? `${imageValues.length} images` : 'an image'}]`
                          : `${timeStr} [User sent an image, but the image data is no longer available]`;
                      if (index === historySlice.length - 1 && timeGapHint && m.role === 'user') textPart += `\n\n${timeGapHint}`;
                      if (!hasImageData) {
                          return { role: m.role, content: textPart.trimStart() };
                      }
-                     return { role: m.role, content: [{ type: "text", text: textPart.trimStart() }, { type: "image_url", image_url: { url: m.content } }] };
+                     return { role: m.role, content: [{ type: "text", text: textPart.trimStart() }, ...imageValues.map(url => ({ type: "image_url", image_url: { url } }))] };
                 }
                 
                 if (index === historySlice.length - 1 && timeGapHint && m.role === 'user') content = `${content}\n\n${timeGapHint}`; 
