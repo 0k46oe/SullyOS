@@ -6,6 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
   pages: write
   id-token: write
@@ -77,6 +78,27 @@ jobs:
         with:
           name: ${{ env.PAGES_ARTIFACT_NAME }}
           path: ./dist
+
+      # GitHub's artifact service can briefly lag behind a successful upload.
+      # Wait until this run's exact artifact is visible before calling deploy-pages.
+      - name: Wait for Pages artifact metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_ARTIFACT: ${{ env.PAGES_ARTIFACT_NAME }}
+        shell: bash
+        run: |
+          for attempt in {1..24}; do
+            if artifacts=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100") \
+              && jq -e --arg name "$EXPECTED_ARTIFACT" '.artifacts[]? | select(.name == $name and .expired == false)' <<<"$artifacts" >/dev/null; then
+              echo "Artifact $EXPECTED_ARTIFACT is visible; allowing Pages metadata to settle."
+              sleep 20
+              exit 0
+            fi
+            echo "Artifact $EXPECTED_ARTIFACT is not visible yet (attempt $attempt/24)."
+            sleep 5
+          done
+          echo "::error::Artifact $EXPECTED_ARTIFACT did not become visible for run $GITHUB_RUN_ID."
+          exit 1
 
       - name: Deploy to GitHub Pages
         id: deployment
