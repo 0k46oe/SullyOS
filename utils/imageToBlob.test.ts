@@ -14,12 +14,13 @@ beforeEach(() => {
     vi.spyOn(HTMLCanvasElement.prototype,'toDataURL').mockImplementation(() => {throw new Error('base64 encoding must not run');});
 });
 afterEach(() => {vi.restoreAllMocks();vi.unstubAllGlobals();});
-it('decodes through a temporary URL and compresses straight to Blob with existing chat settings', async () => {
+it('preserves PNG format and keeps higher-resolution image pixels when compressing to Blob', async () => {
+    vi.stubGlobal('Image',class {width=2400;height=3200;onload?:()=>void;set src(_value:string){queueMicrotask(() => this.onload?.());}});
     const file=new File(['original'],'photo.png',{type:'image/png'});
-    expect(await processImageToBlob(file,{maxWidth:600,quality:0.6,forceJpeg:true})).toBe(output);
+    expect(await processImageToBlob(file,{maxWidth:1600,quality:0.9})).toBe(output);
     const canvas=encode.mock.contexts[0] as HTMLCanvasElement;
-    expect([canvas.width,canvas.height]).toEqual([450,600]);
-    expect(encode).toHaveBeenCalledWith(expect.any(Function),'image/jpeg',0.6);
+    expect([canvas.width,canvas.height]).toEqual([1200,1600]);
+    expect(encode).toHaveBeenCalledWith(expect.any(Function),'image/png',0.9);
     expect(revoke).toHaveBeenCalledWith('blob:input');
 });
 it('keeps original GIF bytes and preserves PNG format when JPEG is not requested', async () => {

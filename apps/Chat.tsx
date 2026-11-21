@@ -1906,7 +1906,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         try {
             const tokens: string[] = [];
             for (const file of files) {
-                const blob = await processImageToBlob(file, { maxWidth: 600, quality: 0.6, forceJpeg: true });
+                const blob = await processImageToBlob(file, { maxWidth: 1600, quality: 0.9 });
                 const { token } = await putImageBlobDeduped(blob);
                 tokens.push(token);
             }
