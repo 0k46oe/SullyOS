@@ -86,7 +86,7 @@ describe('first-use memory guide', () => {
     });
 
     it('requires saved configurations and both Sully switches before continuing', async () => {
-        initializeFirstUseGuide(0);
+        setGuideStep(0);
         await render();
         expect(mocked.os.openApp).toHaveBeenCalledWith(AppID.Settings);
         await click('下一步');

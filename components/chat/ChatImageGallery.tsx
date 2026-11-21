@@ -14,7 +14,7 @@ export default function ChatImageGallery({ values, isUser, selectionMode, onLoad
                 {images.slice(0, 3).map((value, index) => <span key={`${index}:${value}`} className={`sully-chat-image-gallery-layer layer-${index}`}><TokenImg value={value} alt="" onLoad={onLoad} /></span>)}
             </button>}
         </div>
-        <button type="button" className="sully-chat-image-expand" aria-expanded={expanded} onClick={event => { if (selectionMode) return; event.stopPropagation(); setExpanded(value => !value); }}>{expanded ? '收起' : `展开 · ${images.length} 张图片`}</button>
+        <button type="button" className="sully-chat-image-expand sully-chat-image-gallery-expand" aria-expanded={expanded} onClick={event => { if (selectionMode) return; event.stopPropagation(); setExpanded(value => !value); }}>{expanded ? '收起' : `展开 ${images.length}`}</button>
         {viewer && <ImageViewer value={viewer} fallback={viewer} onClose={() => setViewer(undefined)} />}
     </div>;
 }

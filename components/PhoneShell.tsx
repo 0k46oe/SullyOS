@@ -1,10 +1,8 @@
 import RecalledSoundNotice from './os/RecalledSoundNotice';
-import FirstUseGuide from './FirstUseGuide';
 import DeploymentNotice from './os/DeploymentNotice';
 import { useDeploymentNotice } from '../hooks/useDeploymentNotice';
 import FeedbackInvitation from './FeedbackInvitation';
 import BeautyRepoInvitation from './share/BeautyRepoInvitation';
-import { useFirstUseGuideStep } from '../utils/firstUseGuide';
 import AnniversaryGiftPopup from './os/AnniversaryGiftPopup';
 import { shouldShowAnniversaryGift, markAnniversaryGiftSeen } from '../utils/anniversaryGifts';
 
@@ -621,13 +619,7 @@ const PhoneShell: React.FC = () => {
   }, [activeApp, bootDone, isDataLoaded]);
 
   // Disclaimer popup for first-time users
-  const [showDisclaimer, setShowDisclaimer] = useState(() => {
-    try {
-      return !localStorage.getItem(DISCLAIMER_KEY);
-    } catch {
-      return true;
-    }
-  });
+  const [showDisclaimer, setShowDisclaimer] = useState(false);
 
   useEffect(() => {
     if (!isDataLoaded) return;
@@ -1133,7 +1125,6 @@ const PhoneShell: React.FC = () => {
             : { bottom: 'var(--standalone-safe-area-bottom, 0px)' }
         }
       >
-          <FirstUseGuide />
           {/* App Container */}
           <div
             className="flex-1 relative overflow-hidden"

@@ -624,10 +624,10 @@ const UserLocationAnnouncement: React.FC<UpdatePopupProps> = ({ onDone, onExit }
 
 const OctoberUpdateAnnouncement: React.FC<UpdatePopupProps> = ({ onDone }) => <OctoberUpdatePopup onDone={onDone}/>;
 
-const UPDATE_QUEUE: { key: string; render: (props: UpdatePopupProps) => React.ReactNode }[] = [
-    { key: USER_LOCATION_NOTICE_KEY, render: props => <UserLocationAnnouncement {...props} /> },
-    { key: HOLIDAY_NOTICE_KEY, render: props => <UserHolidayIntro {...props} /> },
-    { key: NETWORK_TRANSIT_NOTICE_KEY_2026_08, render: (props) => <NetworkTransitNoticePopup {...props} /> },
+const UPDATE_QUEUE: { key: string; render: (props: UpdatePopupProps) => React.ReactNode; offered?: () => boolean }[] = [
+    { key: USER_LOCATION_NOTICE_KEY, render: props => <UserLocationAnnouncement {...props} />, offered: () => false },
+    { key: HOLIDAY_NOTICE_KEY, render: props => <UserHolidayIntro {...props} />, offered: () => false },
+    { key: NETWORK_TRANSIT_NOTICE_KEY_2026_08, render: props => <NetworkTransitNoticePopup {...props} />, offered: () => false },
 ];
 
 const isPending = (entry: (typeof UPDATE_QUEUE)[number]): boolean => !isUpdateSeen(entry.key) && (entry.offered?.() ?? true);

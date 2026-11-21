@@ -23,7 +23,7 @@ export default function GeneratedImagePair({ value, prompt, isUser, selectionMod
                 {face(showText ? 'text' : 'image', 'sully-chat-generated-face is-front')}
             </button>}
         </div>
-        <button type="button" className="sully-chat-image-expand" aria-expanded={expanded} onClick={e => { if (selectionMode) return; e.stopPropagation(); setExpanded(v => !v); }}>{expanded ? '收起' : '展开'}</button>
+        <button type="button" className="sully-chat-image-expand sully-chat-generated-expand" aria-expanded={expanded} onClick={e => { if (selectionMode) return; e.stopPropagation(); setExpanded(v => !v); }}>{expanded ? '收起' : '展开'}</button>
         {viewer && <ImageViewer value={viewer} fallback={viewer} onClose={() => setViewer(undefined)} />}
     </div>;
 }
