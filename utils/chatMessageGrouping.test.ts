@@ -57,6 +57,20 @@ describe('chatMessageGrouping & timestamp position', () => {
         expect(formatChatTimeDivider(new Date(2025, 11, 31, 22, 40).getTime(), now)).toBe('2025年12月31日 22:40');
     });
 
+    it('starts tavern time segments on speaker changes or after five minutes without a reply', () => {
+        const t0 = new Date(2026, 10, 19, 13, 32).getTime();
+        const later = t0 + 3 * 24 * 60 * 60_000;
+        const messages: Array<Pick<Message, 'role' | 'timestamp'>> = [
+            { role: 'assistant', timestamp: t0 - 60_000 },
+            { role: 'user', timestamp: t0 },
+            { role: 'user', timestamp: t0 + CHAT_TIME_SEGMENT_GAP_MS - 1 },
+            { role: 'user', timestamp: t0 + CHAT_TIME_SEGMENT_GAP_MS },
+            { role: 'system', timestamp: later - 1 },
+            { role: 'user', timestamp: later },
+        ];
+        expect(computeTimeSegmentStarts(messages, true)).toEqual([true, true, false, true, false, true]);
+    });
+
     it('renders below-bubble timestamps by default and centered top dividers in top_center mode', () => {
         const basePreset = {
             format: 'sullyos-chat-decoration',
@@ -75,27 +89,25 @@ describe('chatMessageGrouping & timestamp position', () => {
             parts: { layout: { chatShowTimestamp: 'always' as const, chatTimestampPosition: 'top_center' as const } },
         };
         const topHtml = renderChatDecorationSample(topPreset, 'conversation').markup;
-        const dividerMatches = topHtml.match(/sully-chat-time-divider/g) || [];
+        const dividerMatches = topHtml.match(/sully-chat-timestamp-divider/g) || [];
         // All 4 sample messages in 'conversation' are within the same 5-minute window -> exactly 1 top divider at start
         expect(dividerMatches).toHaveLength(1);
         expect(topHtml).not.toContain('sully-chat-timestamp-slot');
-        expect(topHtml).not.toContain('bg-black/[0.05]');
-        expect(topHtml.indexOf('sully-chat-time-divider')).toBeLessThan(topHtml.indexOf('class="sully-chat-message '));
+        expect(topHtml).toContain('sully-chat-timestamp-divider w-full flex justify-center pt-3 pb-0.5');
+        expect(topHtml.indexOf('sully-chat-timestamp-divider')).toBeLessThan(topHtml.indexOf('class="sully-chat-message '));
 
         const wechatTopPreset = {
             ...basePreset,
             parts: { layout: { chatShowTimestamp: 'always' as const, chatTimestampPosition: 'top_center' as const, chatBubbleStyle: 'wechat' as const } },
         };
         const wechatTopHtml = renderChatDecorationSample(wechatTopPreset, 'conversation').markup;
-        expect(wechatTopHtml).toContain('bg-black/[0.05]');
-        expect(wechatTopHtml).toContain('rounded-[4px]');
+        expect(wechatTopHtml).toContain('sully-chat-timestamp-divider w-full flex justify-center pt-3 pb-0.5');
 
         const hiddenPreset = {
             ...basePreset,
             parts: { layout: { chatShowTimestamp: 'never' as const, chatTimestampPosition: 'top_center' as const } },
         };
         const hiddenHtml = renderChatDecorationSample(hiddenPreset, 'conversation').markup;
-        expect(hiddenHtml).not.toContain('sully-chat-time-divider');
         expect(hiddenHtml).not.toContain('sully-chat-timestamp');
     });
 
@@ -129,8 +141,8 @@ describe('chatMessageGrouping & timestamp position', () => {
         expect(html).not.toContain('sully-chat-timestamp-divider');
         expect(html).not.toContain('sully-chat-time-divider');
         const segmentStartHtml = renderToStaticMarkup(React.cloneElement(messageElement, { startsTimeSegment: true }));
-        expect(segmentStartHtml).toContain('sully-chat-time-divider');
-        expect(segmentStartHtml).not.toContain('sully-chat-timestamp-divider');
+        expect(segmentStartHtml).toContain('sully-chat-timestamp-divider');
+        expect(segmentStartHtml).not.toContain('sully-chat-time-divider');
     });
 
     it('keeps story-time labels and the real-time toggle in the selected timestamp position', () => {
@@ -173,10 +185,10 @@ describe('chatMessageGrouping & timestamp position', () => {
             timestampPosition: 'top_center',
             startsTimeSegment: true,
         }));
-        expect(centeredHtml).toContain('sully-chat-time-divider');
+        expect(centeredHtml).toContain('sully-chat-timestamp-divider');
         expect(centeredHtml).toContain('3777年11月17日 14:02');
         expect(centeredHtml).not.toContain('sully-chat-timestamp-slot');
-        expect(centeredHtml).not.toContain('sully-chat-timestamp-divider');
+        expect(centeredHtml).not.toContain('sully-chat-time-divider');
     });
 
     it('keeps Worker send progress below the bubble when timestampPosition is top_center', () => {
@@ -209,7 +221,7 @@ describe('chatMessageGrouping & timestamp position', () => {
                 sendPhase: 'sending',
             }),
         );
-        expect(html).toContain('sully-chat-time-divider');
+        expect(html).toContain('sully-chat-timestamp-divider');
         expect(html).toContain('14:32');
         // Send progress stays in the below-bubble slot without duplicating timestamp text there
         expect(html).toContain('sully-chat-timestamp-slot');

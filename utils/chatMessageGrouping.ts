@@ -8,13 +8,14 @@ export function startsNewMessageGroup(previous: Pick<Message, 'role' | 'timestam
     return !previous || previous.role !== current.role || Math.abs(current.timestamp - previous.timestamp) >= 2 * 60 * 1000;
 }
 
-export function startsNewTimeSegment(previous: Pick<Message, 'timestamp'> | null, current: Pick<Message, 'timestamp'>): boolean {
-    return !previous || Math.abs(current.timestamp - previous.timestamp) >= CHAT_TIME_SEGMENT_GAP_MS;
-}
-
-/** 线上动描角色的顶部时间条按 AI / 用户发言组切换，而不是按时间间隔切换。 */
-export function startsNewRoleSegment(previous: Pick<Message, 'role'> | null, current: Pick<Message, 'role'>): boolean {
-    return !previous || previous.role !== current.role;
+export function startsNewTimeSegment(
+    segmentStart: Pick<Message, 'role' | 'timestamp'> | null,
+    current: Pick<Message, 'role' | 'timestamp'>,
+    splitByRole = false,
+): boolean {
+    return !segmentStart
+        || (splitByRole && segmentStart.role !== current.role)
+        || Math.abs(current.timestamp - segmentStart.timestamp) >= CHAT_TIME_SEGMENT_GAP_MS;
 }
 
 export function computeTimeSegmentStarts(
@@ -22,16 +23,12 @@ export function computeTimeSegmentStarts(
     splitByRole = false,
 ): boolean[] {
     const starts: boolean[] = new Array(messages.length).fill(false);
-    let lastNonSystem: Pick<Message, 'role' | 'timestamp'> | null = null;
     let segmentStart: Pick<Message, 'role' | 'timestamp'> | null = null;
     for (let i = 0; i < messages.length; i++) {
         const message = messages[i];
         if (message.role === 'system') continue;
-        starts[i] = splitByRole
-            ? startsNewRoleSegment(lastNonSystem, message)
-            : startsNewTimeSegment(segmentStart, message);
+        starts[i] = startsNewTimeSegment(segmentStart, message, splitByRole);
         if (starts[i]) segmentStart = message;
-        lastNonSystem = message;
     }
     return starts;
 }

@@ -13,7 +13,7 @@ import { stopInstantChat } from '../utils/amsgInstantChat';
 import {resolvePsycheAppearance} from '../utils/psycheAppearance';
 import { translateThinkingMessage } from '../utils/thinkingTranslation';
 import { resolveDialogueApi } from '../utils/characterApi';
-import { computeTimeSegmentStarts, startsNewMessageGroup, startsNewRoleSegment, startsNewTimeSegment } from '../utils/chatMessageGrouping';
+import { computeTimeSegmentStarts, startsNewMessageGroup, startsNewTimeSegment } from '../utils/chatMessageGrouping';
 import StickerLibrary from '../components/chat/StickerLibrary';
 import ChatCharacterProfile from '../components/chat/ChatCharacterProfile';
 import { ChatTrialControls, type ChatDecorationTrial } from '../components/chat/ChatDecorationTrial';
@@ -3724,6 +3724,12 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         }
         return null;
     }, [renderedMessages, timeSegmentStarts]);
+    const streamingTimestamp = Date.now();
+    const streamingStartsTimeSegment = streamingBubbles.length > 0 && startsNewTimeSegment(
+        lastTimeSegmentStartMessage,
+        { role: 'assistant', timestamp: streamingTimestamp },
+        splitTimeSegmentsByRole,
+    );
     const timestampDiagnosticRef = useRef('');
     useLayoutEffect(() => {
         if (homePhone) return;
@@ -3742,13 +3748,6 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             belowTimestampCount: root?.querySelectorAll('.sully-chat-timestamp-slot .sully-chat-timestamp').length ?? 0,
         });
     }, [activeCharacterId, homePhone, osTheme.chatTimestampPosition, osTheme.chatShowTimestamp, renderedMessages.length, timeSegmentStarts]);
-
-    const lastNonSystemRenderedMessage = useMemo(() => {
-        for (let i = renderedMessages.length - 1; i >= 0; i--) {
-            if (renderedMessages[i].role !== 'system') return renderedMessages[i];
-        }
-        return null;
-    }, [renderedMessages]);
 
     const sendProgressInList = sendProgress?.messageId != null
         && renderedMessages.some(message => message.id === sendProgress.messageId && message.role === 'user');
@@ -4322,7 +4321,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                                         role: 'assistant',
                                         type: 'text',
                                         content: bubble,
-                                        timestamp: Date.now(),
+                                        timestamp: streamingTimestamp,
                                     }}
                                     isFirstInGroup={i === 0}
                                     isLastInGroup={i === streamingBubbles.length - 1}
@@ -4343,9 +4342,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                                     messageSpacing={osTheme.chatMessageSpacing}
                                     showTimestamp={osTheme.chatShowTimestamp}
                                     timestampPosition={osTheme.chatTimestampPosition}
-                                    startsTimeSegment={i === 0 && (splitTimeSegmentsByRole
-                                        ? startsNewRoleSegment(lastNonSystemRenderedMessage, { role: 'assistant' })
-                                        : startsNewTimeSegment(lastTimeSegmentStartMessage, { timestamp: Date.now() }))}
+                                    startsTimeSegment={i === 0 && streamingStartsTimeSegment}
                                     thinkingChainOptions={thinkingChainOptions}
                                 />
                             </div>
@@ -5108,7 +5105,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                                         role: 'assistant',
                                         type: 'text',
                                         content: bubble,
-                                        timestamp: Date.now(),
+                                        timestamp: streamingTimestamp,
                                     }}
                                     isFirstInGroup={i === 0}
                                     isLastInGroup={i === streamingBubbles.length - 1}
@@ -5129,9 +5126,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
                                     messageSpacing={osTheme.chatMessageSpacing}
                                     showTimestamp={osTheme.chatShowTimestamp}
                                     timestampPosition={osTheme.chatTimestampPosition}
-                                    startsTimeSegment={i === 0 && (splitTimeSegmentsByRole
-                                        ? startsNewRoleSegment(lastNonSystemRenderedMessage, { role: 'assistant' })
-                                        : startsNewTimeSegment(lastTimeSegmentStartMessage, { timestamp: Date.now() }))}
+                                    startsTimeSegment={i === 0 && streamingStartsTimeSegment}
                                     storyTime={storyTime}
                                     showRealTime={showRealTime}
                                     thinkingChainOptions={thinkingChainOptions}
