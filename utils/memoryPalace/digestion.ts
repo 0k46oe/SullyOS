@@ -903,7 +903,7 @@ export async function runCognitiveDigestion(
 
     // LLM 统一消化
     onProgress?.('正在审视记忆…');
-    const actions = await callDigestLLM(charName, charPersona, material, llmConfig, userName, await loadStoryTimeForChar(charId));
+    const actions = await callDigestLLM(charId, charName, charPersona, material, llmConfig, userName, await loadStoryTimeForChar(charId));
 
     // 执行动作：状态机改现有节点；概括类产出汇集为门牌蒸馏候选
     const { result, plateSubmissions } = await executeActions(actions, charId, material);

@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { runCognitiveDigestion, incrementDigestRound, getDigestRoundCount } from './digestion';
+import * as safeApi from '../safeApi';
+import { MemoryNodeDB } from './db';
+import * as roomPlates from './roomPlates';
 
 // fake-indexeddb + localStorage stub 由 test-setup.ts 注入。
 // 回归守卫：消化的"无材料早退"分支必须归零轮数计数器。
@@ -56,5 +59,34 @@ describe('认知消化 — 轮数计数器', () => {
             charId, '测试角色', '人设', { baseUrl: 'http://invalid.test', apiKey: 'k', model: 'm' },
         );
         expect(third).not.toBeNull();
+    });
+});
+
+describe('认知消化 — 有待整理的记忆', () => {
+    it('传入角色 ID 和阁楼材料，并保存整理结果', async () => {
+        const charId = 'char_digest_attic_test';
+        const nodeId = 'digest_attic_memory';
+        const now = Date.now();
+        await MemoryNodeDB.save({
+            id: nodeId, charId, room: 'attic', content: '担心没能如约赴会。', tags: [],
+            importance: 6, mood: 'anxious', embedded: true, createdAt: now, lastAccessedAt: now, accessCount: 0,
+        });
+        const request = vi.spyOn(safeApi, 'safeFetchJson').mockResolvedValue({
+            choices: [{ message: { content: JSON.stringify([{ id: 'A0', action: 'resolve' }]) } }],
+        });
+        const consolidate = vi.spyOn(roomPlates, 'consolidateAllPlates').mockResolvedValue({ updated: [] });
+        try {
+            const result = await runCognitiveDigestion(
+                charId, '测试角色', '人设', { baseUrl: 'https://memory.test/v1', apiKey: 'test', model: 'test' },
+            );
+
+            expect(request).toHaveBeenCalledOnce();
+            expect(request.mock.calls[0][4]).toMatchObject({ charId, charName: '测试角色', purpose: '记忆消化' });
+            expect(result?.resolved).toEqual([{ id: nodeId, content: '担心没能如约赴会。' }]);
+            expect(await MemoryNodeDB.getById(nodeId)).toMatchObject({ room: 'bedroom' });
+        } finally {
+            request.mockRestore();
+            consolidate.mockRestore();
+        }
     });
 });
