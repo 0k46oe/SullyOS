@@ -539,7 +539,7 @@ CRITICAL: Stay in character. If there's conversation context, your comment shoul
                                     {selectedPhotoIds ? '取消' : '选择'}
                                 </button>
                             )}
-                        </>
+                        </>}
                     </div>
                 </div>
             )}
