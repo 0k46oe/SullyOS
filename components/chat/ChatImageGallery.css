@@ -1,12 +1,13 @@
 .sully-chat-image-gallery{display:flex;align-items:center;gap:12px;max-width:calc(100vw - 100px)}
 .sully-chat-image-gallery.is-user{flex-direction:row-reverse}
 .sully-chat-image-gallery-stack{display:flex;align-items:center;gap:8px;min-width:0;max-width:72vw;overflow:visible}
-.sully-chat-image-gallery-cover{position:relative;display:block;flex:0 1 auto;min-width:0;width:min(180px,calc(72vw - 115px));aspect-ratio:2/3;margin:0 48px 0 0;padding:0;border:0;background:transparent;cursor:pointer}
+.sully-chat-image-gallery-cover{position:relative;display:block;flex:0 1 auto;min-width:0;width:min(160px,calc(72vw - 115px));aspect-ratio:3/4;margin:0 16px 0 0;padding:0;border:0;background:transparent;cursor:pointer}
 .sully-chat-image-gallery-layer{position:absolute;inset:0;display:block;overflow:hidden;border-radius:16px;background:#fff;box-shadow:0 1px 4px #0003}
 .sully-chat-image-gallery-layer img{display:block;width:100%;height:100%;object-fit:cover}
 .sully-chat-image-gallery-layer.layer-0{z-index:3}
-.sully-chat-image-gallery-layer.layer-1{z-index:2;transform-origin:right center;transform:translate(11px,2px) rotate(5deg) scale(.91)}
-.sully-chat-image-gallery-layer.layer-2{z-index:1;transform-origin:right center;transform:translate(22px,5px) rotate(10deg) scale(.82)}
+.sully-chat-image-gallery-layer.layer-1{z-index:2;transform:translateX(12%) rotate(2deg) scale(.9)}
+.sully-chat-image-gallery-layer.layer-2{z-index:1;transform:translateX(24%) rotate(4deg) scale(.8)}
+.sully-chat-image-gallery-cover:has(.layer-2){margin-right:27px}
 .sully-chat-image-gallery:has(.sully-chat-image-gallery-cover){gap:16px}
 .sully-chat-image-gallery .sully-chat-image-gallery-expand{min-width:62px;box-sizing:border-box;padding:3px 12px;font-size:11px;line-height:16px}
 .sully-chat-image-gallery-card{display:flex;align-items:center;justify-content:center;width:max-content;max-width:min(120px,calc((72vw - 100px)/2));max-height:42vh;flex:none;padding:0;border:0;background:transparent;cursor:pointer}

@@ -1257,8 +1257,12 @@ ${voiceActingGuide()}`;
                      // （二进制在 blob_assets，见 utils/blobRef.ts）。令牌既不以 data: 也不以 http 开头，
                      // 这里认不出来的话，图明明还在，模型收到的却是「图片数据已不可用」——不报错、不破图，最难查。
                      // 令牌原样放进 image_url 就行，发请求时网络出口那层会统一还原成 data URL（utils/apiBlobRefs.ts）。
-                     const imageValues = [m.content, ...(Array.isArray(m.metadata?.imageGallery) ? m.metadata.imageGallery : [])]
-                         .filter((value): value is string => typeof value === 'string' && (value.startsWith('data:') || value.startsWith('http') || isBlobRef(value)));
+                     const isImageValue = (value: unknown): value is string => typeof value === 'string'
+                         && (value.startsWith('data:') || value.startsWith('http') || isBlobRef(value));
+                     const galleryImages = Array.isArray(m.metadata?.imageGallery) ? m.metadata.imageGallery.filter(isImageValue) : [];
+                     const imageValues = galleryImages.length > 0
+                         ? galleryImages
+                         : isImageValue(m.content) ? [m.content] : [];
                      const hasImageData = imageValues.length > 0;
                      let textPart = hasImageData
                          ? `${timeStr} [User sent ${imageValues.length > 1 ? `${imageValues.length} images` : 'an image'}]`

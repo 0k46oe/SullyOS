@@ -30,6 +30,34 @@ const replyToMediaMessage = (mediaValue: string): Message[] => ([
     },
 ] as any[]);
 
+describe('聊天多图请求', () => {
+    const imageMessage = (content: string, imageGallery?: string[]): Message => ({
+        id: 1, charId: 'c1', role: 'user', type: 'image', content, timestamp: t0,
+        ...(imageGallery ? { metadata: { imageGallery } } : {}),
+    } as Message);
+
+    it('多图图库已包含首图时，只发送图库中的每一张一次', () => {
+        const first = 'blobref:first-image';
+        const second = 'blobref:second-image';
+        const { apiMessages } = ChatPrompts.buildMessageHistory(
+            [imageMessage(first, [first, second])], 10, char, userProfile, [],
+        );
+        const parts = apiMessages[0].content as Array<{ type: string; text?: string; image_url?: { url: string } }>;
+        expect(parts.filter(part => part.type === 'image_url').map(part => part.image_url?.url)).toEqual([first, second]);
+        expect(parts[0].text).toContain('2 images');
+    });
+
+    it('单图及没有图库数据的旧消息仍回退到正文图片', () => {
+        for (const image of ['blobref:single-image', 'data:image/jpeg;base64,AAAA']) {
+            const { apiMessages } = ChatPrompts.buildMessageHistory(
+                [imageMessage(image)], 10, char, userProfile, [],
+            );
+            const parts = apiMessages[0].content as Array<{ type: string; text?: string; image_url?: { url: string } }>;
+            expect(parts.filter(part => part.type === 'image_url').map(part => part.image_url?.url)).toEqual([image]);
+        }
+    });
+});
+
 describe('私聊引用回复：被引用的是图片消息', () => {
     it('引用 blobref 令牌图片时，令牌不进 prompt', () => {
         const { apiMessages } = ChatPrompts.buildMessageHistory(
