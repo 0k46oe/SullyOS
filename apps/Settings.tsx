@@ -1,3 +1,4 @@
+import CharacterMediaRestore from '../components/settings/CharacterMediaRestore';
 import {CharacterWeatherCities} from '../components/settings/CharacterAwarenessSettings';
 import {cleanCharacterWeatherCities} from '../utils/characterWeather';
 import NavigationBallSettings from '../components/settings/NavigationBallSettings';
@@ -2366,6 +2367,7 @@ const Settings: React.FC = () => {
                     <span>导入 / 组合恢复备份</span>
                 </div>
                 <input type="file" ref={importInputRef} className="hidden" multiple accept=".json,.zip,.sullypart" onChange={handleImport} />
+                <CharacterMediaRestore />
             </div>
 
             <p className="text-[10px] text-slate-400 px-1 mb-4 leading-relaxed">

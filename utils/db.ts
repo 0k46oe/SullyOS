@@ -1,3 +1,4 @@
+import type { VoiceFavorite } from './voiceFavorites';
 import { spaceDatabaseName, SESSION_SPACE_ID, DEFAULT_SPACE_ID, createSpaceStorage, rawSpaceStorage, listUserSpaces, assertUserSpaceAvailable } from './userSpaces';
 import { withSharedAssetLock, canCoordinateAssetDeletion } from './sharedAssetLock';
 import { readLocalCursor } from './localRead';
@@ -1824,6 +1825,123 @@ export const DB = {
     const db = await openDB();
     const transaction = db.transaction(STORE_JOURNAL_STICKERS, 'readwrite');
     transaction.objectStore(STORE_JOURNAL_STICKERS).delete(name);
+  },
+
+  mergeCharacterMedia: async (
+      charId: string,
+      photos: Array<{ image: GalleryImage; fallbackId: string; repair?: { id: string; url: string } }>,
+      voice: {
+          indexId: string;
+          audioId: (id: string) => string;
+          entries: Array<{ favorite: VoiceFavorite; fallback: VoiceFavorite; blob: Blob }>;
+      },
+  ): Promise<{ photos: number; voices: number }> => {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction([STORE_CHARACTERS, STORE_GALLERY, STORE_ASSETS], 'readwrite');
+          const gallery = tx.objectStore(STORE_GALLERY);
+          const assets = tx.objectStore(STORE_ASSETS);
+          const result = { photos: 0, voices: 0 };
+          let failure: Error | undefined;
+          tx.oncomplete = () => resolve(result);
+          tx.onabort = () => reject(failure ?? tx.error ?? new Error('媒体合并事务已中止'));
+
+          const addPhotos = () => {
+              if (!photos.length) return;
+              const current = gallery.index('charId').getAll(charId);
+              current.onsuccess = () => {
+                  const byId = new Map<string, GalleryImage>(current.result.map(image => [image.id, image]));
+                  const urls = new Set(current.result.map(image => image.url));
+                  for (const { image, fallbackId, repair } of photos) {
+                      const originalImage = byId.get(image.id);
+                      const existing = byId.get(fallbackId) ?? (originalImage?.timestamp === image.timestamp ? originalImage : undefined);
+                      if (existing) {
+                          if (repair?.id === existing.id && repair.url === existing.url) {
+                              const updated = { ...existing, url: image.url };
+                              gallery.put(updated);
+                              byId.set(existing.id, updated);
+                              urls.add(image.url);
+                              result.photos++;
+                          }
+                          continue;
+                      }
+                      const original = gallery.getKey(image.id);
+                      original.onsuccess = () => {
+                          if (urls.has(image.url)) return;
+                          const id = original.result === undefined ? image.id : fallbackId;
+                          const available = gallery.getKey(id);
+                          available.onsuccess = () => {
+                              if (available.result !== undefined || byId.has(id) || urls.has(image.url)) return;
+                              const added = { ...image, id, charId };
+                              gallery.add(added);
+                              byId.set(id, added);
+                              urls.add(image.url);
+                              result.photos++;
+                          };
+                      };
+                  }
+              };
+          };
+          const addVoices = () => {
+              if (!voice.entries.length) return;
+              const index = assets.get(voice.indexId);
+              index.onsuccess = () => {
+                  const raw = index.result?.data;
+                  const current = Array.isArray(raw) ? raw : raw?.items;
+                  if (raw != null && !Array.isArray(current)) {
+                      failure = new Error('当前收藏语音索引无法读取');
+                      tx.abort();
+                      return;
+                  }
+                  const items: VoiceFavorite[] = [...(current ?? [])];
+                  const byId = new Map(items.map(item => [item?.id, item]));
+                  const keyFor = (item: VoiceFavorite) => JSON.stringify([item.source, item.sourceKey]);
+                  const owned = new Set(items.filter(item => item?.charId === charId).map(keyFor));
+                  const written = new Set<string>();
+                  let pending = voice.entries.length;
+                  let added = 0;
+                  for (const { favorite, fallback, blob } of voice.entries) {
+                      const existing = byId.get(favorite.id);
+                      const candidate = existing && (existing.charId !== charId || keyFor(existing) !== keyFor(favorite))
+                          ? fallback : favorite;
+                      const key = keyFor(candidate);
+                      const id = voice.audioId(candidate.id);
+                      const audio = assets.get(id);
+                      audio.onsuccess = () => {
+                          const stored = audio.result?.data;
+                          const hasAudio = stored instanceof Blob ? stored.size > 0 : stored?.blob instanceof Blob && stored.blob.size > 0;
+                          const item = byId.get(candidate.id);
+                          const repairsExisting = item?.charId === charId && keyFor(item) === key && !hasAudio;
+                          const addsNew = !item && !owned.has(key) && audio.result === undefined;
+                          if (!written.has(id) && (repairsExisting || addsNew)) {
+                              assets.put({ id, data: { blob, mimeType: blob.type || 'audio/mpeg', savedAt: Date.now() } });
+                              written.add(id);
+                              result.voices++;
+                              if (addsNew) {
+                                  items.push(candidate);
+                                  byId.set(candidate.id, candidate);
+                                  owned.add(key);
+                                  added++;
+                              }
+                          }
+                          if (--pending === 0 && added) {
+                              assets.put({ id: voice.indexId, data: { ...(!Array.isArray(raw) && raw), version: 1, items } });
+                          }
+                      };
+                  }
+              };
+          };
+          const target = tx.objectStore(STORE_CHARACTERS).getKey(charId);
+          target.onsuccess = () => {
+              if (target.result === undefined) {
+                  failure = new Error('当前用户空间里找不到所选角色');
+                  tx.abort();
+                  return;
+              }
+              addPhotos();
+              addVoices();
+          };
+      });
   },
 
   saveGalleryImage: async (img: GalleryImage): Promise<void> => {

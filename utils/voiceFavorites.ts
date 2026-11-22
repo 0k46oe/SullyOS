@@ -76,12 +76,28 @@ const sanitizeFavorite = (value: unknown): VoiceFavorite | null => {
     };
 };
 
-const loadIndex = async (): Promise<VoiceFavorite[]> => {
-    const raw = await DB.getAssetRaw(VOICE_FAVORITES_INDEX_ASSET_ID).catch(() => null) as Partial<VoiceFavoriteIndex> | VoiceFavorite[] | null;
+export const readVoiceFavoriteIndex = (value: unknown): VoiceFavorite[] => {
+    const raw = value as Partial<VoiceFavoriteIndex> | VoiceFavorite[] | null;
     const items = Array.isArray(raw) ? raw : raw?.items;
     if (!Array.isArray(items)) return [];
     return items.map(sanitizeFavorite).filter((item): item is VoiceFavorite => !!item);
 };
+
+const loadIndex = async () => readVoiceFavoriteIndex(await DB.getAssetRaw(VOICE_FAVORITES_INDEX_ASSET_ID).catch(() => null));
+
+export const mergeCharacterMedia = async (
+    charId: string,
+    photos: Parameters<typeof DB.mergeCharacterMedia>[1],
+    voices: Array<{ favorite: VoiceFavorite; fallback: VoiceFavorite; blob: Blob }>,
+) => withWriteLock(async () => {
+    const result = await DB.mergeCharacterMedia(charId, photos, {
+        indexId: VOICE_FAVORITES_INDEX_ASSET_ID,
+        audioId: voiceFavoriteAudioAssetId,
+        entries: voices,
+    });
+    if (result.voices) notifyChanged();
+    return result;
+});
 
 const saveIndex = async (items: VoiceFavorite[]): Promise<void> => {
     await DB.saveAssetRaw(VOICE_FAVORITES_INDEX_ASSET_ID, { version: 1, items } satisfies VoiceFavoriteIndex);
