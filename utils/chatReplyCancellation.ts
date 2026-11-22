@@ -51,6 +51,7 @@ export class ReplyRun {
     private stoppedDisplay?: Display;
     private settling?: Promise<void>;
     private completed = false;
+    hasSavedAssistantMessage = false;
     private resolveSecretSources!: (ids: number[]) => void;
     readonly secretSourceIds = new Promise<number[]>(resolve => {this.resolveSecretSources = resolve;});
     markCompleted(): void {this.completed = true;}
@@ -92,6 +93,7 @@ export class ReplyRun {
         this.check();
         const id = await DB.saveMessage(message);
         this.savedIds.add(id);
+        if (message.role === 'assistant') this.hasSavedAssistantMessage = true;
         // A transaction can complete after stop was clicked. Never leave its unseen row behind.
         if (this.signal.aborted && !this.stoppedDisplay?.ids.has(id)) await DB.deleteMessages([id]);
         this.check();

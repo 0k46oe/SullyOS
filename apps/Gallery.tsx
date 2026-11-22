@@ -7,7 +7,7 @@ import { safeResponseJson } from '../utils/safeApi';
 import ConfirmDialog from '../components/os/ConfirmDialog';
 import TokenImg from '../components/os/TokenImg';
 import { trackEvent } from '../utils/analytics';
-import { Star } from '@phosphor-icons/react';
+import { Check, Star } from '@phosphor-icons/react';
 import {
     CONTENT_FAVORITES_CHANGED_EVENT,
     getContentFavoriteById,
@@ -20,8 +20,11 @@ const Gallery: React.FC = () => {
     const { closeApp, characters, apiConfig, addToast } = useOS();
     const [view, setView] = useState<'albums' | 'grid' | 'detail'>('albums');
     const [activeCharId, setActiveCharId] = useState<string | null>(null);
+    const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<string> | null>(null);
+    const [deletingPhotos, setDeletingPhotos] = useState(false);
     useAppShortcut(ShortcutAppID.Gallery, intent => {
         if (activeCharId !== intent.characterId) setImages([]);
+        setSelectedPhotoIds(null);
         setSelectedImage(null); setActiveCharId(intent.characterId || null);
         setView(intent.characterId ? 'grid' : 'albums');
     });
@@ -52,14 +55,16 @@ const Gallery: React.FC = () => {
     }, [characters, view]);
 
     useEffect(() => {
-        if (activeCharId) {
-            DB.getGalleryImages(activeCharId).then(imgs => {
-                setImages(imgs.sort((a, b) => b.timestamp - a.timestamp));
-            });
-        }
+        if (!activeCharId) return;
+        let active = true;
+        DB.getGalleryImages(activeCharId).then(imgs => {
+            if (active) setImages(imgs.sort((a, b) => b.timestamp - a.timestamp));
+        });
+        return () => { active = false; };
     }, [activeCharId]);
 
     const handleCharClick = (id: string) => {
+        setImages([]);
         setActiveCharId(id);
         setView('grid');
         trackEvent('打开角色相册');
@@ -107,7 +112,9 @@ const Gallery: React.FC = () => {
     };
 
     const handleBack = () => {
-        if (view === 'detail') { setView('grid'); setShowChatContext(false); }
+        if (deletingPhotos) return;
+        if (selectedPhotoIds) setSelectedPhotoIds(null);
+        else if (view === 'detail') { setView('grid'); setShowChatContext(false); }
         else if (view === 'grid') { setView('albums'); setActiveCharId(null); }
         else closeApp();
     };
@@ -159,6 +166,42 @@ const Gallery: React.FC = () => {
                 trackEvent('删除一张照片');
                 setConfirmDialog(null);
             }
+        });
+    };
+
+    const togglePhoto = (id: string) => {
+        setSelectedPhotoIds(previous => {
+            if (!previous) return previous;
+            const next = new Set(previous);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+
+    const confirmDeleteSelected = () => {
+        if (!selectedPhotoIds?.size) return;
+        const selection = selectedPhotoIds;
+        setConfirmDialog({
+            isOpen: true,
+            title: '删除所选照片',
+            message: `确定从相册删除选中的 ${selection.size} 张照片吗？`,
+            variant: 'danger',
+            onConfirm: async () => {
+                setConfirmDialog(null);
+                setDeletingPhotos(true);
+                try {
+                    await DB.deleteGalleryImages([...selection]);
+                    setImages(previous => previous.filter(img => !selection.has(img.id)));
+                    setSelectedPhotoIds(previous => previous === selection ? null : previous);
+                    addToast(`已删除 ${selection.size} 张照片`, 'success');
+                } catch (error) {
+                    console.warn('[Gallery] batch deletion failed', error);
+                    addToast('删除失败，请稍后重试', 'error');
+                } finally {
+                    setDeletingPhotos(false);
+                }
+            },
         });
     };
 
@@ -348,14 +391,26 @@ CRITICAL: Stay in character. If there's conversation context, your comment shoul
                 </div>
             ) : (
                 <div className="grid grid-cols-3 gap-1">
-                    {images.map(img => (
-                        <div key={img.id} onClick={() => handleImageClick(img)} className="aspect-square bg-slate-100 relative cursor-pointer overflow-hidden rounded-sm">
+                    {images.map((img, index) => (
+                        <button
+                            key={img.id}
+                            type="button"
+                            aria-label={`第 ${index + 1} 张照片`}
+                            aria-pressed={selectedPhotoIds?.has(img.id)}
+                            disabled={deletingPhotos}
+                            onClick={() => selectedPhotoIds ? togglePhoto(img.id) : handleImageClick(img)}
+                            className="aspect-square bg-slate-100 relative overflow-hidden rounded-sm text-left"
+                        >
                             {/* 相册图存的是 blobref 令牌（见 utils/blobRef.ts），TokenImg 会解析成 objectURL；
                                 旧的 base64 / http 图原样透传，两种都显示得出来 */}
                             <TokenImg value={img.url} className="w-full h-full object-cover hover:scale-105 transition-transform duration-300" loading="lazy" />
-                            {img.review && <div className="absolute top-1.5 right-1.5 w-2 h-2 bg-primary rounded-full ring-2 ring-white shadow-sm"></div>}
+                            {selectedPhotoIds ? (
+                                <span aria-hidden="true" className={`absolute top-2 right-2 grid h-6 w-6 place-items-center rounded-full border-2 border-white shadow-sm ${selectedPhotoIds.has(img.id) ? 'bg-slate-800 text-white' : 'bg-black/35'}`}>
+                                    {selectedPhotoIds.has(img.id) && <Check size={14} weight="bold" />}
+                                </span>
+                            ) : img.review && <div className="absolute top-1.5 right-1.5 w-2 h-2 bg-primary rounded-full ring-2 ring-white shadow-sm"></div>}
                             {img.savedDate && <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/50 to-transparent px-1.5 pb-1 pt-3"><span className="text-[8px] text-white/80 font-mono">{img.savedDate}</span></div>}
-                        </div>
+                        </button>
                     ))}
                 </div>
             )}
@@ -471,16 +526,34 @@ CRITICAL: Stay in character. If there's conversation context, your comment shoul
                         <button onClick={handleBack} className="p-2 -ml-2 rounded-full hover:bg-black/5 active:scale-90 transition-transform">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6 text-slate-600"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
                         </button>
-                        <h1 className="text-lg font-semibold text-slate-800 ml-2 tracking-tight">
+                        <h1 className="min-w-0 truncate text-lg font-semibold text-slate-800 ml-2 tracking-tight">
                             {view === 'albums' ? '相册' : characters.find(c => c.id === activeCharId)?.name || '相册'}
                         </h1>
-                        {view === 'grid' && <span className="text-xs text-slate-400 ml-2 font-mono">{images.length}</span>}
+                        {view === 'grid' && <>
+                            <span aria-live="polite" className="text-xs text-slate-500 ml-2 shrink-0">
+                                {selectedPhotoIds ? `已选 ${selectedPhotoIds.size} 张` : images.length}
+                            </span>
+                            {images.length > 0 && (
+                                <button type="button" disabled={deletingPhotos} onClick={() => setSelectedPhotoIds(selectedPhotoIds ? null : new Set())}
+                                    className="ml-auto pl-2 text-sm font-medium text-slate-700 shrink-0 disabled:opacity-40">
+                                    {selectedPhotoIds ? '取消' : '选择'}
+                                </button>
+                            )}
+                        </>
                     </div>
                 </div>
             )}
 
             {view === 'albums' && <div className="flex-1 overflow-y-auto min-h-0">{renderAlbums()}</div>}
             {view === 'grid' && renderGrid()}
+            {view === 'grid' && selectedPhotoIds && (
+                <div className="shrink-0 flex justify-end border-t border-slate-100 bg-white px-4 pt-2 pb-[max(0.5rem,var(--safe-bottom))]">
+                    <button type="button" disabled={!selectedPhotoIds.size || deletingPhotos} onClick={confirmDeleteSelected}
+                        className="rounded-full px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-40">
+                        {deletingPhotos ? '正在删除…' : '删除所选'}
+                    </button>
+                </div>
+            )}
             {view === 'detail' && renderDetail()}
         </div>
     );

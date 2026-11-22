@@ -243,7 +243,7 @@ export const saveMessageContentFavorite = async (
     let obsoleteImageAssetIds: string[] = [];
     if (message.type === 'image') {
         const reference: ContentFavoriteReference = { source: 'chat', charId: message.charId, messageId: message.id };
-        const linkedGalleryImage = await DB.findGalleryImageBySourceMessageId(message.charId, message.id).catch(() => null)
+        const linkedGalleryImage = await DB.findGalleryImageBySourceMessageId(message.charId, message.id, message.content).catch(() => null)
             || await DB.findGalleryImageByUrl(message.charId, message.content).catch(() => null);
         const existingReferences = existing?.kind === 'image' ? existing.references : [];
         obsoleteImageAssetIds = existingReferences

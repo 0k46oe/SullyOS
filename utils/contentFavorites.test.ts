@@ -37,6 +37,33 @@ beforeEach(async () => {
     await Promise.all(images.map(image => DB.deleteGalleryImage(image.id)));
 });
 
+it('adds all replied chat images once and keeps the originals and favorites after bulk album deletion', async () => {
+    const first = 'blobref:gallery_after_reply_first';
+    const second = 'blobref:gallery_after_reply_second';
+    await restoreBlobRef(first, new Blob(['first'], { type: 'image/png' }));
+    await restoreBlobRef(second, new Blob(['second'], { type: 'image/png' }));
+    const photo = message({ id: 911, role: 'user', type: 'image', content: first, metadata: {
+        imageGallery: [first, second], pendingGallerySave: { savedDate: '11-22', chatContext: 'photo context' },
+    } });
+    await DB.saveMessage(photo);
+    expect(await DB.getGalleryImages(CHAR_ID)).toEqual([]);
+    await DB.saveRepliedChatImages('different-character', [photo.id]);
+    expect(await DB.getGalleryImages(CHAR_ID)).toEqual([]);
+    await Promise.all([DB.saveRepliedChatImages(CHAR_ID, [photo.id]), DB.saveRepliedChatImages(CHAR_ID, [photo.id])]);
+    const photos = await DB.getGalleryImages(CHAR_ID);
+    expect(photos.map(image => image.url).sort()).toEqual([first, second].sort());
+    expect(photos.every(image => image.sourceMessageId === photo.id)).toBe(true);
+    const favorite = await saveGalleryImageContentFavorite(photos.find(image => image.url === second)!, 'Sully');
+    await DB.deleteGalleryImages(photos.map(image => image.id));
+    await DB.saveRepliedChatImages(CHAR_ID, [photo.id]);
+    expect(await DB.getGalleryImages(CHAR_ID)).toEqual([]);
+    expect(await DB.getMessageById(photo.id)).toMatchObject({ content: first, metadata: { imageGallery: [first, second] } });
+    expect(await getBlobForRef(second)).not.toBeNull();
+    const saved = (await listContentFavorites()).find(item => item.id === favorite.id)!;
+    const resolved = await resolveContentFavorite(saved);
+    expect('imageUrl' in resolved && resolved.imageUrl).toBeTruthy();
+});
+
 describe('content favorites reference index', () => {
     it.each(['full', 'text_only'])('keeps a selected conversation after source deletion and %s ZIP restoration', async mode => {
         const user = message({ id: 901, role: 'user', content: '值得纪念的约定' });

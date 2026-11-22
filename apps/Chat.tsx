@@ -1608,7 +1608,7 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         // 图片 / 表情消息存的是短令牌，图片二进制单独躺在 blob_assets 里，省掉 base64 那 ~33%
         // 的膨胀。同一张图之前存过就直接复用它的令牌；转不动时原样还回这条 data URL，图不会丢。
         // http 外链（网络表情）和已经是令牌的值都原样通过。
-        // 注意：这条消息和下面存进相册的那条共用同一个令牌（按内容哈希认人，只存一份 Blob），
+        // 注意：这条消息和回复后存进相册的记录共用同一个令牌（按内容哈希认人，只存一份 Blob），
         // 所以删消息时绝不能顺手删 Blob——那会把相册里的同一张图一起删破。失去引用的 Blob
         // 交给孤儿 GC 收（见 utils/blobGc.ts）。
         const storedContent = (type === 'image' || type === 'emoji') && text.startsWith('data:')
@@ -1626,7 +1626,12 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
             })
             : null;
 
-        const msgPayload: any = { charId: char.id, role: 'user', type, content: storedContent, metadata };
+        const msgPayload: any = {
+            charId: char.id, role: 'user', type, content: storedContent,
+            metadata: imageChatContext
+                ? { ...metadata, pendingGallerySave: { savedDate: localDateKey, chatContext: imageChatContext } }
+                : metadata,
+        };
         
         if (replyTarget) {
             msgPayload.replyTo = {
@@ -1640,26 +1645,6 @@ const Chat: React.FC<{homePhone?:HomePhoneChatProps}> = ({homePhone}) => {
         }
 
         const savedUserMsgId = await DB.saveMessage(msgPayload);
-
-        if (type === 'image') {
-            // 相册是消息的附带记录：保留来源消息引用供收藏/去重使用，但相册写入失败
-            // 不能阻断已经落库的聊天消息。
-            try {
-                await DB.saveGalleryImage({
-                    id: `img-${Date.now()}-${Math.random()}`,
-                    charId: char.id,
-                    url: storedContent,
-                    timestamp: Date.now(),
-                    sourceMessageId: savedUserMsgId,
-                    savedDate: localDateKey,
-                    chatContext: imageChatContext || undefined,
-                });
-                addToast('图片已保存至相册', 'info');
-            } catch (err) {
-                console.warn('[Chat] 图片存相册失败，消息照常发送', err);
-                addToast('图片没能存进相册，消息照常发送', 'error');
-            }
-        }
 
         // 小红书链接 → xhs_card。主路径不依赖任何后端：小红书分享文案自带标题（【标题】）
         // 和笔记 id/token，直接解析就能建卡，让「没部署小红书 MCP」的用户也能让角色看到分享了哪篇笔记。

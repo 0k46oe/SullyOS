@@ -1967,6 +1967,28 @@ describe('即时对话的待收记录（走真库）', () => {
     expect(getInstantChatPending(charId)).toBeNull();
   }, 20000);
 
+  it('adds attached photos only when the matching instant reply reaches its last segment', async () => {
+    const charId = 'char-instant-photo-album';
+    const uuid = 'uuid-photo-album';
+    await DB.saveCharacter({ id: charId, name: '即时角色' } as any);
+    const photos = ['https://example.test/one.jpg', 'https://example.test/two.jpg'];
+    const messageId = await DB.saveMessage({ charId, role: 'user', type: 'image', content: photos[0], metadata: {
+      imageGallery: photos, pendingGallerySave: { savedDate: '11-22', chatContext: [] },
+    } });
+    setInstantChatPending(charId, uuid, Date.now(), '即时角色', [messageId]);
+
+    for (const messageIndex of [1, 2]) {
+      await ActiveMsgStore.saveInboxMessage({
+        messageId: `msg-photo-album-${messageIndex}`, charId, charName: '即时角色', body: '看见了',
+        messageType: 'instant', taskUuid: uuid, receivedAt: Date.now(), sentAt: Date.now(),
+        metadata: { charId, messageIndex, totalMessages: 2 },
+      } as any);
+      await flushInboxToChat('SW通知');
+      const saved = await DB.getGalleryImages(charId);
+      expect(saved.map(image => image.url).sort()).toEqual(messageIndex === 1 ? [] : photos);
+    }
+  }, 20000);
+
   // 「任务被作废」的回执随 chat 段一起上云，发出时只记账（worker 回 202 仅表示受理）。
   // 真正销账要等回复落库——这一轮要是整个失败了，回执得留着下轮重新注入，否则角色
   // 永远不知道自己许过的那条排程已经没了，既不会续期也不会解释。

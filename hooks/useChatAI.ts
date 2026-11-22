@@ -1318,6 +1318,7 @@ export const useChatAI = ({
                 const instantChatResult = await replyStep(async () => sendInstantChatTurn({
                     signal: replyRun.signal,
                     char,
+                    pendingGalleryMessageIds: payload.pendingGalleryMessageIds,
                     // 云端要发给模型的就是本地这一份，一个字不改（见 fire_pack 的 chat 段）。
                     chatMessages: (amsg2NoticesBlock
                         ? [...fullMessages, { role: 'system', content: amsg2NoticesBlock }]
@@ -2166,6 +2167,12 @@ export const useChatAI = ({
                 sarModuleSurface: assistantSurfaceMeta,
             }));
             replyRun.markCompleted();
+            if (replyRun.hasSavedAssistantMessage && payload.pendingGalleryMessageIds?.length) {
+                await DB.saveRepliedChatImages(char.id, payload.pendingGalleryMessageIds).catch(error => {
+                    console.warn('[Chat] 图片存相册失败', error);
+                    addToast('回复已收到，图片存相册失败', 'error');
+                });
+            }
             navigationPetOutcome = 'success';
             navigationPet.finish('success');
             // 最后一批正式消息已交给 setMessages；同一轮更新撤掉预览，不再逐条补弹。

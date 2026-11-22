@@ -1838,6 +1838,45 @@ export const DB = {
       });
   },
 
+  saveRepliedChatImages: async (charId: string, messageIds: readonly number[]): Promise<void> => {
+      if (!messageIds.length) return;
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+          const transaction = db.transaction([STORE_MESSAGES, STORE_GALLERY], 'readwrite');
+          const messages = transaction.objectStore(STORE_MESSAGES);
+          const gallery = transaction.objectStore(STORE_GALLERY);
+          for (const messageId of new Set(messageIds)) {
+              const request = messages.get(messageId);
+              request.onsuccess = () => {
+                  const message = request.result as Message | undefined;
+                  if (!message || message.charId !== charId || message.groupId
+                      || message.role !== 'user' || message.type !== 'image') return;
+                  const { pendingGallerySave, ...metadata } = message.metadata ?? {};
+                  if (!pendingGallerySave) return;
+                  const attachments = Array.isArray(metadata.imageGallery) ? metadata.imageGallery : [];
+                  const images = [message.content, ...attachments];
+                  const urls = [...new Set(images.filter((url): url is string => typeof url === 'string' && url.length > 0))];
+                  urls.forEach((url, index) => {
+                      const image: GalleryImage = {
+                          id: `chat-image-${message.id}-${index}`,
+                          charId, url, timestamp: message.timestamp, sourceMessageId: message.id,
+                          savedDate: pendingGallerySave.savedDate, chatContext: pendingGallerySave.chatContext,
+                      };
+                      const existing = gallery.getKey(image.id);
+                      existing.onsuccess = () => {
+                          if (existing.result === undefined) gallery.add(image);
+                      };
+                  });
+                  // Consume the marker with the album writes so a retry cannot restore deleted entries.
+                  messages.put({ ...message, metadata });
+              };
+          }
+          transaction.oncomplete = () => resolve();
+          transaction.onerror = () => reject(transaction.error);
+          transaction.onabort = () => reject(transaction.error || new Error('saveRepliedChatImages aborted'));
+      });
+  },
+
   getGalleryImages: async (charId?: string): Promise<GalleryImage[]> => {
       const db = await openDB();
       return new Promise((resolve, reject) => {
@@ -1865,7 +1904,7 @@ export const DB = {
       });
   },
 
-  findGalleryImageBySourceMessageId: async (charId: string, messageId: number): Promise<GalleryImage | null> => {
+  findGalleryImageBySourceMessageId: async (charId: string, messageId: number, url: string): Promise<GalleryImage | null> => {
       const db = await openDB();
       return new Promise((resolve, reject) => {
           const transaction = db.transaction(STORE_GALLERY, 'readonly');
@@ -1877,7 +1916,7 @@ export const DB = {
                   return;
               }
               const image = cursor.value as GalleryImage;
-              if (image.sourceMessageId === messageId) {
+              if (image.sourceMessageId === messageId && image.url === url) {
                   resolve(image);
                   return;
               }
@@ -1928,16 +1967,20 @@ export const DB = {
       });
   },
 
-  deleteGalleryImage: async (id: string): Promise<void> => {
+  deleteGalleryImage: (id: string): Promise<void> => DB.deleteGalleryImages([id]),
+
+  deleteGalleryImages: async (ids: string[]): Promise<void> => {
+      if (!ids.length) return;
       const { preserveContentFavoritesBeforeGalleryDeletion } = await import('./contentFavorites');
-      await preserveContentFavoritesBeforeGalleryDeletion({ ids: [id] });
+      await preserveContentFavoritesBeforeGalleryDeletion({ ids });
       const db = await openDB();
       return new Promise((resolve, reject) => {
           const transaction = db.transaction(STORE_GALLERY, 'readwrite');
-          transaction.objectStore(STORE_GALLERY).delete(id);
+          const gallery = transaction.objectStore(STORE_GALLERY);
+          for (const id of ids) gallery.delete(id);
           transaction.oncomplete = () => resolve();
           transaction.onerror = () => reject(transaction.error);
-          transaction.onabort = () => reject(transaction.error || new Error('deleteGalleryImage aborted'));
+          transaction.onabort = () => reject(transaction.error || new Error('deleteGalleryImages aborted'));
       });
   },
 

@@ -98,6 +98,7 @@ export interface AmsgInstantChatPending {
   acceptedAt: number;
   /** 角色名快照（全局横幅显示用）。必填：唯一写入方恒定带上（角色名为空就是空串）。 */
   charName: string;
+  pendingGalleryMessageIds?: number[];
 }
 
 type PendingMap = Record<string, AmsgInstantChatPending>;
@@ -117,6 +118,9 @@ const readPendingMap = (): PendingMap => {
           uuid: record.uuid,
           acceptedAt: record.acceptedAt,
           charName: typeof record.charName === 'string' ? record.charName : '',
+          ...(Array.isArray(record.pendingGalleryMessageIds)
+            ? { pendingGalleryMessageIds: record.pendingGalleryMessageIds.filter(Number.isSafeInteger) }
+            : {}),
         };
       }
     }
@@ -152,9 +156,12 @@ export const setInstantChatPending = (
   uuid: string,
   acceptedAt = Date.now(),
   charName = '',
+  pendingGalleryMessageIds?: number[],
 ): void => {
   const map = readPendingMap();
-  map[charId] = { charId, uuid, acceptedAt, charName };
+  map[charId] = { charId, uuid, acceptedAt, charName,
+    ...(pendingGalleryMessageIds?.length ? { pendingGalleryMessageIds } : {}),
+  };
   writePendingMap(map);
   announcePendingChanged(charId);
 };
@@ -561,6 +568,7 @@ export const sendInstantChatTurn = async (params: {
   signal?: AbortSignal;
   char: CharacterProfile;
   chatMessages: Array<{ role: string; content: unknown }>;
+  pendingGalleryMessageIds?: number[];
   /** 本地「实时状态」段在 chatMessages 里的下标；-1 / 不传时 worker 把时效块追加到末尾。 */
   timelyInsertAt?: number;
   /** 本地生成这一轮会用的凭据（effectiveApi），云端必须用同一份。 */
@@ -650,7 +658,7 @@ export const sendInstantChatTurn = async (params: {
       throw replyAbortError();
     }
     // 先记待收再释放占位（finally），挡板的两个信号无缝交接，不留「都不认」的空窗。
-    setInstantChatPending(params.char.id, uuid, Date.now(), params.char.name);
+    setInstantChatPending(params.char.id, uuid, Date.now(), params.char.name, params.pendingGalleryMessageIds);
     recordCloudApiCall({
       id: cloudApiCallLogId(uuid),
       route: 'cloud-instant-chat',

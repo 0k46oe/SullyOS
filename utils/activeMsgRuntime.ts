@@ -1968,6 +1968,11 @@ const flushInboxToChatImpl = async (trigger: FlushTrigger, charId?: string): Pro
           // 否则角色永远不知道自己许过的那条排程已经没了。认 uuid，上一轮迟到的结论
           // 不许销新一轮的账。
           void settleInstantChatExpiredNotices(message.charId, pendingForChar.uuid);
+          if (pendingForChar.pendingGalleryMessageIds?.length) {
+            await DB.saveRepliedChatImages(message.charId, pendingForChar.pendingGalleryMessageIds).catch(error => {
+              log.warn('回复已收到，图片存相册失败', { charId: message.charId, error });
+            });
+          }
           // 这条回复是从 outbox 补收回来的 = 真推送没送到 = 那条任务行多半正挂在
           // 2/4/6 分钟的重试队列里，跑起来就是同一轮的第二份回复。尽力取消；
           // 正常送达的路不带这个标记（行发完即删，也无从取消），一个多余请求都不发。

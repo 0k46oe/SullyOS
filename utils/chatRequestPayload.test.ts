@@ -39,6 +39,20 @@ const baseInput = (): BuildChatPayloadInput => ({
 const joinMessages = (messages: Array<{ content: any }>): string =>
     messages.map(m => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content))).join('\n');
 
+it('records pending album images locally and includes each attachment once in the model request', async () => {
+    const input = baseInput();
+    const photos = ['https://example.test/first.jpg', 'https://example.test/second.jpg'];
+    input.historyMsgs = [{
+        id: 8, charId: input.char.id, role: 'user', type: 'image', content: photos[0], timestamp: Date.now(),
+        metadata: { imageGallery: photos, pendingGallerySave: { savedDate: '11-22', chatContext: 'local-only album context' } },
+    }];
+    const payload = await buildChatRequestPayload(input);
+    const parts = payload.fullMessages.flatMap(row => Array.isArray(row.content) ? row.content : []);
+    expect(parts.filter(part => part.type === 'image_url').map(part => part.image_url.url)).toEqual(photos);
+    expect(payload.pendingGalleryMessageIds).toEqual([8]);
+    expect(joinMessages(payload.fullMessages)).not.toContain('local-only album context');
+});
+
 it('recovers old generated image descriptions and skips independent vision for explicit modes', async () => {
     const input = baseInput();
     input.historyMsgs = [{ id: 8, charId: input.char.id, role: 'assistant', type: 'image', content: 'blobref:generated', timestamp: Date.now(), metadata: { generatedImage: true } }] as any;

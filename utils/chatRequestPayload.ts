@@ -124,6 +124,8 @@ export type ChatPreparationStage='vision'|'memory'|'prompt'|'collaboration'|'tas
 export type ChatPreparationEvent={stage:ChatPreparationStage;status:'start'}|{stage:ChatPreparationStage;status:'end';ms:number};
 
 export interface BuildChatPayloadResult {
+    /** Local-only IDs of pending chat photos represented in the outgoing history. */
+    pendingGalleryMessageIds?: number[];
     /** Shared task receipts actually included for a home reply; acknowledge only after success. */
     amsg2ExpiredNoticeIds?: string[];
     /** 完整 system prompt（含所有可选块） */
@@ -311,8 +313,12 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
     recentMsgsHint = protectPendingChatTurn(expandHomeContextHistory(recentMsgsHint));
     const chronologicalHistory = protectPendingChatTurn(expandHomeContextHistory(historyMsgsForPrompt));
 
+    const pendingGalleryMessageIds = (history: Message[]) => history
+        .filter(message => message.role === 'user' && message.type === 'image' && message.metadata?.pendingGallerySave)
+        .map(message => message.id);
+
     if (isPromptBuildSkipped()) {
-        const { apiMessages } = ChatPrompts.buildMessageHistory(
+        const { apiMessages, historySlice } = ChatPrompts.buildMessageHistory(
             historyMsgsForPrompt,
             contextLimit,
             char,
@@ -325,6 +331,7 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
         console.warn('[DevDebug] Prompt Build skipped: sending chat history without system prompt injection.');
         return {
             systemPrompt: '',
+            pendingGalleryMessageIds: pendingGalleryMessageIds(historySlice),
             cleanedApiMessages,
             fullMessages: [...cleanedApiMessages],
             volatileTailIndex: -1,
@@ -378,7 +385,7 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
     // 真正要发送的历史为准，否则模型会收到特殊模式正文，却收不到「切回聊天格式」的提示。
     const returningFromMode = detectChatModeTransition(chronologicalHistory);
     // 在公共上下文管线之前准备实际历史，世界书触发和摆放共用这一份消息。
-    const { apiMessages } = ChatPrompts.buildMessageHistory(
+    const { apiMessages, historySlice } = ChatPrompts.buildMessageHistory(
         historyMsgsForPrompt,
         contextLimit,
         char,
@@ -570,6 +577,7 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
         // 返回给情绪评估 / 调试查看器的仍是"完整拼接"——信息与主 API 完全一致，
         // 只是主 API 的实际消息结构把易变尾段放在历史之后（见上）。
         systemPrompt: systemPrompt + volatileTail,
+        pendingGalleryMessageIds: pendingGalleryMessageIds(historySlice),
         cleanedApiMessages: messagesWithWorldbookDepth,
         fullMessages: finalMessages,
         // 合并开关开着时多条 system 被并进开头一条，下标失去意义 → 交出 -1，调用方退回贴尾。
