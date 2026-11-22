@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { X, DownloadSimple, MagnifyingGlassPlus, MagnifyingGlassMinus, CaretLeft, CaretRight } from '@phosphor-icons/react';
+import { X, DownloadSimple, MagnifyingGlassPlus, MagnifyingGlassMinus } from '@phosphor-icons/react';
 import TokenImg from '../os/TokenImg';
 import { useBlobRefUrl } from '../../utils/blobRef';
 import './ChatImage.css';
@@ -53,10 +53,8 @@ export function ImageViewer({ value, fallback, name, onClose, items, index = 0, 
             <button onClick={() => setZoom(v => !v)} aria-label={zoom ? '缩小图片' : '放大图片'} title={zoom ? '缩小' : '放大'}>{zoom ? <MagnifyingGlassMinus size={24} /> : <MagnifyingGlassPlus size={24} />}</button>
             {src && <a href={src} download={name || 'photo'} aria-label="保存图片" title="保存图片"><DownloadSimple size={24} /></a>}
         </div></header>
-        <div className={`chat-image-stage ${zoom ? 'is-zoomed' : ''}`} onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-            {canNavigate && <button type="button" className="chat-image-nav is-previous" aria-label="上一张" disabled={currentIndex === 0} onClick={() => move(-1)}><CaretLeft size={28} /></button>}
+        <div className={`chat-image-stage ${canNavigate ? 'is-navigable' : ''} ${zoom ? 'is-zoomed' : ''}`} onTouchStart={onTouchStart} onTouchEnd={onTouchEnd} onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
             {src ? <img src={src} alt={canNavigate ? `第 ${currentIndex + 1} 张图片，共 ${viewerItems.length} 张` : '聊天图片预览'} onError={() => setFailed(true)} /> : <span role="status">正在读取图片…</span>}
-            {canNavigate && <button type="button" className="chat-image-nav is-next" aria-label="下一张" disabled={currentIndex === viewerItems.length - 1} onClick={() => move(1)}><CaretRight size={28} /></button>}
         </div>
     </div>, document.body);
 }

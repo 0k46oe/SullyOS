@@ -30,6 +30,8 @@ describe('ImageViewer gallery navigation', () => {
         };
 
         expect(dialog.querySelector('.chat-image-viewer-count')?.textContent).toBe('1 / 3');
+        expect(dialog.querySelectorAll('.chat-image-nav')).toHaveLength(0);
+        expect(dialog.querySelector('.chat-image-stage')?.classList.contains('is-navigable')).toBe(true);
         swipe(240, 100);
         expect(dialog.querySelector('.chat-image-viewer-count')?.textContent).toBe('2 / 3');
         expect(dialog.querySelector('img')?.getAttribute('src')).toBe('second.png');
