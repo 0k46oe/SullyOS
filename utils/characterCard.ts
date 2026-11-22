@@ -23,6 +23,7 @@ export const CARD_STRIPPED_FIELDS = [
   'characterUserProfile',
   'tavernStoryTime',          // 本机的剧情进度，接收方从自己的剧情时间开始
     'imageGenerationSelection',
+    'fixedImageFacePrompt',
     'imageTextApiPresetId',
   'chatImageGenerationEnabled',
   'chatActionDescriptionEnabled',

@@ -20,4 +20,16 @@ describe('manual OAI image generation', () => {
     expect(mocks.image).toHaveBeenCalledWith(char, '中文画面', expect.objectContaining({ config }));
     expect(mocks.save).toHaveBeenCalledWith(expect.objectContaining({ imageRef: 'image-ref' }), { skipThumbnail: true });
   });
+  it.each([
+    ['[露脸] 靠窗微笑', '当前角色的固定五官：眼下有痣\n画面：靠窗微笑'],
+    ['[不露脸] 雨中的背影', '雨中的背影'],
+  ])('手动生图按构图使用本角色五官，并保留手选预设：%s', async (text, expected) => {
+    const config: any = { oai: { apiKey: 'k', model: 'image' } };
+    const char: any = { id: 'c', fixedImageFacePrompt: '眼下有痣', imageGenerationSelection: { provider: 'oai' } };
+    mocks.text.mockResolvedValueOnce({ choices: [{ message: { content: text } }] });
+    await generateAndSaveChatImage(char, {} as any, '拍照', { config, presets: [], imagePresetId: 'manual' });
+    expect(mocks.image).toHaveBeenLastCalledWith(char, expected, expect.objectContaining({ presetId: 'manual' }));
+    expect(mocks.save).toHaveBeenLastCalledWith(expect.objectContaining({ prompt: expected }), { skipThumbnail: true });
+    expect(mocks.build.mock.lastCall?.[0].instructions).toContain('不要描绘或改写');
+  });
 });

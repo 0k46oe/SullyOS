@@ -4,6 +4,7 @@ import { createDialogueFetch } from './dialogueTransport';
 import { extractContent } from './safeApi';
 import { imageInstruction, readImageGenerationConfig, resolveImageSelection, resolveImageTextApi } from './chatImageConfig';
 import { buildImageRequest } from './chatImageGeneration';
+import { resolveFaceScene } from './chatImageFaceRouting';
 import { generateImageWithFallback } from './chatImageWithFallback';
 import { saveGeneratedChatImage } from './chatImageLibrary';
 
@@ -25,8 +26,11 @@ export async function generateAndSaveChatImage(char: CharacterProfile, user: Use
     try {
         options.signal?.throwIfAborted(); options.onProgress?.('正在整理图片提示词…');
         // memoryPalaceInjection: '' is intentionally represented by the empty request-scoped context below.
+        const outputFormat = char.fixedImageFacePrompt?.trim()
+            ? '只输出开头的露脸标记和之后的画面描述，不要加解释、其他标签或代码块。'
+            : '只输出可直接提交给 ' + selection.provider.toUpperCase() + ' 的图片提示词，不要解释、标签或代码块。';
         const messages = await ContextBuilder.buildCharacterRequest({ char, user, memoryPalaceContext: '', instructions:
-            '本次是独立的图片提示词整理任务，不是聊天回复。只输出可直接提交给 ' + selection.provider.toUpperCase() + ' 的图片提示词，不要解释、标签或代码块。\n用户选择的生图规则：\n' + instructions },
+            '本次是独立的图片提示词整理任务，不是聊天回复。' + outputFormat + '\n用户选择的生图规则：\n' + instructions },
             [{ role: 'user', content: requirement.trim() }]);
         options.signal?.throwIfAborted();
         const data = await createDialogueFetch(api)(api.baseUrl.replace(/\/+$/, '') + '/chat/completions', {
@@ -34,8 +38,14 @@ export async function generateAndSaveChatImage(char: CharacterProfile, user: Use
             headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + api.apiKey },
             body: JSON.stringify({ model: api.model, messages, stream: false, max_tokens: 1600, ...(typeof api.temperature === 'number' ? { temperature: api.temperature } : {}) }),
         }, 0, 0, { appName: '消息', charId: char.id, charName: char.name, purpose: '生图提示词整理' });
-        const prompt = extractContent(data).trim();
+        let prompt = extractContent(data).trim();
         if (!prompt) throw new Error('生图文字 API 返回了空提示词，未调用生图接口');
+        if (char.fixedImageFacePrompt?.trim()) {
+            const scene = await resolveFaceScene(char, prompt, options.signal);
+            options.signal?.throwIfAborted();
+            if (!scene) throw new Error('已取消生图');
+            prompt = scene.prompt;
+        }
         options.signal?.throwIfAborted(); options.onProgress?.('正在生成图片…');
         const result = await generateImageWithFallback(char, prompt, { config, signal: options.signal, presetId: selection.provider === 'oai' ? options.imagePresetId : undefined });
         options.onProgress?.('正在保存到本机…');

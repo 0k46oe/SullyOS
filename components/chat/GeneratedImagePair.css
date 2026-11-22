@@ -14,7 +14,7 @@
 .sully-chat-generated-card:first-child{display:flex;align-items:center;justify-content:center;width:max-content;max-width:min(120px,calc((72vw - 100px)/2));max-height:42vh;aspect-ratio:auto;flex:0 1 auto}
 .sully-chat-generated-card:first-child .sully-chat-generated-face{display:inline-flex;width:auto;height:auto;background:transparent;box-shadow:none}
 .sully-chat-generated-card:first-child .sully-chat-generated-face img{display:block;width:auto;height:auto;max-width:min(120px,calc((72vw - 100px)/2));max-height:42vh;object-fit:contain;border-radius:16px;background:transparent;box-shadow:0 1px 4px #0003}
-.sully-chat-image-expand{flex:none;border:1px solid #ded8cd;border-radius:999px;background:#fff;color:#5d554b;padding:6px 12px;font-size:12px;white-space:nowrap;cursor:pointer}.sully-chat-generated-expand{min-width:62px;box-sizing:border-box;padding:3px 12px;font-size:11px;line-height:16px}
+.sully-chat-image-expand{flex:none;border:1px solid #ded8cd;border-radius:999px;background:#fff;color:#5d554b;padding:6px 12px;font-size:12px;white-space:nowrap;cursor:pointer}.sully-chat-generated-expand{min-width:52px;box-sizing:border-box;padding:3px 12px;font-size:11px;line-height:16px}
 .sully-chat-image-save-status {
     display: block;
     margin-top: 6px;

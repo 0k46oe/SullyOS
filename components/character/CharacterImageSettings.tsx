@@ -23,6 +23,10 @@ export default function CharacterImageSettings({ character, onChange }: { charac
                 {(['oai', 'nai'] as const).map(provider => <optgroup key={provider} label={provider === 'oai' ? 'OAI' : 'NovelAI'}><option value={JSON.stringify([provider, ''])}>{provider.toUpperCase()} · 默认要求</option>{(apiConfig.imageGeneration?.presets?.[provider] || []).map(p => <option key={p.id} value={JSON.stringify([provider, p.id])}>{p.name}</option>)}</optgroup>)}
                 </select>
             </label>
+            <label className="mt-4 block min-w-0 text-xs text-slate-600">固定五官（可选）
+                <textarea rows={3} className="mt-2 block w-full min-w-0 rounded-xl border border-slate-200 bg-white p-3 text-sm" placeholder="例如：深棕色瞳孔，眼尾微垂，左眼下有一颗小痣" value={character.fixedImageFacePrompt ?? ''} onChange={e => onChange({ fixedImageFacePrompt: e.target.value || undefined })} />
+                <span className="mt-1 block leading-relaxed text-slate-400">露脸时会把这段原文加进生图提示词；文字模型只写表情、穿着、动作和场景。不露脸时不会添加。手动生图若未标明露脸情况，会先让你确认。</span>
+            </label>
             {selection?.provider === 'oai' && <div className="mt-4 space-y-3 text-xs text-slate-600">
                 <label className="flex items-center gap-2"><input type="checkbox" checked={!!selection.faceRouting} onChange={e => onChange({ imageGenerationSelection: { ...selection, faceRouting: e.target.checked ? {} : undefined } })} />自动发图按是否露脸选择预设</label>
                 {selection.faceRouting && <>

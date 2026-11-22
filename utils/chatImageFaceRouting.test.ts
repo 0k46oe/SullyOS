@@ -5,6 +5,14 @@ import { parseImageFaceMarker, resolveAutomaticImagePreset } from './chatImageFa
 const char: any = { imageGenerationSelection: { provider: 'oai', faceRouting: { facePresetId: 'a', noFacePresetId: 'b' } } };
 const config: any = { presets: { oai: [{ id: 'a', name: '露脸' }, { id: 'b', name: '不露脸' }] } };
 describe('automatic image preset routing', () => {
+    it('角色自动发图时按露脸标记加入原文，兼容两种接口', async () => {
+        const fixedImageFacePrompt = '灰瞳，左眼下有痣';
+        expect(await resolveAutomaticImagePreset({ ...char, fixedImageFacePrompt }, config, '[露脸] 靠窗微笑'))
+            .toEqual({ prompt: `当前角色的固定五官：${fixedImageFacePrompt}\n画面：靠窗微笑`, presetId: 'a' });
+        const nai = { ...char, fixedImageFacePrompt, imageGenerationSelection: { provider: 'nai' } };
+        expect(await resolveAutomaticImagePreset(nai, {}, '[露脸] smiling')).toEqual({ prompt: `${fixedImageFacePrompt}, smiling` });
+        expect(await resolveAutomaticImagePreset(nai, {}, '[不露脸] landscape')).toEqual({ prompt: 'landscape' });
+    });
     it('uses the marker and removes it from the prompt', async () => {
         expect(await resolveAutomaticImagePreset(char, config, '[露脸] 拍一张自拍')).toEqual({ prompt: '拍一张自拍', presetId: 'a' });
         expect(await resolveAutomaticImagePreset(char, config, '【不露脸】手部特写')).toEqual({ prompt: '手部特写', presetId: 'b' });

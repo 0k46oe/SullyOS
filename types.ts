@@ -3069,6 +3069,7 @@ export interface CharacterProfile {
   chatActionDescriptionEnabled?: boolean;
   chatImageGenerationEnabled?: boolean;
   generatedImageContextMode?: 'image' | 'prompt';
+  fixedImageFacePrompt?: string;
   imageGenerationSelection?: { provider: ImageGenerationProvider; presetId?: string; faceRouting?: { facePresetId?: string; noFacePresetId?: string } };
   imageTextApiPresetId?: string;
   tavernImport?: {
