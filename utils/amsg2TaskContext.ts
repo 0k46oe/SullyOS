@@ -214,10 +214,14 @@ export function insertAmsg2TaskContextBlock<T>(
 ): T[] {
   let insertionIndex = volatileTailIndex;
   if (insertionIndex < 0 || insertionIndex > messages.length) {
-    const lastValidEndingIndex = messages.findLastIndex((message) => {
-      const role = (message as any)?.role;
-      return role === 'user' || role === 'tool' || role === 'function';
-    });
+    let lastValidEndingIndex = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const role = (messages[i] as any)?.role;
+      if (role === 'user' || role === 'tool' || role === 'function') {
+        lastValidEndingIndex = i;
+        break;
+      }
+    }
     insertionIndex = lastValidEndingIndex >= 0 ? lastValidEndingIndex : Math.max(0, messages.length - 1);
   }
   return [...messages.slice(0, insertionIndex), block, ...messages.slice(insertionIndex)];
