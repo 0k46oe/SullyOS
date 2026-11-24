@@ -201,31 +201,41 @@ export function buildAmsg2TaskContextText(
 }
 
 /**
- * 把排程块插入本轮要发的消息数组：紧挨易变尾段之前。
- *
- * volatileTailIndex 正常时保留原有插入位置；当它无效（Prompt Build 跳过或调试合并
- * system 消息）时，不能退回数组末尾——否则最后一条会变成 system，触发 API 400。
- * fallback 放在最后一条 user/tool/function 消息之前，保留请求合法的结束角色。
+ * 把排程块插进本轮要发的消息数组。
  */
 export function insertAmsg2TaskContextBlock<T>(
   messages: T[],
   block: T,
   volatileTailIndex: number,
 ): T[] {
-  let insertionIndex = volatileTailIndex;
-  if (insertionIndex < 0 || insertionIndex > messages.length) {
-    let lastValidEndingIndex = -1;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const role = (messages[i] as any)?.role;
-      if (role === 'user' || role === 'tool' || role === 'function') {
-        lastValidEndingIndex = i;
-        break;
-      }
-    }
-    insertionIndex = lastValidEndingIndex >= 0 ? lastValidEndingIndex : Math.max(0, messages.length - 1);
+  if (volatileTailIndex < 0 || volatileTailIndex > messages.length) return [...messages, block];
+  return [...messages.slice(0, volatileTailIndex), block, ...messages.slice(volatileTailIndex)];
+}
+
+/**
+ * 酒馆导入角色专用：volatile tail 断点失效时，避免排程 system 块落到消息末尾。
+ * 正常断点仍沿用原插入位置；普通本机角色继续使用 insertAmsg2TaskContextBlock 原逻辑。
+ */
+export function insertTavernAmsg2TaskContextBlock<T>(
+  messages: T[],
+  block: T,
+  volatileTailIndex: number,
+): T[] {
+  if (volatileTailIndex >= 0 && volatileTailIndex <= messages.length) {
+    return [...messages.slice(0, volatileTailIndex), block, ...messages.slice(volatileTailIndex)];
   }
+  let lastUserLikeIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const role = (messages[i] as any)?.role;
+    if (role === 'user' || role === 'tool' || role === 'function') {
+      lastUserLikeIndex = i;
+      break;
+    }
+  }
+  const insertionIndex = lastUserLikeIndex >= 0 ? lastUserLikeIndex : Math.max(0, messages.length - 1);
   return [...messages.slice(0, insertionIndex), block, ...messages.slice(insertionIndex)];
 }
+
 
 export interface Amsg2TaskContextResult {
   text: string;
