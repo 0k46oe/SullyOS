@@ -207,30 +207,6 @@ export const installIOSStandaloneWorkaround = () => {
         setViewportVars();
     };
 
-    // iOS standalone 从后台回来时，WebKit 偶尔不派发 resize，visualViewport 也可能暂时保留旧高度。
-    // 恢复后等视口布局稳定，再以当前可视高度重建基线；只作用于 iOS 桌面 PWA，不碰 Safari/安卓。
-    const handlePageResume = () => {
-        if (!useStandaloneFixes) return;
-        window.requestAnimationFrame(() => {
-            window.requestAnimationFrame(() => {
-                window.setTimeout(() => {
-                    if (document.visibilityState === 'hidden') return;
-                    const resumedHeight = Math.round(window.visualViewport?.height || window.innerHeight);
-                    if (resumedHeight <= 150) return;
-                    // 切回前台通常已收起系统键盘；丢弃后台遗留的高度/安全区缓存，避免把旧值当键盘态。
-                    stableStandaloneHeight = resumedHeight;
-                    cachedTopInset = null;
-                    cachedBottomInset = null;
-                    setViewportVars();
-                }, 120);
-            });
-        });
-    };
-
-    const handleVisibilityChange = () => {
-        if (document.visibilityState === 'visible') handlePageResume();
-    };
-
     // 只有旋转 / 窗口尺寸变化才真的改变安全区：让缓存失效后重新探测（滚动、聚焦走缓存，不再重排）。
     const handleSafeAreaChange = () => {
         cachedTopInset = null;
@@ -275,10 +251,6 @@ export const installIOSStandaloneWorkaround = () => {
 
     window.addEventListener('resize', handleSafeAreaChange);
     window.addEventListener('orientationchange', handleSafeAreaChange);
-    if (useStandaloneFixes) {
-        window.addEventListener('pageshow', handlePageResume);
-        document.addEventListener('visibilitychange', handleVisibilityChange);
-    }
     window.visualViewport?.addEventListener('resize', handleViewportChange);
     window.visualViewport?.addEventListener('scroll', handleViewportChange);
     if (useKeyboardFixes) {
