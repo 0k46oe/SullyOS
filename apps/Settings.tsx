@@ -2341,9 +2341,9 @@ const Settings: React.FC = () => {
             </label>
 
             <div className="mb-3">
-                <button onClick={() => handleExport('full')} className="sully-backup-full w-full py-4 bg-gradient-to-r from-violet-500 to-purple-600 border border-violet-300 rounded-xl text-xs font-bold text-white shadow-sm active:scale-95 transition-all flex flex-col items-center gap-2 relative overflow-hidden mb-3">
-                    <div className="absolute top-0 right-0 px-1.5 py-0.5 bg-white/20 text-[9px] text-white rounded-bl-lg font-bold">完整</div>
-                    <div className="p-2 bg-white/20 rounded-full"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0-3-3m3 3 3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" /></svg></div>
+                <button onClick={() => handleExport('full')} className="sully-backup-full w-full py-4 bg-gradient-to-r from-[#DCE6D0] to-[#CFDCC2] border border-[#B5C6A5] rounded-xl text-xs font-bold text-[#35513C] shadow-sm active:scale-95 transition-all flex flex-col items-center gap-2 relative overflow-hidden mb-3">
+                    <div className="absolute top-0 right-0 px-1.5 py-0.5 bg-[#B5C6A5]/45 text-[9px] text-[#35513C] rounded-bl-lg font-bold">完整</div>
+                    <div className="p-2 bg-[#B5C6A5]/45 rounded-full text-[#35513C]"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5m8.25 3v6.75m0 0-3-3m3 3 3-3M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" /></svg></div>
                     <span>整合导出 (文字+媒体)</span>
                 </button>
             </div>
@@ -2468,10 +2468,10 @@ const Settings: React.FC = () => {
                 )}
             </div>
             {/* 备份提醒频率：糯米机数据只在本机，隔 N 天没导出会弹一次提醒 */}
-            <div className="mb-4 p-3.5 bg-gradient-to-br from-rose-50 to-orange-50 border border-rose-100 rounded-xl">
+            <div className="mb-4 p-3.5 bg-gradient-to-br from-[#F2F0D7] to-[#E6EAD0] border border-[#D2DAB8] rounded-xl">
                 <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-bold text-slate-600">备份提醒频率</span>
-                    <span className="text-xs font-bold text-rose-500">每 {backupReminderDays} 天</span>
+                    <span className="text-xs font-bold text-[#496344]">每 {backupReminderDays} 天</span>
                 </div>
                 <input
                     type="range"
@@ -2484,7 +2484,7 @@ const Settings: React.FC = () => {
                         setBackupReminderDays(v);
                         setBackupReminderIntervalDays(v);
                     }}
-                    className="w-full h-2 bg-rose-100 rounded-full appearance-none accent-rose-500"
+                    className="w-full h-2 bg-[#C8D5B8] rounded-full appearance-none accent-[#55734D]" style={{ accentColor: "#55734D" }}
                 />
                 <div className="flex justify-between text-[9px] text-slate-400 mt-1 px-0.5">
                     <span>{BACKUP_REMINDER_MIN_DAYS} 天</span>
