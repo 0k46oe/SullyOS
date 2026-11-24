@@ -85,6 +85,7 @@ import { rerankDocuments } from './rerank';
 // 认知消化由用户在记忆宫殿 App 手动触发，不在聊天管线中自动运行
 import { MemoryNodeDB, MemoryVectorDB, MemoryLinkDB, AnticipationDB, EventBoxDB } from './db';
 import { DB } from '../db';
+import { resolveCharacterUserProfile } from '../characterUserProfile';
 import { isMessageSemanticallyRelevant, formatMessageForPrompt } from '../messageFormat';
 import { sanitizeQuerySourceMessages } from './querySanitizer';
 import { getLocalDateKey } from '../localDate';
@@ -1778,7 +1779,8 @@ async function extractAndStoreMemories(
         try {
             const chars = await DB.getAllCharacters();
             const charProfile = chars.find(c => c.id === charId);
-            const userProfile = await DB.getUserProfile();
+            const globalUserProfile = await DB.getUserProfile();
+            const userProfile = resolveCharacterUserProfile(globalUserProfile, charProfile);
 
             // 5a. 精简角色档案（姓名、设定、世界观）
             if (charProfile) {
