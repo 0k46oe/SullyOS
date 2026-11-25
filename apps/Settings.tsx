@@ -510,8 +510,6 @@ const Settings: React.FC = () => {
       cloudBackupToWebDAV, cloudRestoreFromWebDAV, listCloudBackups,
   } = useOS();
   
-  const [backupTab, setBackupTab] = useState<'local' | 'cloud'>('local');
-  const [apiSettingsTab, setApiSettingsTab] = useState<'chat' | 'vision' | 'image'>('chat');
   const [localKey, setLocalKey] = useState(apiConfig.apiKey);
   const [localAnthropicPromptCache, setLocalAnthropicPromptCache] = useState(apiConfig.anthropicPromptCache !== false);
   const [localAnthropicPromptCacheTtl, setLocalAnthropicPromptCacheTtl] = useState<'5m' | '1h'>(apiConfig.anthropicPromptCacheTtl === '1h' ? '1h' : '5m');
@@ -2296,13 +2294,12 @@ const Settings: React.FC = () => {
                         </button>
                     </div>
                 )}
-            </div>        {/* 备份与恢复：本地 / 云端页签 */}
-        <div className="rounded-2xl border border-slate-200 bg-white p-1.5 flex gap-1">
-            <button type="button" onClick={() => setBackupTab('local')} className={backupTab === 'local' ? 'flex-1 rounded-xl px-3 py-2 text-xs font-bold bg-primary text-white shadow-sm' : 'flex-1 rounded-xl px-3 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50'}>本地备份</button>
-            <button type="button" onClick={() => setBackupTab('cloud')} className={backupTab === 'cloud' ? 'flex-1 rounded-xl px-3 py-2 text-xs font-bold bg-primary text-white shadow-sm' : 'flex-1 rounded-xl px-3 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50'}>云端备份</button>
-        </div>
-        {backupTab === 'local' && (
-<SettingsSection
+            </div>
+
+        </SettingsSection>
+        
+        {/* 数据备份区域 */}
+        <SettingsSection
             title="备份与恢复 (ZIP)"
             icon={
                 <div className="p-2 bg-blue-100 rounded-xl text-blue-600">
@@ -2512,9 +2509,9 @@ const Settings: React.FC = () => {
                 格式化系统 (出厂设置)
             </button>
         </SettingsSection>
-        )}
-        {backupTab === 'cloud' && (
-<SettingsSection
+
+        {/* 云端备份区域 */}
+        <SettingsSection
             title="云端备份"
             icon={
                 <div className="p-2 bg-sky-100 rounded-xl text-sky-600">
@@ -2647,16 +2644,9 @@ const Settings: React.FC = () => {
                 网页 WebDAV 因跨域限制需要中转；GitHub 默认直连，网络受限时可自行开启中转。
             </p>
         </SettingsSection>
-        )}
+
         {/* AI 连接设置区域 */}
-                {/* API 设置页签 */}
-        <div className="rounded-2xl border border-slate-200 bg-white p-1.5 flex gap-1">
-            <button type="button" onClick={() => setApiSettingsTab('chat')} className={apiSettingsTab === 'chat' ? 'flex-1 rounded-xl px-2 py-2 text-xs font-bold bg-primary text-white shadow-sm' : 'flex-1 rounded-xl px-2 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50'}>聊天 API</button>
-            <button type="button" onClick={() => setApiSettingsTab('vision')} className={apiSettingsTab === 'vision' ? 'flex-1 rounded-xl px-2 py-2 text-xs font-bold bg-primary text-white shadow-sm' : 'flex-1 rounded-xl px-2 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50'}>识图 API</button>
-            <button type="button" onClick={() => setApiSettingsTab('image')} className={apiSettingsTab === 'image' ? 'flex-1 rounded-xl px-2 py-2 text-xs font-bold bg-primary text-white shadow-sm' : 'flex-1 rounded-xl px-2 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50'}>聊天生图</button>
-        </div>
-        {apiSettingsTab === 'chat' && (
-<SettingsSection
+        <SettingsSection
             title="API 配置"
             sectionProps={{ 'data-guide': 'api' }}
             icon={
@@ -2776,11 +2766,9 @@ const Settings: React.FC = () => {
                 )}
             </div>
         </SettingsSection>
-        )}
 
         {/* 独立识图 API：给不支持 image_url 的主模型补视觉能力；可手动从通用模型预设载入。 */}
-                {apiSettingsTab === 'vision' && (
-<SettingsSection
+        <SettingsSection
             title="识图 API"
             badge={
                 <span className={`text-[9px] font-bold px-2 py-1 rounded-full ${
@@ -2936,7 +2924,6 @@ const Settings: React.FC = () => {
                 )}
             </div>
         </SettingsSection>
-        )}
 
         {/* API 调用记录入口 — 点开看最近 5 天各 App / 角色 / 用途的调用明细 */}
         <button
@@ -2959,9 +2946,7 @@ const Settings: React.FC = () => {
         </button>
 
         {/* 其他 API 区域 — 非 LLM 类（语音、写歌等），不会跟随预设切换 */}
-                {apiSettingsTab === 'image' && (
-<SettingsSection icon={<span aria-hidden="true">🖼️</span>} title="聊天生图"><ImageGenerationSettings value={localImageGeneration} onChange={setLocalImageGeneration} /><button type="button" onClick={handleSaveOtherApis} className="mt-3 w-full rounded-xl bg-primary p-3 text-white text-sm">{otherStatusMsg || '保存生图与其他 API'}</button></SettingsSection>
-        )}
+        <SettingsSection icon={<span aria-hidden="true">🖼️</span>} title="聊天生图"><ImageGenerationSettings value={localImageGeneration} onChange={setLocalImageGeneration} /><button type="button" onClick={handleSaveOtherApis} className="mt-3 w-full rounded-xl bg-primary p-3 text-white text-sm">{otherStatusMsg || '保存生图与其他 API'}</button></SettingsSection>
         <SettingsSection
             title="语音与写歌"
             icon={
