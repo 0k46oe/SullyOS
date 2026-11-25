@@ -433,3 +433,26 @@
   .amsg-notification-controls > .flex > button { font-size: 12px; padding: 10px; }
 }
 @media (prefers-reduced-motion: reduce) { .amsg-sidebar .amsg-config-tabs button, .amsg-sidebar .amsg-config-tabs button::after { transition: none; } }
+
+/* 功能总览 · 能力表 */
+.amsg-capability-table { background: var(--amsg-surface, #fff); border: 1px solid var(--amsg-line, #e9e6ed); border-radius: 12px; overflow: hidden; }
+.amsg-capability-head { display: grid; grid-template-columns: minmax(0, 1fr) 42px 13px; align-items: center; gap: 10px; padding: 10px 12px 8px 16px; border-bottom: 1px solid var(--amsg-line, #efedf2); color: var(--amsg-muted, #8e8796); font-size: 11px; }
+.amsg-capability-head h4 { color: inherit; font-size: inherit; font-weight: 500; margin: 0; }
+.amsg-capability-head > span { text-align: center; }
+.amsg-capability-row + .amsg-capability-row { border-top: 1px solid var(--amsg-line, #f1eef4); }
+.amsg-capability-row > button { display: grid; grid-template-columns: minmax(0, 1fr) 42px 13px; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 8px 12px 8px 16px; text-align: left; transition: background-color 140ms; }
+.amsg-capability-row > button:hover { background: var(--amsg-paper, #f6f2fa); }
+.amsg-capability-row > button:active { background: var(--amsg-paper, #efe8f6); }
+.amsg-capability-row > button:focus-visible { outline: 2px solid var(--amsg-active, #a58bbc); outline-offset: -3px; border-radius: 10px; }
+.amsg-capability-copy { min-width: 0; overflow-wrap: anywhere; }
+.amsg-capability-copy strong { display: block; color: var(--amsg-ink, #39343e); font-size: 14px; font-weight: 500; line-height: 1.5; }
+.amsg-capability-copy small { display: block; color: var(--amsg-muted, #8e8796); font-size: 11px; line-height: 1.6; }
+.amsg-capability-mark { width: 42px; height: 22px; }
+.amsg-capability-mark[data-state="ok"] { color: #2f9e62; }
+.amsg-capability-mark[data-state="bad"] { color: #d64545; }
+.amsg-capability-mark[data-state="off"], .amsg-capability-mark[data-state="checking"] { color: var(--amsg-muted, #bdb4c7); }
+.amsg-capability-row:has(.amsg-capability-mark[data-state="bad"]) small { color: #c04848; }
+.amsg-capability-chevron.amsg-icon { width: 13px; height: 13px; color: var(--amsg-muted, #b3a8bd); }
+.amsg-capability-row > button[aria-expanded="true"] .amsg-capability-chevron { transform: rotate(90deg); }
+.amsg-capability-hint { margin: -2px 16px 10px; padding: 8px 10px; border-radius: 8px; background: var(--amsg-paper, #f6f2fa); color: var(--amsg-muted, #6f6479); font-size: 12px; line-height: 1.7; }
+@media (prefers-reduced-motion: reduce) { .amsg-capability-row > button { transition: none; } }

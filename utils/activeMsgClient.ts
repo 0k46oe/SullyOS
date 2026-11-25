@@ -4015,7 +4015,7 @@ export const ActiveMsgClient = {
   /**
    * 暂停（false）或恢复（true）后台任务：让 Worker 摘掉或加回自己的 cron trigger。
    *
-   * 暂停期间到点的任务在 D1 里排着，一条都不丢；恢复后的第一跳一起补发。
+   * 暂停期间到点的任务不发。恢复后按服务端的任务过期规则处理。
    * 成功和失败都带一句能直接显示的话；code 是 worker 报的代号，缺 CF_API_TOKEN 时
    * 面板据此露出补钥匙那一块。网络层面的失败照常抛（跟 selfUpdateWorker 一样），调用方兜。
    */
@@ -4049,8 +4049,8 @@ export const ActiveMsgClient = {
       return {
         ok: true,
         message: enabled
-          ? '后台任务已恢复，攒下的消息会在下一分钟一起补发。'
-          : '后台任务已暂停，到点的消息先攒着，恢复后一起补发。',
+          ? '后台任务已恢复。晚到一小时以内的消息会陆续补发。'
+          : '后台任务已暂停，到点的消息不会发。恢复后只补发晚到一小时以内的。',
       };
     }
     return {
