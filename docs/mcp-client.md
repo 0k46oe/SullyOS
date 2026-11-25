@@ -5,11 +5,11 @@
 > （它们分别在 `utils/xhsMcpClient.ts` / `mcdMcpClient.ts` / `luckinMcpClient.ts`）。
 
 > 面向用户（和用户的 AI 助手）的自包含接入教程在 [`docs/mcp-user-guide.md`](./mcp-user-guide.md)，
-> 设置里 MCP 板块的「?」帮助弹窗一键跳转/复制的就是它——改接入行为时记得同步更新。
+> MCP 页签的「MCP 是什么？」帮助弹窗一键跳转/复制的就是它——改接入行为时记得同步更新。
 
 ## 用户视角
 
-设置 →「MCP」→「管理」：
+设置 → 扩展连接 → MCP → 管理服务器：
 
 1. 「添加服务器」→ 填名称和服务器 URL（如 `https://mcp.example.com/mcp`）
 2. 服务器要鉴权就填 Bearer Token，或按服务商说明添加自定义请求头（如 `XBY-APIKEY`）

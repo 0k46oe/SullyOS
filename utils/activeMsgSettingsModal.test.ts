@@ -7,6 +7,7 @@ import type { ActiveMsg2GlobalConfig, RealtimeConfig } from '../types';
 const client = vi.hoisted(() => ({
   getGlobalConfig: vi.fn(),
   getPushStatus: vi.fn(),
+  getRemotePushSubscription: vi.fn(),
   getCapabilities: vi.fn().mockResolvedValue(null),
   probeWorkerVersion: vi.fn().mockResolvedValue({ state: 'unknown', deployed: null, expected: 'test', autoUpdate: null }),
   probeInstantChatSupport: vi.fn().mockResolvedValue(false),
@@ -30,6 +31,10 @@ vi.mock('./activeMsgStore', async () => ({
   maskActiveMsgUserId: (value: string) => value,
 }));
 vi.mock('./analytics', () => ({ trackEvent: vi.fn() }));
+const readBrowserPushState = vi.hoisted(() => vi.fn());
+vi.mock('./pushSubscribeShared', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./pushSubscribeShared')>(), readBrowserPushState,
+}));
 const deployment = vi.hoisted(() => ({ source: 'official' as 'official' | 'unofficial' | 'unknown' }));
 vi.mock('./deploymentSource', async (importOriginal) => ({
   ...await importOriginal<typeof import('./deploymentSource')>(),
@@ -59,7 +64,7 @@ let host: HTMLDivElement;
 let root: Root;
 const onClose = vi.fn();
 
-async function render(open = true, workspaceSection?: 'features') {
+async function render(open = true, workspaceSection?: 'features' | 'push') {
   await act(async () => {
     root.render(React.createElement(ActiveMsgGlobalSettingsModal, {
       isOpen: open,
@@ -93,6 +98,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   client.getGlobalConfig.mockReset().mockResolvedValue(initialConfig);
   client.getPushStatus.mockReset().mockResolvedValue(subscribedPush);
+  client.getRemotePushSubscription.mockReset().mockResolvedValue(null);
+  readBrowserPushState.mockReset().mockResolvedValue(null);
   vi.mocked(fetchWorkerDiagnostics).mockReset().mockResolvedValue({ reachable: false, reason: '测试未连接' });
   onClose.mockClear();
   client.reconcilePushSubscription.mockClear();
@@ -113,6 +120,19 @@ afterEach(async () => {
 });
 
 describe('主动消息 2.0 配置入口', () => {
+  it('未连接后台也可读取和刷新本机推送状态，通知配置仍等待连接', async () => {
+    await render(true, 'push');
+    const status = host.querySelector('.amsg-device-card')!;
+    const refresh = Array.from(status.querySelectorAll('button')).find(button => button.textContent === '刷新')!;
+    expect(refresh.closest('fieldset[disabled]')).toBeNull();
+    expect(host.querySelector('.amsg-notification-controls')?.closest('fieldset[disabled]')).not.toBeNull();
+    expect(readBrowserPushState).toHaveBeenCalledOnce();
+    await act(async () => refresh.click());
+    expect(readBrowserPushState).toHaveBeenCalledTimes(2);
+    expect(client.getRemotePushSubscription).not.toHaveBeenCalled();
+    expect(fetchWorkerDiagnostics).not.toHaveBeenCalled();
+  });
+
   it.each([initialConfig, { ...initialConfig, workerUrl: 'https://worker.invalid', initializedAt: 1 }])('未连上或已经配好的用户都能进入重配选项，取消不改配置', async (config) => {
     client.getGlobalConfig.mockResolvedValue(config);
     await render(true, 'features');

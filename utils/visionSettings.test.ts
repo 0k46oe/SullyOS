@@ -4,6 +4,7 @@ import { act, createElement, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import Settings from '../apps/Settings';
 import type { APIConfig } from '../types';
+import { requestSettingsFocus } from './settingsNavigation';
 
 vi.mock('../context/OSContext', () => ({ useOS: () => context }));
 vi.mock('../components/os/Modal', () => ({ default: () => null }));
@@ -34,10 +35,13 @@ function Harness() {
     return createElement(Settings);
 }
 function visionSection() {
-    return Array.from(container.querySelectorAll('section')).find(section => section.querySelector('h2')?.textContent === '识图 API')!;
+    return container.querySelector<HTMLElement>('#settings-api-panel-vision')!;
 }
+const apiTab = (id: string) => container.querySelector<HTMLButtonElement>(`#settings-api-tab-${id}`)!;
+const visionStatus = () => apiTab('vision').textContent;
 async function openVision() {
-    await act(async () => { visionSection().querySelector('button')!.click(); });
+    await act(async () => requestSettingsFocus('api'));
+    await act(async () => apiTab('vision').click());
 }
 afterEach(async () => { await act(async () => { root.render(null); }); vi.restoreAllMocks(); });
 
@@ -48,7 +52,7 @@ describe('识图设置开关', () => {
         await openVision();
         await act(async () => { visionSection().querySelector<HTMLButtonElement>('[role="switch"]')!.click(); });
         expect(saved.visionApi?.enabled).not.toBe(true);
-        expect(visionSection().textContent).toContain('未接入');
+        expect(visionStatus()).toContain('未接入');
         const urlInput = visionSection().querySelector<HTMLInputElement>('input[type="text"]')!;
         await act(async () => {
             Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(urlInput, 'https://draft.test/v1');
@@ -57,6 +61,14 @@ describe('识图设置开关', () => {
         await act(async () => { visionSection().querySelector<HTMLButtonElement>('[role="switch"]')!.click(); });
         expect(saved.visionApi?.enabled).toBe(false);
         expect(urlInput.value).toBe('https://draft.test/v1');
+        await act(async () => apiTab('image').click());
+        expect(container.querySelector('#settings-api-panel-image')?.textContent).toContain('保存生图与其他 API');
+        expect(visionSection().hidden).toBe(true);
+        await act(async () => apiTab('vision').click());
+        expect(urlInput.value).toBe('https://draft.test/v1');
+        await act(async () => requestSettingsFocus('api'));
+        expect(apiTab('chat').getAttribute('aria-selected')).toBe('true');
+        expect(saved.visionApi?.baseUrl).not.toBe('https://draft.test/v1');
     });
 
     it('关掉立即改变徽标并落盘，重新打开设置保持关闭，凭据保留', async () => {
@@ -64,10 +76,10 @@ describe('识图设置开关', () => {
             visionApi: { enabled: true, baseUrl: 'https://vision.test/v1', apiKey: 'vision-key', model: 'vision' } };
         await act(async () => { root.render(createElement(Harness)); });
         await openVision();
-        expect(visionSection().textContent).toContain('已接入');
+        expect(visionStatus()).toContain('已接入');
         await act(async () => { visionSection().querySelector<HTMLButtonElement>('[role="switch"]')!.click(); });
         expect(visionSection().querySelector('[role="switch"]')!.getAttribute('aria-checked')).toBe('false');
-        expect(visionSection().textContent).toContain('未接入');
+        expect(visionStatus()).toContain('未接入');
         expect(JSON.parse(localStorage.getItem('os_api_config')!).visionApi).toEqual({
             enabled: false, baseUrl: 'https://vision.test/v1', apiKey: 'vision-key', model: 'vision',
         });
@@ -77,7 +89,7 @@ describe('识图设置开关', () => {
         expect(visionSection().querySelector('[role="switch"]')!.getAttribute('aria-checked')).toBe('false');
         await act(async () => { visionSection().querySelector<HTMLButtonElement>('[role="switch"]')!.click(); });
         expect(saved.visionApi?.enabled).toBe(true);
-        expect(visionSection().textContent).toContain('已接入');
+        expect(visionStatus()).toContain('已接入');
         expect(saved.model).toBe('main');
     });
 });

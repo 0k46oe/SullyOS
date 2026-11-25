@@ -3,6 +3,7 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import Settings from '../apps/Settings';
+import { requestSettingsFocus } from './settingsNavigation';
 
 const context = vi.hoisted(() => ({
     apiConfig: { baseUrl: '', apiKey: '', model: '' }, theme: {}, realtimeConfig: {}, cloudBackupConfig: {}, characters: [], groups: [], userProfile: {},
@@ -19,9 +20,11 @@ vi.mock('../components/settings/ApiCallLogModal', () => ({ default: () => null }
 vi.mock('./avatarModelBackup', () => ({ getAvatarModelBackupInventory: async () => ({ models: [], totalBytes: 0 }) }));
 vi.mock('./shareExport', () => ({ shareOrDownloadBlob: share }));
 let host: HTMLDivElement, root: Root;
+const backupSection = () => Array.from(host.querySelectorAll('section')).find(node => node.querySelector('h2')?.textContent === '备份与恢复')!;
 
 beforeEach(() => {
     vi.clearAllMocks();
+    Object.assign(context.cloudBackupConfig, { enabled: false });
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
     vi.spyOn(window, 'confirm').mockReturnValue(true);
     vi.stubGlobal('URL', class extends URL {
@@ -33,44 +36,53 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-it('keeps the missing-file warning visible after sharing is cancelled and clears it for the next healthy backup', async () => {
+it('retains single-ZIP export and its confirmation alongside the default volume option', async () => {
     const file = new Blob(['zip']);
-    context.exportSystem.mockImplementation(async (_mode, options) => {
-        options.onMissingAssets([{ id: 'img_missing', locations: ['用户「甲」 → 角色「小夏」 → 头像'] }]);
-        return file;
-    });
+    context.exportSystem.mockResolvedValue(file);
     await act(async () => root.render(createElement(Settings)));
-    const section = Array.from(host.querySelectorAll('section')).find(node => node.querySelector('h2')?.textContent === '备份与恢复 (ZIP)')!;
+    const section = backupSection();
     await act(async () => section.querySelector('button')!.click());
-    const button = Array.from(host.querySelectorAll('button')).find(node => node.textContent?.includes('整合导出 (文字+媒体)'))!;
+    const local = section.querySelector('#settings-backup-panel-local')!;
+    const volume = local.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(volume.checked).toBe(true);
+    await act(async () => volume.click());
+    const button = Array.from(local.querySelectorAll('button')).find(node => node.textContent?.includes('整合导出 (文字+媒体)'))!;
+    vi.mocked(window.confirm).mockReturnValueOnce(false);
     await act(async () => button.click());
+    expect(context.exportSystem).not.toHaveBeenCalled();
+    await act(async () => button.click());
+    expect(context.exportSystem).toHaveBeenCalledWith('full', { includeBackendConnection: false });
     expect(share).toHaveBeenCalledWith(expect.objectContaining({ blob: file }));
-    expect(host.textContent).toContain('备份已生成，但有 1 份素材原文件缺失');
-    const details = Array.from(host.querySelectorAll('details')).find(node => node.textContent?.includes('img_missing'))!;
-    await act(async () => details.querySelector('summary')!.click());
-    expect(details.open).toBe(true);
-    expect(details.textContent).toContain('用户「甲」 → 角色「小夏」 → 头像');
-    context.exportSystem.mockImplementation(async (_mode, options) => { options.onMissingAssets([]); return file; });
-    await act(async () => button.click());
-    expect(host.textContent).not.toContain('img_missing');
 });
 
-it('offers independent migration explicitly while the original import button keeps normal restore behavior', async () => {
+it('passes the index and all selected volumes to the unchanged restore handler', async () => {
     context.importSystem.mockResolvedValue(undefined);
     await act(async () => root.render(createElement(Settings)));
-    const section = Array.from(host.querySelectorAll('section')).find(node => node.querySelector('h2')?.textContent === '备份与恢复 (ZIP)')!;
+    const section = backupSection();
     await act(async () => section.querySelector('button')!.click());
-    const independent = host.querySelector<HTMLInputElement>('input[aria-label="迁入独立用户备份"]')!;
-    const picker = vi.spyOn(independent, 'click');
-    await act(async () => Array.from(host.querySelectorAll('button')).find(node => node.textContent?.includes('从其他网址 / App 迁入独立用户'))!.click());
-    expect(picker).toHaveBeenCalledOnce();
-    const file = new File(['{}'], 'backup.json');
-    Object.defineProperty(independent, 'files', { value: [file], configurable: true });
-    await act(async () => independent.dispatchEvent(new Event('change', { bubbles: true })));
-    expect(context.importSystem).toHaveBeenLastCalledWith(file, expect.objectContaining({ asNewUsers: true }));
-    const normal = independent.previousElementSibling?.previousElementSibling as HTMLInputElement;
-    expect(normal.type).toBe('file');
-    Object.defineProperty(normal, 'files', { value: [file], configurable: true });
+    const normal = section.querySelector<HTMLInputElement>('input[accept=".json,.zip,.sullypart"]')!;
+    expect(normal.multiple).toBe(true);
+    const files = [new File(['{}'], 'backup.sullyindex.json'), new File(['volume'], 'backup.sullypart')];
+    Object.defineProperty(normal, 'files', { value: files, configurable: true });
     await act(async () => normal.dispatchEvent(new Event('change', { bubbles: true })));
-    expect(context.importSystem).toHaveBeenLastCalledWith(file, expect.objectContaining({ asNewUsers: false }));
+    expect(context.importSystem).toHaveBeenCalledWith(files, { confirmBackendRestore: expect.any(Function) });
+});
+
+it('defaults to the enabled cloud backup and focuses the local import when restore is requested', async () => {
+    Object.assign(context.cloudBackupConfig, { enabled: true, provider: 'github' });
+    await act(async () => root.render(createElement(Settings)));
+    const section = backupSection();
+    await act(async () => section.querySelector('button')!.click());
+    expect(section.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('云端');
+    expect(section.textContent).toContain('备份提醒频率');
+    expect(section.querySelector('[data-settings-backup-import]')).toBeNull();
+
+    await act(async () => requestSettingsFocus('backup'));
+    const importButton = section.querySelector<HTMLButtonElement>('[data-settings-backup-import]')!;
+    expect(section.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('本地文件');
+    expect(document.activeElement).toBe(importButton);
+    const picker = vi.spyOn(section.querySelector<HTMLInputElement>('input[accept=".json,.zip,.sullypart"]')!, 'click');
+    await act(async () => importButton.click());
+    expect(picker).toHaveBeenCalledOnce();
+    expect(context.importSystem).not.toHaveBeenCalled();
 });

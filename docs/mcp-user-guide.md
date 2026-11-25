@@ -68,7 +68,7 @@ Access-Control-Expose-Headers: Mcp-Session-Id
 
 ## 三、在 SullyOS 里配置（所有路线殊途同归）
 
-1. 打开 SullyOS → **设置** → 找到「**MCP**」→ 点「**管理**」
+1. 打开 SullyOS → **设置** → **扩展连接** → **MCP** → **管理服务器**
 2. 「添加服务器」→ 填：
    - **名称**：随意，如 `Ombre Brain`
    - **服务器 URL**：如 `https://mcp.example.com/mcp` 或 `http://localhost:18001/mcp`

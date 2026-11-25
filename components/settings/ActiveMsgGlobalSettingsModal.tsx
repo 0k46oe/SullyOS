@@ -2549,10 +2549,10 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       <AmsgConnectionGate connected={isConnected} onConnect={() => onSelectWorkspace?.('config')}>
       <p className="amsg-caption">选择接收方案，检查设备通知。</p>
       <div className="amsg-notification-controls space-y-4">{pushBody}</div>
-      {workspaceSection === 'push' && <section className="amsg-device-card"><h4><AmsgIcon name="device" />设备与状态</h4><PushSubscriptionPanel workspace active={!covered && isConnected} addToast={addToast} testResult={testPushResult} />
+      </AmsgConnectionGate>
+      {workspaceSection === 'push' && <section className="amsg-device-card"><h4><AmsgIcon name="device" />设备与状态</h4><PushSubscriptionPanel workspace active={isOpen && !covered} addToast={addToast} testResult={testPushResult} />
         <details className="amsg-faq"><summary><AmsgIcon name="info" />常见问题</summary><div><h5>显示已连接，为什么没弹通知？</h5><p>先点「发送测试通知」并查看手机通知栏。连接状态只说明配置情况，系统权限、后台运行限制和网络也会影响通知显示。</p><h5>换设备后，旧设备还会收到吗？</h5><p>同一个身份只登记一个接收位置，后登记的设备会替换之前的。需要切回来时，在原设备重新连接通知即可。</p></div></details>
       </section>}
-      </AmsgConnectionGate>
       </AmsgVisitedPanel>
     </div>
     <div hidden={workspaceSection !== 'features' && workspaceSection !== 'config'} className="amsg-section-body">
