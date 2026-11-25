@@ -2648,10 +2648,6 @@ const Settings: React.FC = () => {
             </p>
         </SettingsSection>
         )}
-中转；GitHub 默认直连，网络受限时可自行开启中转。
-            </p>
-        </SettingsSection>
-
         {/* AI 连接设置区域 */}
                 {/* API 设置页签 */}
         <div className="rounded-2xl border border-slate-200 bg-white p-1.5 flex gap-1">
