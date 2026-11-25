@@ -705,7 +705,7 @@ const runLlmCredentialSync = async (reason: string): Promise<void> => {
     if (credRetryCount < MAX_RETRIES) {
       const delay = RETRY_BASE_MS * 2 ** credRetryCount;
       credRetryCount += 1;
-      console.warn(`${HEADER} llm_credentials(${reason}) 上传失败，${Math.round(delay / 1000)}s 后重试（第 ${credRetryCount}/${MAX_RETRIES} 次）`, error);
+      console.warn(`${HEADER} llm_credentials(${reason}) 阶段：${syncStage} 失败，${Math.round(delay / 1000)}s 后重试（第 ${credRetryCount}/${MAX_RETRIES} 次）`, error);
       if (credRetryTimer != null) clearTimeout(credRetryTimer);
       credRetryTimer = setTimeout(() => { void runLlmCredentialSync('retry'); }, delay);
     } else {
