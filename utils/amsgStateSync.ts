@@ -661,6 +661,7 @@ const runLlmCredentialSync = async (reason: string): Promise<void> => {
   credSyncing = true;
   // 记下这次算的是哪一份：上传期间用户又改了配置的话，清账不能把新的那份一起清掉。
   const snapshot = pendingCredApiConfig;
+  let syncStage = '上传 LLM 凭据';
   try {
     const globalConfig = await ActiveMsgStore.getGlobalConfig();
     // 没配 Worker / 没有 API 快照时没有同步目标，清掉底账。
@@ -689,8 +690,11 @@ const runLlmCredentialSync = async (reason: string): Promise<void> => {
       }
     }
     // 老 Worker 的内联任务也要迁移；新 Worker 的引用任务只更新引用，不塞内联字段。
+    syncStage = '刷新已排程任务凭据';
     const refresh = await ActiveMsgClient.refreshApiCredentialsForPendingTasks(snapshot);
-    if (refresh.failed > 0) throw new Error(`${refresh.failed} 个任务的 API 凭据尚未同步`);
+    if (refresh.failed > 0) {
+      throw new Error(`${refresh.failed} 个任务凭据刷新失败（成功更新 ${refresh.updated} 个）；具体任务 UUID 和服务端错误见前面的诊断日志`);
+    }
     if (pendingCredApiConfig === snapshot) {
       hasPendingCredSync = false;
       pendingCredApiConfig = undefined;
@@ -706,7 +710,7 @@ const runLlmCredentialSync = async (reason: string): Promise<void> => {
       credRetryTimer = setTimeout(() => { void runLlmCredentialSync('retry'); }, delay);
     } else {
       // 退避打光了（多半是离线）。底账留着：下次启动 / 下次冲刷继续补。
-      console.error(`${HEADER} llm_credentials(${reason}) 连续 ${MAX_RETRIES} 次失败，云端凭据仍是上一份（已排程的任务到点会用旧 Key）`, error);
+      console.error(`${HEADER} llm_credentials(${reason}) 连续 ${MAX_RETRIES} 次失败，阶段：${syncStage}；云端凭据/待执行任务仍可能未对齐`, error);
       credRetryCount = 0;
     }
   } finally {
