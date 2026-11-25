@@ -2948,7 +2948,7 @@ const Settings: React.FC = () => {
         {/* 其他 API 区域 — 非 LLM 类（语音、写歌等），不会跟随预设切换 */}
         <SettingsSection icon={<span aria-hidden="true">🖼️</span>} title="聊天生图"><ImageGenerationSettings value={localImageGeneration} onChange={setLocalImageGeneration} /><button type="button" onClick={handleSaveOtherApis} className="mt-3 w-full rounded-xl bg-primary p-3 text-white text-sm">{otherStatusMsg || '保存生图与其他 API'}</button></SettingsSection>
         <SettingsSection
-            title="其他 API"
+            title="语音与写歌"
             icon={
                 <div className="p-2 bg-amber-100/50 rounded-xl text-amber-600">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
