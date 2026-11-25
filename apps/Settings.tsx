@@ -510,6 +510,7 @@ const Settings: React.FC = () => {
       cloudBackupToWebDAV, cloudRestoreFromWebDAV, listCloudBackups,
   } = useOS();
   
+  const [backupTab, setBackupTab] = useState<'local' | 'cloud'>('local');
   const [localKey, setLocalKey] = useState(apiConfig.apiKey);
   const [localAnthropicPromptCache, setLocalAnthropicPromptCache] = useState(apiConfig.anthropicPromptCache !== false);
   const [localAnthropicPromptCacheTtl, setLocalAnthropicPromptCacheTtl] = useState<'5m' | '1h'>(apiConfig.anthropicPromptCacheTtl === '1h' ? '1h' : '5m');
@@ -2294,12 +2295,13 @@ const Settings: React.FC = () => {
                         </button>
                     </div>
                 )}
-            </div>
-
-        </SettingsSection>
-        
-        {/* 数据备份区域 */}
-        <SettingsSection
+            </div>        {/* 备份与恢复：本地 / 云端页签 */}
+        <div className="rounded-2xl border border-slate-200 bg-white p-1.5 flex gap-1">
+            <button type="button" onClick={() => setBackupTab('local')} className={backupTab === 'local' ? 'flex-1 rounded-xl px-3 py-2 text-xs font-bold bg-primary text-white shadow-sm' : 'flex-1 rounded-xl px-3 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50'}>本地备份</button>
+            <button type="button" onClick={() => setBackupTab('cloud')} className={backupTab === 'cloud' ? 'flex-1 rounded-xl px-3 py-2 text-xs font-bold bg-primary text-white shadow-sm' : 'flex-1 rounded-xl px-3 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50'}>云端备份</button>
+        </div>
+        {backupTab === 'local' && (
+<SettingsSection
             title="备份与恢复 (ZIP)"
             icon={
                 <div className="p-2 bg-blue-100 rounded-xl text-blue-600">
@@ -2509,9 +2511,9 @@ const Settings: React.FC = () => {
                 格式化系统 (出厂设置)
             </button>
         </SettingsSection>
-
-        {/* 云端备份区域 */}
-        <SettingsSection
+        )}
+        {backupTab === 'cloud' && (
+<SettingsSection
             title="云端备份"
             icon={
                 <div className="p-2 bg-sky-100 rounded-xl text-sky-600">
@@ -2642,6 +2644,10 @@ const Settings: React.FC = () => {
             <p className="text-[10px] text-slate-400 px-1 mt-3 leading-relaxed">
                 备份始终存放在你自己的 WebDAV 或 GitHub 账号中，项目不建立用户备份数据库。
                 网页 WebDAV 因跨域限制需要中转；GitHub 默认直连，网络受限时可自行开启中转。
+            </p>
+        </SettingsSection>
+        )}
+中转；GitHub 默认直连，网络受限时可自行开启中转。
             </p>
         </SettingsSection>
 
