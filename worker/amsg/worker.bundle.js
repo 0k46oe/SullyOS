@@ -1195,12 +1195,22 @@ var checkSelfScheduleRules = (input) => {
     expirePolicy: input.expirePolicy === "force" && !limits.allowSelfForce ? "expire" : input.expirePolicy
   };
 };
+var buildUnansweredLimitRejectMessage = (opts) => {
+  if (opts.context === "chat") {
+    const canManage = opts.canManageTasks !== false;
+    return canManage ? `\u4F60\u540D\u4E0B\u5DF2\u7ECF\u6392\u7740 ${opts.count} \u6B21\u5F85\u53D1\u7684\u540E\u7EED\u8054\u7CFB\uFF0C\u7528\u6237\u8BBE\u7684\u8FDE\u53D1\u4E0A\u9650\u662F ${opts.limit} \u6B21\u2014\u2014\u60F3\u6539\u65F6\u95F4\u6216\u65B9\u5411\u8BF7\u7528 renew_active_message / cancel_active_message \u8C03\u6574\u73B0\u6709\u7684\uFF0C\u8FD9\u6B21\u4E0D\u8981\u518D\u65B0\u6392\u4E86\u3002` : `\u4F60\u540D\u4E0B\u5DF2\u7ECF\u6392\u7740 ${opts.count} \u6B21\u5F85\u53D1\u7684\u540E\u7EED\u8054\u7CFB\uFF0C\u7528\u6237\u8BBE\u7684\u8FDE\u53D1\u4E0A\u9650\u662F ${opts.limit} \u6B21\u2014\u2014\u5F85\u53D1\u540D\u989D\u5DF2\u6EE1\uFF0C\u8FD9\u6B21\u4E0D\u8981\u518D\u65B0\u6392\u4E86\u3002`;
+  }
+  return `\u5BF9\u65B9\u8FD8\u6CA1\u56DE\u590D\uFF0C\u8FD9\u671F\u95F4\u4F60\u5DF2\u7ECF\u4E3B\u52A8\u627E\u4E86 / \u6392\u4E86 ${opts.count} \u6B21\uFF0C\u7528\u6237\u8BBE\u7684\u8FDE\u53D1\u4E0A\u9650\u662F ${opts.limit} \u6B21\u2014\u2014\u8FD9\u6B21\u522B\u6392\u4E86\uFF0C\u7B49 ta \u56DE\u590D\u518D\u8BF4\u3002`;
+};
 var buildLimitsBrief = (input) => {
   const { limits } = input;
   const lines = [];
   if (Number.isFinite(limits.maxUnansweredSends)) {
     const used = Math.min(limits.maxUnansweredSends, Math.max(0, input.committedSends));
-    lines.push(`- \u5BF9\u65B9\u6CA1\u56DE\u671F\u95F4\u7684\u4E3B\u52A8\u8054\u7CFB\uFF1A\u5DF2\u7528 ${used}/${limits.maxUnansweredSends} \u6B21\uFF08\u4E00\u6B21\u53EF\u4EE5\u8BF4\u597D\u51E0\u53E5\uFF1B\u6392\u597D\u8FD8\u6CA1\u53D1\u7684\u4E5F\u7B97\uFF09` + (used < limits.maxUnansweredSends ? "\u3002" : "\uFF0C\u5DF2\u6EE1\uFF0C\u7B49\u5BF9\u65B9\u56DE\u590D\u540E\u624D\u80FD\u518D\u6392\u3002"));
+    const canManage = input.canManageTasks !== false;
+    lines.push(
+      input.context === "chat" ? `- \u4E0B\u6B21\u5BF9\u65B9\u56DE\u590D\u524D\u53EF\u6302\u7684\u4E3B\u52A8\u8054\u7CFB\uFF1A\u5DF2\u6392 ${used}/${limits.maxUnansweredSends} \u6B21\uFF08\u4E00\u6B21\u53EF\u4EE5\u8BF4\u597D\u51E0\u53E5\uFF09` + (used < limits.maxUnansweredSends ? "\u3002" : canManage ? "\uFF0C\u5DF2\u6EE1\uFF1B\u60F3\u6539\u65F6\u95F4\u6216\u65B9\u5411\u8BF7\u7528 renew / cancel \u8C03\u6574\u73B0\u6709\u7684\uFF0C\u4E0D\u8981\u518D\u65B0\u6392\u3002" : "\uFF0C\u5DF2\u6EE1\uFF0C\u8FD9\u6B21\u4E0D\u8981\u518D\u65B0\u6392\u3002") : `- \u5BF9\u65B9\u6CA1\u56DE\u671F\u95F4\u7684\u4E3B\u52A8\u8054\u7CFB\uFF1A\u5DF2\u7528 ${used}/${limits.maxUnansweredSends} \u6B21\uFF08\u4E00\u6B21\u53EF\u4EE5\u8BF4\u597D\u51E0\u53E5\uFF1B\u6392\u597D\u8FD8\u6CA1\u53D1\u7684\u4E5F\u7B97\uFF09` + (used < limits.maxUnansweredSends ? "\u3002" : "\uFF0C\u5DF2\u6EE1\uFF0C\u7B49\u5BF9\u65B9\u56DE\u590D\u540E\u624D\u80FD\u518D\u6392\u3002")
+    );
   }
   if (limits.minSendGapMs > 0) {
     lines.push(`- \u4E24\u6B21\u4E3B\u52A8\u627E\u5BF9\u65B9\u4E4B\u95F4\u81F3\u5C11\u9694 ${describeMinutes(Math.round(limits.minSendGapMs / 6e4))}` + (input.earliestText ? `\uFF0C\u8FD9\u6B21\u6700\u65E9\u6392\u5230 ${input.earliestText}\u3002` : "\u3002"));
@@ -1338,6 +1348,29 @@ var AMSG_STATE_NAMESPACE_PREFIX = "amsg:char:";
 var amsgStateNamespace = (charId) => `${AMSG_STATE_NAMESPACE_PREFIX}${charId}`;
 var AMSG_FIRE_PACK_KEY = "fire_pack";
 var AMSG_SELF_LOG_KEY = "self_log";
+var AMSG_SENT_NOTICES_KEY = "sent_notices";
+var SENT_NOTICES_MAX = 100;
+var NOTICES_BLOCK_RE = /\{\{AMSG_NOTICES:([^}]*)\}\}((?:(?!\{\{AMSG_NOTICES:)[\s\S])*?)\{\{\/AMSG_NOTICES\}\}/;
+var NOTICE_LINE_RE = /\{\{AMSG_NOTICE:([^}]*)\}\}([\s\S]*?)\{\{\/AMSG_NOTICE\}\}/g;
+var parseSentNotices = (value) => {
+  try {
+    const parsed = JSON.parse(value || "null");
+    return Array.isArray(parsed?.ids) ? parsed.ids.filter((id) => typeof id === "string") : [];
+  } catch {
+    return [];
+  }
+};
+var appendSentNotices = (existing, ids) => JSON.stringify({ v: 1, ids: [.../* @__PURE__ */ new Set([...existing, ...ids])].slice(-SENT_NOTICES_MAX) });
+var renderSentNotices = (template, sentIds) => {
+  const sent = new Set(sentIds);
+  let out = template.replace(NOTICE_LINE_RE, (_whole, id, body) => sent.has(decodeURIComponent(id)) ? "" : body);
+  for (let m = NOTICES_BLOCK_RE.exec(out); m; m = NOTICES_BLOCK_RE.exec(out)) {
+    const list = m[1].split(",").filter(Boolean).map(decodeURIComponent);
+    const drop = list.length > 0 && list.every((id) => sent.has(id));
+    out = out.slice(0, m.index) + (drop ? "" : m[2]) + out.slice(m.index + m[0].length);
+  }
+  return out;
+};
 var amsgXhsSessionKey = (clientTaskId) => `xhs_session:${clientTaskId}`;
 var AMSG2_INSTANT_STUB_TEMPLATE = "AMSG2_INSTANT_STUB_TEMPLATE\uFF08\u5373\u65F6\u5BF9\u8BDD\u8F7B\u91CF\u5305\uFF1A\u8BE5\u89D2\u8272\u65E0\u5B9A\u65F6\u4EFB\u52A1\uFF0C\u6A21\u677F\u672A\u968F\u53D1\u9001\u91CD\u5EFA\uFF1B\u770B\u5230\u8FD9\u6761\u6B63\u6587\u8BF4\u660E\u6709\u672C\u4E0D\u8BE5\u6E32\u67D3\u6A21\u677F\u7684 fire \u5728\u6E32\u67D3\u5B83\uFF09";
 var AMSG_CHAT_FAIL_KEY = "chat_fail";
@@ -1472,6 +1505,8 @@ var BEFORE_SPEAK_LINES = [
   `\u51B3\u5B9A\u4E0D\u8BF4 \u2192 \u6574\u6BB5\u8F93\u51FA\u53EA\u5199 ${AMSG_SILENT_MARK} \u8FD9\u4E00\u4E2A\u6807\u8BB0\uFF0C\u522B\u7684\u4E00\u4E2A\u5B57\u90FD\u4E0D\u8981\u5199\uFF0C\u4E5F\u4E0D\u8981\u89E3\u91CA\u3002`
 ];
 var LIVE_CHAT_WINDOW_MS = 10 * 6e4;
+var LEGACY_PROACTIVE_HINT_HEADING = "\u30101.0 \u98CE\u683C\u4E3B\u52A8\u6D88\u606F\u63D0\u793A\u3011";
+var LEGACY_PROACTIVE_TONE_RULE = "- \u8BED\u6C14\u66F4\u50CF\u771F\u4EBA\u7A81\u7136\u60F3\u8D77\u5BF9\u65B9\u65F6\u53D1\u6765\u7684\u79C1\u804A\uFF0C\u4E0D\u8981\u50CF\u5728\u5B8C\u6210\u4EFB\u52A1\u3002";
 var wallClockPartsInZone = (nowMs, tz) => {
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: tz.tzId,
@@ -1663,6 +1698,13 @@ var renderFirePack = (pack, nowMs, taskInstruction, extras) => {
   let out = pack.template;
   if (extras?.mustSpeak) out = out.split(`${BEFORE_SPEAK_LINES.join("\n")}
 `).join("");
+  if (extras?.dateLeave) {
+    const start = out.indexOf(LEGACY_PROACTIVE_HINT_HEADING);
+    const end = start >= 0 ? out.indexOf("\n\n", start) : -1;
+    if (start >= 0 && end >= 0) out = out.slice(0, start) + out.slice(end + 2);
+    out = out.split(`${LEGACY_PROACTIVE_TONE_RULE}
+`).join("");
+  }
   out = fillSlot(out, AMSG_SLOT_CURRENT_TIME, currentTime);
   out = fillSlot(out, AMSG_SLOT_USER_CLOCK, buildUserClockHint(nowMs, tz, { tzId: pack.userTzId }, pack.targetName));
   out = fillSlot(out, AMSG_SLOT_TIME_SINCE_USER, timeSinceUser);
@@ -2132,7 +2174,7 @@ function pickStaleStoppedReplyKeys(rows, nowMs = Date.now(), protectKey) {
 // worker/amsg/src/index.ts
 import { DurableObject } from "cloudflare:workers";
 
-// ../../../../2026-10-30/https-github-com-0k46oe-sullyos-https/sullyos/node_modules/.pnpm/@rei-standard+amsg-server@3_f2a08373d30841ce79e2e19c7fb88ed9/node_modules/@rei-standard/amsg-server/dist/chunk-R2CRPRKR.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@3_f2a08373d30841ce79e2e19c7fb88ed9/node_modules/@rei-standard/amsg-server/dist/chunk-R2CRPRKR.mjs
 var CLEANUP_BATCH_LIMIT = 100;
 var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
   "user_id",
@@ -2152,7 +2194,7 @@ var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
 var TASK_DELIVERY_COLUMNS = "id, user_id, uuid, encrypted_payload, message_type, next_send_at, retry_after, status, retry_count";
 var TASK_DETAIL_COLUMNS = "id, user_id, uuid, encrypted_payload, message_type, next_send_at, status, retry_count, last_error, created_at, updated_at";
 
-// ../../../../2026-10-30/https-github-com-0k46oe-sullyos-https/sullyos/node_modules/.pnpm/@rei-standard+amsg-shared@0.5.0-next.0/node_modules/@rei-standard/amsg-shared/dist/index.mjs
+// node_modules/.pnpm/@rei-standard+amsg-shared@0.5.0-next.0/node_modules/@rei-standard/amsg-shared/dist/index.mjs
 var TEXT_ENCODER = new TextEncoder();
 var TEXT_DECODER = new TextDecoder("utf-8", { fatal: false });
 function toUint8(buf) {
@@ -3390,7 +3432,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// ../../../../2026-10-30/https-github-com-0k46oe-sullyos-https/sullyos/node_modules/.pnpm/@rei-standard+amsg-server@3_f2a08373d30841ce79e2e19c7fb88ed9/node_modules/@rei-standard/amsg-server/dist/chunk-WFKLHUUE.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@3_f2a08373d30841ce79e2e19c7fb88ed9/node_modules/@rei-standard/amsg-server/dist/chunk-WFKLHUUE.mjs
 var DAY_MS2 = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
@@ -12658,7 +12700,7 @@ function extractFriendFeedReplyTags(raw, namespace = "FRIEND_FEED_REPLY") {
   return { text: text2 + raw.slice(cursor), actions };
 }
 
-// ../../../../2026-10-30/https-github-com-0k46oe-sullyos-https/sullyos/node_modules/.pnpm/@rei-standard+amsg-instant@0.12.0-next.0/node_modules/@rei-standard/amsg-instant/dist/index.mjs
+// node_modules/.pnpm/@rei-standard+amsg-instant@0.12.0-next.0/node_modules/@rei-standard/amsg-instant/dist/index.mjs
 var MAX_REQUEST_BODY_BYTES = 32 * 1024 * 1024;
 var WEB_PUSH_MAX_BODY_BYTES2 = 4096;
 var WEB_PUSH_ENCRYPTION_OVERHEAD_BYTES2 = 16 + 4 + 1 + 65 + 1 + 16;
@@ -13437,23 +13479,31 @@ function classifyLLMOutput(text2) {
       if (d) directives.push(d);
     }
   }
-  const dedupedDirectives = [];
-  const seenDirectives = /* @__PURE__ */ new Set();
-  for (const d of directives) {
-    const key = JSON.stringify(d);
-    if (seenDirectives.has(key)) {
-      console.warn("[classifier] \u540C\u4E00\u6761\u6D88\u606F\u91CC\u91CD\u590D\u7684\u526F\u4F5C\u7528, \u53EA\u4FDD\u7559\u7B2C\u4E00\u4E2A:", key);
-      continue;
-    }
-    seenDirectives.add(key);
-    dedupedDirectives.push(d);
-  }
   let cleanedText = textAfterSchedule;
   for (const spec of DATA_TAGS) cleanedText = cleanedText.replace(spec.re, "");
   for (const spec of SIDE_EFFECT_TAGS) cleanedText = cleanedText.replace(spec.re, "");
   cleanedText = cleanedText.trim();
   const sanitizedBody = sanitizeForNotification(cleanedText);
-  return { kind: "finish", cleanedText, sanitizedBody, directives: dedupedDirectives };
+  return { kind: "finish", cleanedText, sanitizedBody, directives };
+}
+function dropCrossRoundRepeats(all, rounds) {
+  const keyOf = (d) => JSON.stringify(d);
+  const firstRoundCount = /* @__PURE__ */ new Map();
+  for (const round of rounds) {
+    const counts = /* @__PURE__ */ new Map();
+    for (const d of round) counts.set(keyOf(d), (counts.get(keyOf(d)) ?? 0) + 1);
+    for (const [key, count2] of counts) if (!firstRoundCount.has(key)) firstRoundCount.set(key, count2);
+  }
+  const kept = /* @__PURE__ */ new Map();
+  return all.filter((d) => {
+    const key = keyOf(d);
+    const cap = firstRoundCount.get(key);
+    if (cap === void 0) return true;
+    const n = (kept.get(key) ?? 0) + 1;
+    kept.set(key, n);
+    if (n > cap) console.warn("[classifier] \u540E\u9762\u51E0\u8F6E\u590D\u8FF0\u4E86\u524D\u9762\u5DF2\u7ECF\u5199\u8FC7\u7684\u526F\u4F5C\u7528\uFF0C\u8FD9\u4E00\u6B21\u4E0D\u6267\u884C:", key);
+    return n <= cap;
+  });
 }
 
 // utils/mcpFireCore.ts
@@ -14014,6 +14064,7 @@ var buildMcpFireTools = (resolve) => {
   }
   return tools;
 };
+var MCP_TAIL_REMINDER = `[MCP \u5DE5\u5177 ON \xB7 \u6C38\u8FDC\u7528\u89D2\u8272\u8BED\u6C14\u56DE\u590D\u522B\u7A7A\u56DE; \u5DE5\u5177\u53EA\u80FD\u8D70 function calling \u63A5\u53E3\u3001\u4E25\u7981\u5199\u6210\u6B63\u6587\u6587\u5B57; \u5DE5\u5177\u7ED3\u679C\u522B\u590D\u8BFB JSON; \u7528\u6237\u6700\u65B0\u6D88\u606F\u91CC\u5DF2\u660E\u786E\u8981\u6C42\u7684\u64CD\u4F5C\u89C6\u4E3A\u5DF2\u786E\u8BA4\uFF0C\u5426\u5219\u526F\u4F5C\u7528\u64CD\u4F5C\u5148\u786E\u8BA4]`;
 var buildMcpFireBlock = (resolve, opts) => {
   if (!resolve.size) return "";
   const userName = opts.userName || "\u7528\u6237";
@@ -14034,7 +14085,7 @@ var buildMcpFireBlock = (resolve, opts) => {
   return [
     "",
     "---",
-    `\u3010\u5916\u90E8\u5DE5\u5177 \u2014\u2014 ${userName} \u5728\u8BBE\u7F6E\u91CC\u7ED9\u4F60\u8FDE\u4E86 MCP \u5DE5\u5177\u670D\u52A1\u5668\uFF0C\u4E3B\u52A8\u6D88\u606F\u91CC\u4E5F\u53EF\u4EE5\u7528\u3011`,
+    `\u3010\u5916\u90E8\u5DE5\u5177 \u2014\u2014 ${userName} \u5728\u8BBE\u7F6E\u91CC\u7ED9\u4F60\u8FDE\u4E86 MCP \u5DE5\u5177\u670D\u52A1\u5668${opts.context === "chat" ? "" : "\uFF0C\u4E3B\u52A8\u6D88\u606F\u91CC\u4E5F\u53EF\u4EE5\u7528"}\u3011`,
     howTo,
     "\u7EAA\u5F8B\uFF1A\u4E0D\u9700\u8981\u5C31\u522B\u786C\u8C03\uFF1B\u6CA1\u6536\u5230\u7CFB\u7EDF\u8FD4\u56DE\u524D\u4E0D\u8981\u58F0\u79F0\u5DE5\u5177\u6210\u529F\uFF0C\u4E5F\u4E0D\u8981\u7F16\u9020\u7ED3\u679C\uFF1B\u5DE5\u5177\u5931\u8D25\u5C31\u6362\u4E2A\u65B9\u5F0F\u6216\u5982\u5B9E\u5E26\u8FC7\uFF1B\u7ED3\u679C\u53EA\u6311\u76F8\u5173\u90E8\u5206\u7528\u89D2\u8272\u8BED\u6C14\u8F6C\u8FF0\uFF0C\u522B\u590D\u8BFB JSON\u3002",
     "\u591A\u6B65\u4EFB\u52A1\uFF1A\u5148\u505A\u5FC5\u8981\u68C0\u67E5\uFF0C\u968F\u540E\u7ACB\u523B\u8C03\u7528\u80FD\u63A8\u8FDB\u76EE\u6807\u7684\u52A8\u4F5C\u5DE5\u5177\uFF1B\u4E0D\u8981\u53CD\u590D\u8BFB\u53D6\u540C\u4E00\u4EFD\u8BF4\u660E\u6216\u72B6\u6001\u3002\u6267\u884C\u52A8\u4F5C\u540E\u53EF\u4EE5\u518D\u6B21\u68C0\u67E5\u65B0\u72B6\u6001\uFF0C\u5E76\u7EE7\u7EED\u5230\u76EE\u6807\u5B8C\u6210\u6216\u5DE5\u5177\u660E\u786E\u5931\u8D25\u3002",
@@ -14113,7 +14164,7 @@ var EXPIRE_POLICY_DESCRIPTION = [
   'force\uFF1A\u51C6\u70B9\u7167\u53D1\uFF0C\u4E0D\u7B49\u4E5F\u4E0D\u8BA9\u3002\u7528\u5728\u300C\u5230\u90A3\u4E2A\u70B9\u5FC5\u987B\u8BF4\u8FD9\u4EF6\u5177\u4F53\u7684\u4E8B\u300D\u4E0A\uFF0C\u4E24\u79CD\u6765\u6E90\u90FD\u7B97\u2014\u2014\u7528\u6237\u660E\u786E\u8981\u6C42\u7684\uFF08\u5982"8\u70B9\u53EB\u6211\u8D77\u5E8A"\uFF09\uFF0C\u4EE5\u53CA\u4F60\u81EA\u5DF1\u8BB8\u4E0B\u7684\uFF08\u5982"\u6C64\u7096\u4E0A\u4E86\uFF0C\u4E24\u5C0F\u65F6\u540E\u597D\u4E86\u53EB\u4F60""\u4F60\u90A3\u4E2A\u4F1A\u6211\u5230\u70B9\u63D0\u9192\u4F60"\uFF09\u3002',
   "\u8FD9\u7C7B\u5151\u73B0\u7684\u662F\u4E00\u4E2A\u5177\u4F53\u627F\u8BFA\uFF0C\u7528\u6237\u4E2D\u9014\u56DE\u6765\u804A\u8FC7\u5929\u4E5F\u4E0D\u5F71\u54CD\u5B83\u8BE5\u54CD\u3002"
 ].join("\n");
-var buildScheduleToolDescription = (context) => [
+var buildScheduleToolDescription = (context, maxActiveTasks) => [
   ...context === "chat" ? [
     "\u521B\u5EFA\u5B9A\u65F6\u4E3B\u52A8\u6D88\u606F\uFF1A\u5230\u6307\u5B9A\u65F6\u95F4\u540E\uFF0C\u4F60\u4F1A\u6839\u636E\u6700\u65B0\u804A\u5929\u4E0A\u4E0B\u6587\u751F\u6210\u5E76\u63A8\u9001\u6D88\u606F\u7ED9\u7528\u6237\u3002",
     "\u6B63\u5728\u804A\u5929\u65F6\uFF0C\u4F60\u4E5F\u53EF\u4EE5\u56E0\u4E3A\u60E6\u8BB0\u3001\u60F3\u5206\u4EAB\u81EA\u5DF1\u7684\u751F\u6D3B\u3001\u5151\u73B0\u627F\u8BFA\uFF0C\u7ED9\u672A\u6765\u7684\u81EA\u5DF1\u6392\u4E00\u6B21\u8054\u7CFB\uFF0C\u4E0D\u5FC5\u7B49\u7528\u6237\u660E\u786E\u8981\u6C42\u3002"
@@ -14123,7 +14174,7 @@ var buildScheduleToolDescription = (context) => [
   ],
   "\u6392\u4E0B\u7684\u8FD9\u6761\u5230\u70B9\u65F6\u4F1A\u77E5\u9053\u4F60\u8FD9\u6B21\u8BF4\u4E86\u4EC0\u4E48\uFF0C\u80FD\u63A5\u5F97\u4E0A\uFF0C\u4E0D\u7528\u5728\u53C2\u6570\u91CC\u590D\u8FF0\u3002",
   "send_at \u662F\u5F00\u59CB\u751F\u6210\u7684\u65F6\u95F4\uFF0C\u4E0D\u662F\u9001\u8FBE\u65F6\u95F4\uFF08\u751F\u6210\u6709\u5341\u51E0\u79D2\u5EF6\u8FDF\uFF09\uFF0C\u4E14\u5FC5\u987B\u81F3\u5C11\u6BD4\u73B0\u5728\u665A 1 \u5206\u949F\u3002",
-  `\u4E00\u6B21\u6700\u591A\u6392 ${MAX_FIRE_SCHEDULES} \u6761\uFF1B\u6BCF\u4E2A\u89D2\u8272\u540C\u65F6\u6302\u7684\u4EFB\u52A1\u4E5F\u6709\u4E0A\u9650\uFF0C\u6392\u4E0D\u4E0B\u65F6\u4F1A\u544A\u8BC9\u4F60\u3002`,
+  `\u4E00\u6B21\u6700\u591A\u6392 ${MAX_FIRE_SCHEDULES} \u6761\uFF1B${typeof maxActiveTasks === "number" && Number.isFinite(maxActiveTasks) ? `\u6BCF\u4E2A\u89D2\u8272\u6700\u591A\u540C\u65F6\u6302 ${maxActiveTasks} \u4E2A\u4EFB\u52A1` : "\u6BCF\u4E2A\u89D2\u8272\u540C\u65F6\u6302\u7684\u4EFB\u52A1\u4E5F\u6709\u4E0A\u9650"}\uFF0C\u6392\u4E0D\u4E0B\u65F6\u4F1A\u544A\u8BC9\u4F60\u3002`,
   context === "chat" ? "\u672A\u6765\u90A3\u4E2A\u65F6\u523B\u771F\u7684\u60F3\u8054\u7CFB\u5C31\u6392\uFF0C\u5C0A\u91CD\u7528\u6237\u7684\u751F\u6D3B\u548C\u300C\u522B\u6253\u6270\u300D\uFF0C\u4E0D\u8981\u4E3A\u4E86\u6392\u800C\u6392\u3002" : "\u6CA1\u6709\u300C\u63A5\u7740\u8BF4\u300D\u7684\u5FC5\u8981\u5C31\u522B\u6392\u2014\u2014\u4E3A\u4E86\u6392\u800C\u6392\u51FA\u6765\u7684\u540E\u7EED\uFF0C\u7528\u6237\u8BFB\u8D77\u6765\u5C31\u662F\u6CA1\u8BDD\u627E\u8BDD\u3002"
 ].join("\n");
 var buildScheduleParameters = (opts) => ({
@@ -14165,7 +14216,7 @@ var buildFireScheduleTool = (opts) => ({
   type: "function",
   function: {
     name: AMSG_FIRE_SCHEDULE_TOOL,
-    description: buildScheduleToolDescription(opts.context ?? "fire"),
+    description: buildScheduleToolDescription(opts.context ?? "fire", opts.maxActiveTasks),
     parameters: buildParameters(
       buildSendAtExample(opts.nowMs, opts.tz, opts.storyYearless),
       opts.abilities,
@@ -14196,7 +14247,7 @@ var buildFireRenewTool = (opts) => ({
     name: AMSG_FIRE_RENEW_TOOL,
     description: [
       "\u7ED9\u4F60\u6302\u7740\u7684\u4E00\u4E2A\u4EFB\u52A1\u6539\u89E6\u53D1\u65F6\u95F4\uFF1A\u53EA\u6362\u65F6\u95F4\uFF0C\u6CBF\u7528\u539F\u6709\u6A21\u5F0F\u4E0E\u63D0\u793A\u65B9\u5411\u3002",
-      "\u4E00\u6B21\u6027\u4EFB\u52A1 = \u6574\u6761\u6539\u5230\u65B0\u65F6\u95F4\uFF08\u7F16\u53F7\u4E0D\u53D8\uFF09\uFF1B\u5FAA\u73AF\u4EFB\u52A1 = \u53EA\u7ED9\u8FD9\u4E00\u6B21\u8865\u53D1\u4E00\u6761\u4E00\u6B21\u6027\u4EFB\u52A1\uFF0C\u539F\u6765\u7684\u6BCF\u5929/\u6BCF\u5468\u8282\u594F\u4E0D\u52A8\u3002",
+      "\u4E00\u6B21\u6027\u4EFB\u52A1 = \u6574\u6761\u6539\u5230\u65B0\u65F6\u95F4\uFF1B\u5FAA\u73AF\u4EFB\u52A1 = \u53EA\u7ED9\u8FD9\u4E00\u6B21\u8865\u53D1\u4E00\u6761\u4E00\u6B21\u6027\u4EFB\u52A1\uFF0C\u539F\u6765\u7684\u6BCF\u5929/\u6BCF\u5468\u8282\u594F\u4E0D\u52A8\u3002",
       "\u60F3\u6539\u7684\u662F\u5FAA\u73AF\u4EFB\u52A1\u672C\u8EAB\u7684\u65F6\u95F4\u3001\u6216\u8005\u60F3\u8BF4\u7684\u5185\u5BB9\u65B9\u5411\u5DF2\u7ECF\u53D8\u4E86\uFF0C\u6539\u7528 cancel_active_message + schedule_active_message \u91CD\u65B0\u521B\u5EFA\u3002",
       ...opts.storyYearless ? ["\u5267\u60C5\u5E74\u4EFD\u5DF2\u5F00\u542F\uFF1Asend_at \u53EA\u5199 MM-DDTHH:mm:ss\uFF0C\u4E0D\u8981\u5199\u5E74\u4EFD\uFF1B\u7CFB\u7EDF\u4F1A\u6309\u4F60\u6240\u5728\u5730\u6362\u7B97\u6210\u6700\u8FD1\u7684\u771F\u5B9E\u65E5\u671F\u3002"] : [],
       `send_at \u81F3\u5C11\u6BD4\u73B0\u5728\u665A 1 \u5206\u949F\uFF08\u5199\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4\uFF0C\u5982 ${buildSendAtExample(opts.nowMs, opts.tz, opts.storyYearless)}\uFF0C\u4E0D\u5E26\u65F6\u533A\u540E\u7F00\uFF09\u3002`
@@ -14223,8 +14274,9 @@ var buildAmsg2ChatScheduleBrief = (targetName) => {
     `- ${target}\u660E\u786E\u8BF4\u522B\u6253\u6270\u65F6\u5C31\u5B89\u9759\u7B49\uFF1B\u5DF2\u7ECF\u6392\u7740\u76F8\u8FD1\u7684\u4E00\u6761\uFF0C\u4E5F\u522B\u91CD\u590D\u6392\u3002`
   ].join("\n");
 };
+var buildFireScheduleHowTo = (mode, opts) => mode === "native" ? `\u9700\u8981\u65F6\u901A\u8FC7\u7CFB\u7EDF\u7684\u5DE5\u5177\u8C03\u7528\u63A5\u53E3\u53D1\u8D77 ${AMSG_FIRE_SCHEDULE_TOOL}\uFF0C\u4E0D\u8981\u628A\u5DE5\u5177\u540D\u548C\u53C2\u6570\u5199\u8FDB\u6B63\u6587\u3002` : `\u9700\u8981\u65F6\u5355\u72EC\u8F93\u51FA\u4E00\u884C ${AMSG_FIRE_SCHEDULE_TOOL}({"send_at":"${buildSendAtExample(opts.nowMs, opts.tz, opts.storyYearless)}","prompt_hint":"\u63A5\u7740\u8BF4"})\uFF08send_at \u5199\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4${opts.storyYearless ? "\uFF0C\u683C\u5F0F MM-DDTHH:mm:ss\uFF0C\u4E0D\u5199\u5E74\u4EFD" : "\uFF0C\u4E0D\u5E26\u65F6\u533A\u540E\u7F00"}\uFF09\uFF0C\u7CFB\u7EDF\u4F1A\u4EE3\u4E3A\u5B89\u6392\u5E76\u628A\u7ED3\u679C\u544A\u8BC9\u4F60\u3002`;
 var buildFireScheduleBlock = (mode, opts) => {
-  const howTo = mode === "native" ? `\u9700\u8981\u65F6\u901A\u8FC7\u7CFB\u7EDF\u7684\u5DE5\u5177\u8C03\u7528\u63A5\u53E3\u53D1\u8D77 ${AMSG_FIRE_SCHEDULE_TOOL}\uFF0C\u4E0D\u8981\u628A\u5DE5\u5177\u540D\u548C\u53C2\u6570\u5199\u8FDB\u6B63\u6587\u3002` : `\u9700\u8981\u65F6\u5355\u72EC\u8F93\u51FA\u4E00\u884C ${AMSG_FIRE_SCHEDULE_TOOL}({"send_at":"${buildSendAtExample(opts.nowMs, opts.tz, opts.storyYearless)}","prompt_hint":"\u63A5\u7740\u8BF4"})\uFF08send_at \u5199\u4F60\u672C\u5730\u7684\u5899\u949F\u65F6\u95F4${opts.storyYearless ? "\uFF0C\u683C\u5F0F MM-DDTHH:mm:ss\uFF0C\u4E0D\u5199\u5E74\u4EFD" : "\uFF0C\u4E0D\u5E26\u65F6\u533A\u540E\u7F00"}\uFF09\uFF0C\u7CFB\u7EDF\u4F1A\u4EE3\u4E3A\u5B89\u6392\u5E76\u628A\u7ED3\u679C\u544A\u8BC9\u4F60\u3002`;
+  const howTo = buildFireScheduleHowTo(mode, opts);
   return [
     "",
     "---",
@@ -14426,6 +14478,80 @@ var extractFireScheduleTextCalls = (content) => {
   return calls;
 };
 
+// utils/amsg2ToolLoop.ts
+var TOOL_ROUND_PLACEHOLDER = "(\u8C03\u7528\u5DE5\u5177\u4E2D)";
+var extractToolRoundLeadIn = (content) => {
+  if (typeof content !== "string") return "";
+  const withoutThinking = splitInlineThinking(content).content;
+  return withoutThinking.split(TOOL_ROUND_PLACEHOLDER).join("").trim();
+};
+var isStructuralTagOnlyLine = (line) => /^(?:<\/?[a-zA-Z][^>]*>|\[\/?html\]|```.*)$/i.test(line.trim());
+var meaningfulCharCount = (text2) => Array.from(text2.replace(/[\s\p{P}\p{S}]/gu, "")).length;
+var isSegmentRepeatedInLater = (earlier, later) => {
+  const subLines = earlier.split("\n").map((l) => l.trim()).filter(Boolean);
+  const laterLines = later.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (subLines.length === 0 || laterLines.length === 0) return false;
+  if (subLines.length <= laterLines.length) {
+    for (let start = 0; start <= laterLines.length - subLines.length; start++) {
+      let allMatch = true;
+      for (let j = 0; j < subLines.length; j++) {
+        if (laterLines[start + j] !== subLines[j]) {
+          allMatch = false;
+          break;
+        }
+      }
+      if (allMatch) return true;
+    }
+  }
+  if (subLines.length === 1 && meaningfulCharCount(subLines[0]) >= 6) {
+    return laterLines.some((line) => line.includes(subLines[0]));
+  }
+  return false;
+};
+var appendWithoutBoundaryOverlap = (accLines, nextText) => {
+  const nextLines = nextText.split("\n");
+  if (accLines.length === 0) {
+    accLines.push(...nextLines);
+    return;
+  }
+  const maxOverlap = Math.min(accLines.length, nextLines.length);
+  let overlap = 0;
+  for (let len = maxOverlap; len >= 1; len--) {
+    if (len === 1 && isStructuralTagOnlyLine(nextLines[0])) continue;
+    let matched = true;
+    for (let i = 0; i < len; i++) {
+      if (accLines[accLines.length - len + i].trim() !== nextLines[i].trim()) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched && nextLines.slice(0, len).some((line) => line.trim().length > 0)) {
+      overlap = len;
+      break;
+    }
+  }
+  accLines.push(...nextLines.slice(overlap));
+};
+var mergeToolRoundLeadIns = (leadIns, finalContent) => {
+  const segments = [...leadIns, finalContent].map(extractToolRoundLeadIn).filter(Boolean);
+  const kept = [];
+  for (let i = 0; i < segments.length; i++) {
+    const text2 = segments[i];
+    if (kept.includes(text2)) continue;
+    if (segments.slice(i + 1).some((later) => isSegmentRepeatedInLater(text2, later))) continue;
+    kept.push(text2);
+  }
+  const mergedLines = [];
+  for (const segment of kept) {
+    appendWithoutBoundaryOverlap(mergedLines, segment);
+  }
+  return mergedLines.join("\n");
+};
+
+// utils/toolLoopFinalRound.ts
+var buildToolLoopWrapUpPrompt = (reason) => `[\u7CFB\u7EDF\u6D88\u606F\uFF1A${reason}\uFF0C\u8FD9\u4E00\u8F6E\u4E0D\u80FD\u518D\u8C03\u7528\u4EFB\u4F55\u5DE5\u5177\uFF0C\u4E5F\u4E0D\u8981\u5199\u51FA\u5DE5\u5177\u540D\u3001\u53C2\u6570\u6216\u8C03\u7528\u683C\u5F0F\u3002\u524D\u9762\u6B65\u9AA4\u91CC\u5DF2\u7ECF\u8BF4\u51FA\u53BB\u7684\u8BDD\u4E0D\u7528\u91CD\u590D\uFF1B\u8FD8\u6709\u6CA1\u8BF4\u5B8C\u7684\u5C31\u63A5\u7740\u5F80\u4E0B\u8BF4\uFF0C\u5DF2\u7ECF\u8BF4\u5B8C\u4E86\u5C31\u76F4\u63A5\u7559\u7A7A\u7ED3\u675F\u3002\u6CA1\u529E\u6210\u7684\u4E8B\u522B\u8BF4\u6210\u5DF2\u7ECF\u529E\u597D\u4E86\u3002\u4E0D\u8981\u63D0\u53CA\u8FD9\u6761\u7CFB\u7EDF\u6D88\u606F\u3002]`;
+var TOOL_LOOP_FINAL_ROUND_PROMPT = buildToolLoopWrapUpPrompt("\u8FD9\u6B21\u56DE\u590D\u80FD\u7528\u7684\u5DE5\u5177\u6B21\u6570\u5DF2\u7ECF\u7528\u5B8C");
+
 // utils/vrWorld/sarEnvelopeCore.ts
 var planFromSARModuleSnapshot = (snapshot) => {
   if (!snapshot || !snapshot.character && !snapshot.user) return null;
@@ -14474,6 +14600,59 @@ var parseSARModuleReply = (raw, plan) => {
     assistantSurface: plan.character?.phase === "active" ? tag(body, "CHAR_SURFACE") : void 0,
     userSurface: plan.user?.phase === "active" ? tag(body, "USER_SURFACE") : void 0,
     enveloped: true
+  };
+};
+var SAR_ENVELOPE_TAG_RE = /<\/?(?:SAR_MODULE_OUTPUT|CHAR_TRUE|CHAR_SURFACE|USER_SURFACE)>/gi;
+var stripSAREnvelopeTags = (text2) => text2.replace(SAR_ENVELOPE_TAG_RE, "").trim();
+var closeOpenSARTag = (text2, name, stoppers) => {
+  const open = new RegExp(`<${name}>`, "i").exec(text2);
+  if (!open || new RegExp(`</${name}>`, "i").test(text2)) return text2;
+  const after = open.index + open[0].length;
+  const stop = new RegExp(stoppers.join("|"), "i").exec(text2.slice(after));
+  const at = stop ? after + stop.index : text2.length;
+  return `${text2.slice(0, at)}</${name}>${text2.slice(at)}`;
+};
+var repairSAREnvelope = (text2) => {
+  let repaired = closeOpenSARTag(text2, "CHAR_TRUE", ["<CHAR_SURFACE>", "<USER_SURFACE>", "</SAR_MODULE_OUTPUT>"]);
+  repaired = closeOpenSARTag(repaired, "CHAR_SURFACE", ["<USER_SURFACE>", "<CHAR_TRUE>", "</SAR_MODULE_OUTPUT>"]);
+  repaired = closeOpenSARTag(repaired, "USER_SURFACE", ["<CHAR_SURFACE>", "<CHAR_TRUE>", "</SAR_MODULE_OUTPUT>"]);
+  return repaired;
+};
+var parseSARModuleReplyRounds = (rounds, plan) => {
+  const texts = rounds.filter((round) => round.trim().length > 0);
+  if (!plan.requiresEnvelope) {
+    return { canonical: texts.join("\n"), enveloped: false, pieces: [] };
+  }
+  const rawPieces = [];
+  let enveloped = false;
+  let userSurface;
+  for (const text2 of texts) {
+    const parsed = parseSARModuleReply(repairSAREnvelope(text2), plan);
+    if (parsed.enveloped) {
+      enveloped = true;
+      if (parsed.userSurface) userSurface = parsed.userSurface;
+    }
+    const canonical = stripSAREnvelopeTags(parsed.canonical);
+    if (!canonical) continue;
+    const surface = parsed.enveloped && parsed.assistantSurface ? stripSAREnvelopeTags(parsed.assistantSurface) : "";
+    rawPieces.push({ canonical, ...surface ? { surface } : {} });
+  }
+  const pieces = [];
+  for (let i = 0; i < rawPieces.length; i++) {
+    const current = rawPieces[i];
+    if (pieces.some((k) => k.canonical === current.canonical)) continue;
+    if (rawPieces.slice(i + 1).some((later) => isSegmentRepeatedInLater(current.canonical, later.canonical))) {
+      continue;
+    }
+    pieces.push(current);
+  }
+  const assistantSurface = pieces.map((p) => p.surface).filter((s) => !!s).join("\n") || void 0;
+  return {
+    canonical: pieces.map((p) => p.canonical).join("\n"),
+    ...assistantSurface ? { assistantSurface } : {},
+    ...userSurface ? { userSurface } : {},
+    enveloped,
+    pieces
   };
 };
 var createSARModuleSurfaceMeta = (state, surface) => {
@@ -14529,44 +14708,13 @@ var maskSarSurfaceBlocks = (text2) => {
     restore: (value) => blocks.length === 0 ? value : value.replace(PLACEHOLDER_RE, (_m, n) => blocks[Number(n)] ?? "")
   };
 };
-var ENVELOPE_TAG_RE = /<\/?(?:SAR_MODULE_OUTPUT|CHAR_TRUE|CHAR_SURFACE|USER_SURFACE)>/gi;
-var stripEnvelopeTags = (text2) => text2.replace(ENVELOPE_TAG_RE, "").trim();
-var closeOpenTag = (text2, name, stoppers) => {
-  const open = new RegExp(`<${name}>`, "i").exec(text2);
-  if (!open || new RegExp(`</${name}>`, "i").test(text2)) return text2;
-  const after = open.index + open[0].length;
-  const stop = new RegExp(stoppers.join("|"), "i").exec(text2.slice(after));
-  const at = stop ? after + stop.index : text2.length;
-  return `${text2.slice(0, at)}</${name}>${text2.slice(at)}`;
-};
-var repairEnvelope = (text2) => {
-  let repaired = closeOpenTag(text2, "CHAR_TRUE", ["<CHAR_SURFACE>", "<USER_SURFACE>", "</SAR_MODULE_OUTPUT>"]);
-  repaired = closeOpenTag(repaired, "CHAR_SURFACE", ["<USER_SURFACE>", "<CHAR_TRUE>", "</SAR_MODULE_OUTPUT>"]);
-  repaired = closeOpenTag(repaired, "USER_SURFACE", ["<CHAR_SURFACE>", "<CHAR_TRUE>", "</SAR_MODULE_OUTPUT>"]);
-  return repaired;
-};
 var parseSarEnvelopeRounds = (rounds, plan) => {
-  const texts = rounds.filter((round) => round.trim().length > 0);
-  if (!plan.requiresEnvelope) return { canonical: texts.join("\n"), enveloped: false, pieces: [] };
-  const pieces = [];
-  let enveloped = false;
-  let userSurface;
-  for (const text2 of texts) {
-    const parsed = parseSARModuleReply(repairEnvelope(text2), plan);
-    if (parsed.enveloped) {
-      enveloped = true;
-      if (parsed.userSurface) userSurface = parsed.userSurface;
-    }
-    const canonical = stripEnvelopeTags(parsed.canonical);
-    if (!canonical) continue;
-    const surface = parsed.enveloped && parsed.assistantSurface ? stripEnvelopeTags(parsed.assistantSurface) : "";
-    pieces.push({ canonical, ...surface ? { surface } : {} });
-  }
+  const parsed = parseSARModuleReplyRounds(rounds, plan);
   return {
-    canonical: pieces.map((p) => p.canonical).join("\n"),
-    enveloped,
-    pieces,
-    ...userSurface ? { userSurface } : {}
+    canonical: parsed.canonical,
+    enveloped: parsed.enveloped,
+    pieces: parsed.pieces,
+    ...parsed.userSurface ? { userSurface: parsed.userSurface } : {}
   };
 };
 var isEmojiSegment = (seg) => /^\[\[SEND_EMOJI[:：]/i.test(seg.raw.trim());
@@ -14638,6 +14786,12 @@ var MAX_DUPLICATE_TOOL_CALLS = 2;
 var DEFAULT_TOOL_ITERATIONS = 5;
 var MCP_MAX_TOOL_ITERATIONS = 12;
 var resolveToolIterationBudget = (hasMcp) => hasMcp ? MCP_MAX_TOOL_ITERATIONS : DEFAULT_TOOL_ITERATIONS;
+var appendFinalRoundNotice = (results, iteration, maxToolIterations) => {
+  if (typeof iteration !== "number" || iteration < maxToolIterations - 2 || results.length === 0) return results;
+  const last = results[results.length - 1];
+  return [...results.slice(0, -1), { ...last, content: `${last.content}
+${TOOL_LOOP_FINAL_ROUND_PROMPT}` }];
+};
 var XHS_SHARE_TAG_RE = /\[\[XHS_SHARE:\s*\d+\]\]/;
 var XHS_DESC_MAX = 120;
 function buildXhsSessionPayload(directives, notes, xsecTokens) {
@@ -14726,8 +14880,8 @@ function processLLMRound(state, llmOutputText, build, mcp, schedule, iteration, 
   const extraToolCalls = [...mcpToolCalls, ...scheduleCalls];
   const result = classifyLLMOutput(scanText);
   const isToolRound = result.kind === "tool-request" || extraToolCalls.length > 0;
+  const narration = result.kind === "tool-request" ? result.prefix : scanText;
   if (isToolRound) {
-    const narration = result.kind === "tool-request" ? result.prefix : scanText;
     if (state.duplicateToolCalls < MAX_DUPLICATE_TOOL_CALLS && !isFinalRound) {
       if (narration.trim()) state.narrations.push(restoreSurfaces(narration));
       if (state.xhsShareNotes === null && XHS_SHARE_TAG_RE.test(narration)) {
@@ -14738,17 +14892,30 @@ function processLLMRound(state, llmOutputText, build, mcp, schedule, iteration, 
         toolCalls: result.kind === "tool-request" ? [...result.toolCalls, ...extraToolCalls] : extraToolCalls
       };
     }
+    if (isFinalRound) {
+      console.warn("[amsg:agentic]", {
+        type: "final_round_tool_dropped",
+        taskId: build.taskId,
+        iteration,
+        tools: [
+          ...result.kind === "tool-request" ? result.toolCalls : [],
+          ...extraToolCalls
+        ].map((tc) => tc.function.name)
+      });
+    }
   }
-  const thisRound = isToolRound ? "" : restoreSurfaces(scanText);
+  const thisRound = !isToolRound ? restoreSurfaces(scanText) : isFinalRound ? restoreSurfaces(narration) : "";
   const rounds = [...state.narrations, thisRound].filter((part) => part.trim().length > 0);
-  const fullText = rounds.join("\n");
+  const fullText = state.narrations.length > 0 ? mergeToolRoundLeadIns(state.narrations, thisRound) : thisRound;
   const sarParse = sarPlan?.requiresEnvelope ? parseSarEnvelopeRounds(rounds, sarPlan) : null;
   const finalScan = sarParse ? classifyLLMOutput(sarParse.canonical) : fullText === scanText ? result : classifyLLMOutput(fullText);
   const cleanedText = finalScan.kind === "finish" ? finalScan.cleanedText : finalScan.prefix;
-  const directives = attachSceneSong(
-    finalScan.kind === "finish" ? finalScan.directives : [],
-    build.sceneSong
-  );
+  const roundTexts = sarParse?.pieces.length ? sarParse.pieces.map((piece) => piece.canonical) : rounds;
+  const finalDirectives = finalScan.kind !== "finish" ? [] : roundTexts.length > 1 ? dropCrossRoundRepeats(finalScan.directives, roundTexts.map((text2) => {
+    const scan = classifyLLMOutput(text2);
+    return scan.kind === "finish" ? scan.directives : [];
+  })) : finalScan.directives;
+  const directives = attachSceneSong(finalDirectives, build.sceneSong);
   const xhsSession = buildXhsSessionPayload(
     directives,
     state.xhsShareNotes ?? build.xhsNotes,
@@ -14816,7 +14983,7 @@ function buildScheduledPush(message, build, extraMeta, bannerBody) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-11-08";
+var AMSG_BUNDLE_VERSION = "2026-11-25";
 
 // worker/amsg/src/reproduction.ts
 async function writeDiagnosticStage(writeState, runId, event, fields = {}) {
@@ -16017,15 +16184,21 @@ function parseHolidayCalendar(country, year, raw, now) {
 function validCached(raw, country, year) {
   return raw?.country === country && raw.year === year && Number.isFinite(raw.fetchedAt) && Array.isArray(raw.days) && raw.days.every((d) => validDate(d?.date) && typeof d.name === "string" && d.name === cleanName(d.name) && typeof d.off === "boolean" && (d.regions === void 0 || Array.isArray(d.regions) && d.regions.every((r) => typeof r === "string")));
 }
-function insertUserHolidayInProfile(prompt, reminder) {
+function insertUserHolidayInProfile(prompt, reminder, userBioLength) {
   if (!reminder) return prompt;
   const heading = "### \u4E92\u52A8\u5BF9\u8C61 (User)\n";
-  return prompt.includes(heading) ? prompt.replace(heading, `${heading}- ${reminder}
-`) : `${prompt}
+  const headingAt = prompt.indexOf(heading);
+  if (headingAt < 0) return prompt;
+  const bioLabel = "- \u8BBE\u5B9A/\u5907\u6CE8: ";
+  const bioAt = prompt.indexOf(bioLabel, headingAt);
+  const bioEnd = bioAt >= 0 && typeof userBioLength === "number" ? bioAt + bioLabel.length + userBioLength : -1;
+  if (bioEnd >= 0 && prompt.startsWith("\n\n", bioEnd)) {
+    return `${prompt.slice(0, bioEnd + 2)}- ${reminder}
 
-### \u4E92\u52A8\u5BF9\u8C61\u4FE1\u606F\u8865\u5145
-${reminder}
-`;
+${prompt.slice(bioEnd + 2)}`;
+  }
+  return prompt.replace(heading, `${heading}- ${reminder}
+`);
 }
 async function loadHolidayCalendar(country, year, cache, now = Date.now()) {
   if (!HOLIDAY_COUNTRIES.some((c) => c.countryCode === country) || !Number.isInteger(year) || year < 2e3 || year > 2200) return null;
@@ -16248,8 +16421,64 @@ var buildRealtimeWorldBlock = async (args) => {
   return block;
 };
 
+// utils/awayMessageCore.ts
+var AWAY_RENEW_SLACK_MS = 10 * 6e4;
+
+// utils/awayMessagePrompt.ts
+var DATE_AFTERGLOW_MS = 3 * 60 * 6e4;
+var isJustMetOffline = (info, now) => info.lastDateAt != null && now >= info.lastDateAt && now - info.lastDateAt < DATE_AFTERGLOW_MS;
+var describeAwayGap = (source, userName, anchorAt, showClock, tzId) => {
+  const isCall = source === "call" || source === "call-end-popup";
+  if (!showClock || anchorAt == null) {
+    if (source === "date") return `\u7EBF\u4E0B\u5206\u5F00\u540E\u8FD9\u6BB5\u65F6\u95F4${userName}\u6CA1\u6709\u5728\u7EBF\u4E0A\u7ED9\u4F60\u53D1\u6D88\u606F`;
+    if (isCall) return `\u901A\u8BDD\u7ED3\u675F\u540E\u8FD9\u6BB5\u65F6\u95F4${userName}\u6CA1\u6709\u5728\u7EBF\u4E0A\u7ED9\u4F60\u53D1\u6D88\u606F`;
+    return `\u8FD9\u6BB5\u65F6\u95F4${userName}\u6CA1\u6709\u518D\u5728\u7EBF\u4E0A\u7ED9\u4F60\u53D1\u6D88\u606F`;
+  }
+  const anchorClock = formatFireTimeShort(anchorAt, { tzId });
+  if (source === "date") return `\u4F60\u548C${userName}\u4E0A\u4E00\u6B21\u5728\u7EBF\u4E0B\u4E92\u52A8\u662F\u5728 ${anchorClock}\uFF0C\u5206\u5F00\u540E\u8FD8\u6CA1\u6709\u5728\u7EBF\u4E0A\u804A\u8FC7`;
+  if (isCall) return `\u4F60\u548C${userName}\u4E0A\u4E00\u6B21\u901A\u8BDD\u662F\u5728 ${anchorClock}\uFF0C\u6302\u65AD\u540E\u8FD8\u6CA1\u6709\u5728\u7EBF\u4E0A\u804A\u8FC7`;
+  return `${userName}\u6700\u540E\u4E00\u6B21\u5728\u7EBF\u4E0A\u7ED9\u4F60\u53D1\u6D88\u606F\u662F\u5728 ${anchorClock}`;
+};
+var proactiveLine = (userName) => `${userName}\u6B64\u523B\u5E76\u6CA1\u6709\u53D1\u6765\u65B0\u6D88\u606F\uFF0C\u662F\u4F60\u81EA\u5DF1\u60F3\u8D77\u4E86${userName}\uFF0C\u62FF\u8D77\u624B\u673A\u4E3B\u52A8\u627E\u5BF9\u65B9\u3002`;
+var moodLine = (userName, justMetOffline) => justMetOffline ? `\u4F60\u548C${userName}\u521A\u521A\u5728\u7EBF\u4E0B\u89C1\u8FC7\u9762\uFF0C\u73B0\u5728\u6682\u65F6\u5206\u5F00\u4E86\u3002\u8BF7\u4ECE\u8FD9\u4EFD\u89C1\u9762\u540E\u7684\u5FC3\u60C5\u51FA\u53D1\uFF1A\u53EF\u4EE5\u56DE\u5473\u4E0A\u4E0B\u6587\u91CC\u5DF2\u6709\u7684\u89C1\u9762\u7EC6\u8282\u3001\u8865\u4E00\u53E5\u5F53\u65F6\u6CA1\u8BF4\u51FA\u53E3\u7684\u8BDD\u3001\u5173\u5FC3\u5BF9\u65B9\u5230\u5BB6\u4E86\u6CA1\uFF0C\u6216\u8005\u521A\u5206\u5F00\u5C31\u6709\u70B9\u60F3\u5FF5\u3002\u4E0D\u8981\u8868\u73B0\u5F97\u50CF\u5F88\u4E45\u6CA1\u8054\u7CFB\uFF0C\u4E5F\u4E0D\u8981\u5BF9\u521A\u624D\u7684\u89C1\u9762\u6BEB\u4E0D\u77E5\u60C5\uFF1B\u5982\u679C\u5177\u4F53\u7EC6\u8282\u5DF2\u4E0D\u5728\u53EF\u89C1\u4E0A\u4E0B\u6587\u91CC\uFF0C\u4E0D\u8981\u7F16\u9020\uFF0C\u8868\u8FBE\u5206\u522B\u540E\u7684\u5FC3\u60C5\u5373\u53EF\u3002` : `\u4F60\u81EA\u5DF1\u7684\u751F\u6D3B\u4E5F\u5728\u7EE7\u7EED\uFF1A\u53EF\u4EE5\u5206\u4EAB\u968F\u624B\u62CD\u7684\u7167\u7247\u3001\u521A\u770B\u5230\u7684\u8DA3\u4E8B\u3001\u7A81\u7136\u60F3\u5230\u7684\u51B7\u77E5\u8BC6\uFF0C\u5410\u69FD\u5929\u6C14\u3001\u98DF\u7269\u6216\u89C1\u95FB\uFF0C\u63A5\u4E0A\u4E4B\u524D\u804A\u8FC7\u7684\u8BDD\uFF0C\u6216\u8005\u5355\u7EAF\u60F3\u627E${userName}\u804A\u4E24\u53E5\u3002\u7ED3\u5408\u4F60\u7684\u4EBA\u8BBE\u548C\u5F53\u65F6\u7684\u751F\u6D3B\u81EA\u7136\u9009\uFF0C\u4E0D\u7528\u6BCF\u4E00\u7C7B\u90FD\u5199\u3002`;
+var buildAwayFireInstruction = (input) => [
+  `${describeAwayGap(input.anchor.source, input.userName, input.anchorAt, input.showClock, input.tzId)}\u3002`,
+  proactiveLine(input.userName),
+  "\u8FD9\u6B21\u4E00\u5B9A\u8981\u53D1\u51FA\u6D88\u606F\uFF1A\u7ED3\u5408\u4F60\u4EEC\u6700\u540E\u804A\u5230\u54EA\u513F\u3001\u4F60\u81EA\u5DF1\u8FD9\u4F1A\u513F\u5728\u505A\u4EC0\u4E48\uFF0C\u50CF\u771F\u4EBA\u4E00\u6837\u81EA\u7136\u5730\u53D1\u6761\u79C1\u804A\u3002",
+  moodLine(input.userName, isJustMetOffline(input.anchor, input.nowMs)),
+  "\u4E0D\u8981\u50CF\u7CFB\u7EDF\u63D0\u9192\uFF0C\u4E5F\u4E0D\u8981\u63D0\u300C\u591A\u5C11\u5206\u949F\u300D\u8FD9\u79CD\u8BA1\u65F6\u3002"
+].join("\n");
+
+// utils/worldbook.ts
+var rollWorldbookProbability = (probability, random = Math.random) => {
+  if (probability <= 0) return false;
+  if (probability >= 100) return true;
+  return random() * 100 < probability;
+};
+var ROLL_HEADER_RE = /\{\{AMSG_WB_SEC\}\}|\{\{AMSG_WB_CAT\}\}(#### \[[^\n]*\]\n)/g;
+var ROLL_BLOCK_RE = /\{\{AMSG_WB_IF:([^}]*)\}\}((?:(?!\{\{AMSG_WB_IF:)[\s\S])*?)\{\{\/AMSG_WB_IF\}\}/;
+var renderWorldbookRolls = (template, rolls, random = Math.random) => {
+  const hit = new Map(rolls.map((roll) => [roll.id, rollWorldbookProbability(roll.probability, random)]));
+  let out = template;
+  for (let m = ROLL_BLOCK_RE.exec(out); m; m = ROLL_BLOCK_RE.exec(out)) {
+    const keep = m[1].split(",").some((id) => hit.get(decodeURIComponent(id)) === true);
+    out = out.slice(0, m.index) + (keep ? m[2] : "") + out.slice(m.index + m[0].length);
+  }
+  let lastCategory = null;
+  return out.replace(ROLL_HEADER_RE, (_whole, categoryLine) => {
+    if (categoryLine === void 0) {
+      lastCategory = null;
+      return "";
+    }
+    if (categoryLine === lastCategory) return "";
+    lastCategory = categoryLine;
+    return categoryLine;
+  });
+};
+
 // utils/timeFramingNote.ts
 var TIME_FRAMING_CONVERSATIONAL = "\u65F6\u95F4\u662F\u4F60\u6B64\u523B\u6240\u5904\u7684\u80CC\u666F\uFF1A\u5B83\u4F1A\u6E17\u8FDB\u4F60\u7684\u8BED\u6C14\u3001\u4F60\u7684\u72B6\u6001\u3001\u4F60\u987A\u53E3\u63D0\u8D77\u7684\u4E8B\u3002\u81F3\u4E8E\u8FD9\u6BB5\u8BDD\u804A\u5230\u54EA\u513F\u3001\u8981\u4E0D\u8981\u7EE7\u7EED\uFF0C\u8DDF\u7740\u4F60\u4EEC\u6B63\u5728\u8BF4\u7684\u4E8B\u60C5\u8D70\u2014\u2014\u8BDD\u9898\u81EA\u5DF1\u4F1A\u8D70\u5230\u8BE5\u7ED3\u675F\u7684\u5730\u65B9\u3002\u5BF9\u65B9\u5728\u8FD9\u4E2A\u70B9\u8FD8\u5728\u8DDF\u4F60\u8BF4\u8BDD\uFF0C\u672C\u8EAB\u5C31\u662F ta \u7684\u9009\u62E9\u3002";
+var TIME_AWARENESS_NOTE = "\u8BF7\u636E\u6B64\u81EA\u7136\u5730\u62E5\u6709\u771F\u5B9E\u7684\u65F6\u95F4\u89C2\u5FF5\uFF08\u65E9\u665A\u4F5C\u606F\u3001\u5DE5\u4F5C\u65E5/\u5468\u672B\u3001\u8DDD\u79BB\u4E0A\u6B21\u4E92\u52A8\u591A\u4E45\u7B49\uFF09\uFF0C\u4E0D\u8981\u51ED\u7A7A\u5047\u8BBE\u65F6\u95F4\u3002";
 
 // worker/amsg/src/instantChat.ts
 var INSTANT_TOTAL_TIMEOUT_MS = 6e5;
@@ -16258,12 +16487,15 @@ var buildInstantTimelyBlock = (args) => {
   if (!args.timeAwarenessEnabled && blocks.length === 0) return "";
   const head = args.timeAwarenessEnabled ? [
     "\u3010\u6B64\u523B\u7684\u7CFB\u7EDF\u4FE1\u606F\xB7\u4EC5\u4F60\u53EF\u89C1\u3011",
-    `\u73B0\u5728\u662F ${args.tavernStoryTime ? formatFireTimeFullWithStoryYear(args.nowMs, args.tz, args.tavernStoryTime) : formatFireTimeFull(args.nowMs, args.tz)}\u3002`,
+    `\u73B0\u5728\u662F ${args.tavernStoryTime ? formatFireTimeFullWithStoryYear(args.nowMs, args.tz, args.tavernStoryTime) : formatFireTimeFull(args.nowMs, args.tz)}\u3002${args.tavernStoryTime ? "" : TIME_AWARENESS_NOTE}`,
     // 报时后面跟那句语境框定，跟前台聊天引的是同一份常量。这一轮是用户刚按下发送、
     // 正等着回复，所以「对方还在跟你说话」是真的；少了它，深夜的那行钟就够让角色
     // 每轮都往「快睡吧、明天见」上收——本地那条路修好了、云端没修的话，同一个角色
     // 在两条路上的分寸会不一样。
     TIME_FRAMING_CONVERSATIONAL,
+    // 「你身处 X 时区」那句不在这里：worker 不知道角色开没开自定义时区，而那句是
+    // 不随时间变的静态文案，由前端烤在紧随其后的「实时状态」段开头（见 chatPrompts
+    // 的 timelyByWorker 分支）。
     // buildUserClockHint 自带前导换行，没时差时返回空串。
     buildUserClockHint(args.nowMs, args.tz, { tzId: args.userTzId }, args.targetName)
   ].join("\n") : "\u3010\u6B64\u523B\u7684\u7CFB\u7EDF\u4FE1\u606F\xB7\u4EC5\u4F60\u53EF\u89C1\u3011";
@@ -16562,8 +16794,9 @@ var handleInstantChat = async (args) => {
 };
 
 // utils/amsgSelfUpdateState.ts
+var parseAmsgBundleChannel = (raw) => raw === "stable" || raw === "canary" ? raw : null;
 var findCfTokenRejection = (text2) => /\d+: invalid (access|api) token/i.exec(text2)?.[0] ?? null;
-var cfTokenRejectedMessage = (detail, hasAccountId) => `Cloudflare \u4E0D\u8BA4\u8FD9\u679A CF_API_TOKEN\uFF08${detail}\uFF09\uFF0C\u591A\u534A\u5DF2\u7ECF\u8FC7\u671F\u6216\u88AB\u5220\u4E86\u3002\u53BB Cloudflare \u65B0\u5EFA\u4E00\u679A\uFF08\u53EA\u52FE Workers Scripts \u2192 Edit\uFF09\uFF0C\u66FF\u6362 Worker \u91CC\u7684 CF_API_TOKEN\u3002` + (hasAccountId ? "" : "\u5982\u679C\u5B83\u662F cfat_ \u5F00\u5934\u7684\u8D26\u53F7\u4EE4\u724C\uFF0C\u6362\u6210\u666E\u901A API Token\uFF0C\u6216\u8005\u7ED9 Worker \u52A0\u4E00\u6761 CF_ACCOUNT_ID\u3002");
+var cfTokenRejectedMessage = (detail, hasAccountId) => `Cloudflare \u4E0D\u8BA4\u8FD9\u679A CF_API_TOKEN\uFF08${detail}\uFF09\uFF0C\u591A\u534A\u5DF2\u7ECF\u8FC7\u671F\u6216\u88AB\u5220\u4E86\u3002\u53BB Cloudflare \u65B0\u5EFA\u4E00\u679A\uFF08\u53EA\u7ED9 Workers Scripts \u6743\u9650\uFF0CRead \u548C Edit \u90FD\u52FE\uFF09\uFF0C\u66FF\u6362 Worker \u91CC\u7684 CF_API_TOKEN\u3002` + (hasAccountId ? "" : "\u5982\u679C\u5B83\u662F cfat_ \u5F00\u5934\u7684\u8D26\u53F7\u4EE4\u724C\uFF0C\u6362\u6210\u666E\u901A API Token\uFF0C\u6216\u8005\u7ED9 Worker \u52A0\u4E00\u6761 CF_ACCOUNT_ID\u3002");
 var OUTCOMES = /* @__PURE__ */ new Set(["updated", "up_to_date", "failed"]);
 var SOURCES = /* @__PURE__ */ new Set(["cron", "client", "manual"]);
 var parseAmsgSelfUpdateState = (raw) => {
@@ -16584,17 +16817,23 @@ var parseAmsgSelfUpdateState = (raw) => {
 
 // worker/amsg/src/selfUpdate.ts
 var CF_API = "https://api.cloudflare.com/client/v4";
-var BUNDLE_URL = "https://raw.githubusercontent.com/Tosd0/sullyos-workers/main/amsg/worker.bundle.js";
-function resolveBundleUrl(env) {
+var BUNDLE_URLS = {
+  stable: "https://raw.githubusercontent.com/Tosd0/sullyos-workers/main/amsg/worker.bundle.js",
+  canary: "https://raw.githubusercontent.com/Tosd0/sullyos-workers/canary/amsg/worker.bundle.js"
+};
+function customBundleUrl(env) {
   const configured = env.AMSG_BUNDLE_URL?.trim();
-  if (!configured) return BUNDLE_URL;
+  if (!configured) return null;
   try {
     const url = new URL(configured);
     if (url.protocol === "https:") return url.toString();
   } catch {
   }
   console.warn("[amsg:self-update] AMSG_BUNDLE_URL \u4E0D\u662F https \u5730\u5740\uFF0C\u6539\u7528\u9ED8\u8BA4\u6210\u54C1\u5305");
-  return BUNDLE_URL;
+  return null;
+}
+function resolveBundleUrl(env, channel = "stable") {
+  return customBundleUrl(env) ?? BUNDLE_URLS[channel];
 }
 var MAIN_MODULE = "worker.bundle.js";
 var FALLBACK_COMPATIBILITY_DATE = "2026-01-01";
@@ -16689,10 +16928,10 @@ function bundleFetchUrl(base, nowMs = Date.now()) {
   url.searchParams.set("t", String(nowMs));
   return url.toString();
 }
-async function fetchLatestBundle(env = {}) {
+async function fetchLatestBundle(env = {}, channel = "stable") {
   let res;
   try {
-    res = await fetch(bundleFetchUrl(resolveBundleUrl(env)), {
+    res = await fetch(bundleFetchUrl(resolveBundleUrl(env, channel)), {
       headers: { "User-Agent": "sullyos-amsg-self-update" },
       cache: "no-store"
     });
@@ -16820,9 +17059,32 @@ async function performSelfUpdate(env, token, scriptName, bundle) {
     scriptName
   };
 }
-async function handleSelfUpdate(request, env) {
+var readRequestedChannel = async (request) => {
+  let body;
+  try {
+    body = JSON.parse(await request.text());
+  } catch {
+    return null;
+  }
+  if (!body || typeof body !== "object" || !("channel" in body)) return null;
+  const raw = body.channel;
+  if (raw === void 0) return null;
+  return parseAmsgBundleChannel(raw) ?? "invalid";
+};
+async function handleSelfUpdate(request, env, storedChannel = "stable") {
   const gate = await authorizeSelfUpdate(request, env);
   if (!gate.ok) return gate;
+  const requested = await readRequestedChannel(request);
+  if (requested === "invalid") {
+    return fail("INVALID_CHANNEL", "\u901A\u9053\u53EA\u80FD\u662F stable \u6216 canary\u3002");
+  }
+  const channel = requested ?? storedChannel;
+  if (channel !== storedChannel && customBundleUrl(env)) {
+    return fail(
+      "CUSTOM_BUNDLE_URL",
+      "\u8FD9\u53F0 Worker \u7528 AMSG_BUNDLE_URL \u6307\u5B9A\u4E86\u81EA\u5DF1\u7684\u6210\u54C1\u5305\u5730\u5740\uFF0C\u66F4\u65B0\u53EA\u4ECE\u90A3\u91CC\u62C9\uFF0C\u5207\u6362\u4E0D\u4E86\u901A\u9053\u3002\u8981\u8DDF\u5B98\u65B9\u901A\u9053\u8D70\uFF0C\u5148\u5220\u6389\u8FD9\u6761\u53D8\u91CF\u3002"
+    );
+  }
   const scriptName = resolveScriptName(env, request.url);
   if (!scriptName) {
     return fail(
@@ -16830,9 +17092,10 @@ async function handleSelfUpdate(request, env) {
       "\u8BA4\u4E0D\u51FA\u8FD9\u4E2A Worker \u53EB\u4EC0\u4E48\uFF08\u591A\u534A\u662F\u5957\u4E86\u4EE3\u7406\u57DF\u540D\uFF09\u3002\u7ED9\u5B83\u52A0\u4E00\u6761 CF_SCRIPT_NAME \u53D8\u91CF\uFF0C\u503C\u586B Worker \u7684\u540D\u5B57\u3002"
     );
   }
-  const fetched = await fetchLatestBundle(env);
+  const fetched = await fetchLatestBundle(env, channel);
   if (!fetched.ok) return fail("BUNDLE_INVALID", fetched.message);
-  return performSelfUpdate(env, gate.token, scriptName, fetched.bundle);
+  const result = await performSelfUpdate(env, gate.token, scriptName, fetched.bundle);
+  return result.ok ? { ...result, channel } : result;
 }
 
 // utils/amsgTickReport.ts
@@ -17151,6 +17414,7 @@ async function runScheduledAfterUpdate(update, tick) {
 }
 var SELF_UPDATE_KEY = "self_update";
 var SCHEMA_ENSURED_KEY = "schema_ensured";
+var BUNDLE_CHANNEL_KEY = "bundle_channel";
 var SCHEMA_ENSURE_RETRY_MS = 60 * 6e4;
 var readSelfUpdateState = async (db) => {
   const raw = await readDiagnosticValue(db, SELF_UPDATE_KEY);
@@ -17161,6 +17425,7 @@ var readSelfUpdateState = async (db) => {
     return null;
   }
 };
+var readBundleChannel = async (db) => parseAmsgBundleChannel(await readDiagnosticValue(db, BUNDLE_CHANNEL_KEY)) ?? "stable";
 var writeSelfUpdateState = async (db, state, nowMs) => {
   await writeDiagnosticValue(db, SELF_UPDATE_KEY, JSON.stringify(state), nowMs);
 };
@@ -17191,6 +17456,7 @@ var applySelfUpdateResult = (previous, source, result, nowMs) => {
 var recordManualSelfUpdate = async (db, result, nowMs = Date.now()) => {
   if (typeof db?.prepare !== "function") return;
   try {
+    if (result.ok && result.channel) await writeDiagnosticValue(db, BUNDLE_CHANNEL_KEY, result.channel, nowMs);
     const previous = await readSelfUpdateState(db);
     await writeSelfUpdateState(db, applySelfUpdateResult(previous, "manual", result, nowMs), nowMs);
     if (result.ok) await markSchemaUnverified(db, nowMs);
@@ -17229,7 +17495,7 @@ var runAutoUpdate = async (env, db, options) => {
       message: "\u8BA4\u4E0D\u51FA\u8FD9\u4E2A Worker \u53EB\u4EC0\u4E48\u3002\u7ED9\u5B83\u52A0\u4E00\u6761 CF_SCRIPT_NAME \u53D8\u91CF\uFF0C\u503C\u586B Worker \u7684\u540D\u5B57\uFF0C\u81EA\u52A8\u66F4\u65B0\u624D\u77E5\u9053\u8BE5\u66F4\u65B0\u8C01\u3002"
     });
   }
-  const fetched = await fetchLatestBundle(env);
+  const fetched = await fetchLatestBundle(env, await readBundleChannel(db));
   if (!fetched.ok) return settle({ ok: false, code: "BUNDLE_INVALID", message: fetched.message });
   const bindingsComplete = Boolean(env.INSTANT_TICK);
   if (previous?.bundleHash === fetched.bundle.hash && bindingsComplete) {
@@ -17697,6 +17963,10 @@ var feishuGetDiaryByDate = async (appId, appSecret, baseId, tableId, characterNa
   }
 };
 
+// utils/appVersion.ts
+var APP_VERSION = "v3.17 (Mainland Relay)";
+var APP_VERSION_TAG = APP_VERSION.split(" ")[0];
+
 // utils/networkFailureDiagnosis.ts
 var readError = (error) => {
   if (error instanceof Error) return { name: error.name || "Error", message: error.message || String(error) };
@@ -17721,8 +17991,10 @@ var parseTargetUrl = (url, base) => {
 var isLoopbackHost = (host) => /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(host);
 var classifyFetchFailure = (ctx) => {
   const { name, message } = readError(ctx.error);
-  if (name === "TimeoutError" || /timed?\s?out|timeout/i.test(message)) return "timeout";
-  if (name === "AbortError" || /aborted|abort/i.test(message)) return "aborted";
+  const isTimeout = name === "TimeoutError" || /timed?\s?out|timeout/i.test(message);
+  if (!isTimeout && (name === "AbortError" || /aborted|abort/i.test(message))) return "aborted";
+  if (ctx.responseHeadersReceived) return "stream-interrupted";
+  if (isTimeout) return "timeout";
   const target = parseTargetUrl(ctx.url);
   if (!target.ok) return "bad-url";
   const pageProtocol = ctx.pageProtocol ?? (typeof location !== "undefined" ? location.protocol : "");
@@ -19229,11 +19501,123 @@ var neverRan = (result) => {
   const r = result;
   return r.ok === false && typeof r.reason === "string" && NEVER_RAN_REASONS.has(r.reason);
 };
-var TOOL_RESULT_NOTES = {
-  web_search: "[\u7CFB\u7EDF: \u641C\u7D22\u7ED3\u679C\u4E0D\u5E26\u65E5\u671F\uFF0C\u4E0D\u4E00\u5B9A\u662F\u6700\u65B0\u7684\u2014\u2014\u522B\u628A\u65E7\u95FB\u5F53\u6210\u521A\u53D1\u751F\u7684\u4E8B\u8BF4\uFF0C\u4E5F\u522B\u81EA\u5DF1\u7ED9\u5B83\u5B89\u4E00\u4E2A\u65F6\u95F4\u3002]"
+var asksYou = (intro, items) => {
+  const kept = items.filter((item) => !!item);
+  return `[\u7CFB\u7EDF: ${intro}\u73B0\u5728\u8BF7\u4F60\uFF1A
+${kept.map((item, i) => `${i + 1}. ${item}`).join("\n")}]`;
 };
+var RESPOND_FIRST = "\u5148\u6B63\u5E38\u56DE\u5E94\u7528\u6237\u521A\u624D\u8BF4\u7684\u8BDD\uFF08\u7528\u6237\u8FD8\u5728\u7B49\u4F60\u56DE\u590D\uFF01\uFF09";
+var XHS_SHARE_HOWTO = "\u5982\u679C\u89C9\u5F97\u67D0\u6761\u7B14\u8BB0\u7279\u522B\u503C\u5F97\u5206\u4EAB\uFF0C\u53EF\u4EE5\u7528 [[XHS_SHARE: \u5E8F\u53F7]] \u628A\u5B83\u4F5C\u4E3A\u5361\u7247\u5206\u4EAB\u7ED9\u7528\u6237\uFF08\u5E8F\u53F7\u4ECE1\u5F00\u59CB\uFF09\uFF0C\u53EF\u4EE5\u5206\u4EAB\u591A\u6761\uFF1B\u4E0D\u8981\u624B\u5199\u201C[\u4F60\u5206\u4EAB\u4E86\u5C0F\u7EA2\u4E66\u7B14\u8BB0]\u201D\u53CA\u6807\u9898/\u4F5C\u8005/\u4E92\u52A8/\u7B80\u4ECB\uFF0C\u5206\u4EAB\u5361\u7247\u5FC5\u987B\u4F7F\u7528\u8BE5\u6807\u8BB0";
+var XHS_LIKE_HOWTO = "\u5982\u679C\u559C\u6B22\u67D0\u6761\u7B14\u8BB0\uFF0C\u53EF\u4EE5\u7528 [[XHS_LIKE: noteId]] \u70B9\u8D5E\uFF0C[[XHS_FAV: noteId]] \u6536\u85CF";
+var XHS_POST_HOWTO = "\u5982\u679C\u60F3\u53D1\u4E00\u6761\u81EA\u5DF1\u7684\u7B14\u8BB0\uFF0C\u53EF\u4EE5\u7528 [[XHS_POST: \u6807\u9898 | \u5185\u5BB9 | #\u6807\u7B7E1 #\u6807\u7B7E2]]";
+var XHS_DETAIL_HOWTO = "\u5982\u679C\u60F3\u770B\u67D0\u6761\u7B14\u8BB0\u7684\u5B8C\u6574\u5185\u5BB9\u548C\u8BC4\u8BBA\u533A\uFF0C\u53EF\u4EE5\u7528 [[XHS_DETAIL: noteId]]";
+var xhsDigestIntro = (canCallMoreTools) => `\u4F60\u5DF2\u7ECF\u770B\u5B8C\u4E86\uFF08\u6CE8\u610F\uFF1A\u4EE5\u4E0A\u53EA\u662F\u6458\u8981${canCallMoreTools ? "\uFF0C\u60F3\u770B\u67D0\u6761\u7B14\u8BB0\u7684\u5B8C\u6574\u6B63\u6587\u53EF\u4EE5\u7528 [[XHS_DETAIL: noteId]]" : ""}\uFF09\u3002`;
+var neverRanIntro = (r, intros) => intros[r?.reason] ?? "";
+var diaryNote = (label) => (r) => [
+  r?.ok === true && asksYou(`\u4F60\u5DF2\u7ECF\u770B\u5B8C\u4E86${label}\u3002`, [
+    "\u5148\u6B63\u5E38\u56DE\u5E94\u7528\u6237\u521A\u624D\u8BF4\u7684\u8BDD\uFF08\u8FD9\u662F\u6700\u91CD\u8981\u7684\uFF01\u7528\u6237\u8FD8\u5728\u7B49\u4F60\u56DE\u590D\uFF09",
+    '\u81EA\u7136\u5730\u628A\u65E5\u8BB0\u4E2D\u7684\u56DE\u5FC6\u878D\u5165\u4F60\u7684\u56DE\u590D\u4E2D\uFF0C\u6BD4\u5982"\u6211\u60F3\u8D77\u6765\u4E86\u90A3\u5929..."\u3001"\u770B\u4E86\u65E5\u8BB0\u624D\u53D1\u73B0..."\u7B49',
+    "\u53EF\u4EE5\u5206\u4EAB\u65E5\u8BB0\u4E2D\u6709\u8DA3\u7684\u7EC6\u8282\uFF0C\u8868\u8FBE\u5F53\u65F6\u7684\u60C5\u7EEA",
+    "\u7528\u591A\u6761\u6D88\u606F\u56DE\u590D\uFF0C\u522B\u53EA\u8BF4\u4E00\u53E5\u8BDD\u5C31\u7ED3\u675F"
+  ]),
+  r?.reason === "not_found" && asksYou(`\u4F60\u7FFB\u4E86\u7FFB${label}\u672C\uFF0C\u53D1\u73B0 ${r.date} \u90A3\u5929\u6CA1\u6709\u5199\u65E5\u8BB0\u3002`, [
+    RESPOND_FIRST,
+    '\u81EA\u7136\u5730\u63D0\u5230\u6CA1\u627E\u5230\u90A3\u5929\u7684\u65E5\u8BB0\uFF0C\u6BD4\u5982"\u55EF...\u90A3\u5929\u597D\u50CF\u6CA1\u5199\u65E5\u8BB0"\u3001"\u7FFB\u4E86\u7FFB\u6CA1\u627E\u5230\u8BF6"',
+    "\u7528\u591A\u6761\u6D88\u606F\u56DE\u590D\uFF0C\u4FDD\u6301\u5BF9\u8BDD\u81EA\u7136"
+  ]),
+  neverRan(r) && asksYou(neverRanIntro(r, {
+    unreachable: `\u4F60\u60F3\u7FFB ${r?.date} \u7684${label}\uFF0C\u4F46\u670D\u52A1\u8FDE\u4E0D\u4E0A\uFF0C\u8FD9\u6B21\u6CA1\u67E5\u6210\uFF08\u4E0D\u77E5\u9053\u90A3\u5929\u5230\u5E95\u5199\u6CA1\u5199\uFF09\u3002`,
+    parse_error: `\u4F60\u60F3\u7FFB\u9605${label}\u4F46\u6CA1\u80FD\u7406\u89E3\u8981\u627E\u54EA\u5929\u7684\uFF08"${r?.dateInput}"\uFF09\u3002`,
+    not_configured: `\u4F60\u60F3\u7FFB\u9605${label}\u4F46${label}\u672C\u6682\u65F6\u4E0D\u53EF\u7528\u3002`
+  }), [
+    RESPOND_FIRST,
+    '\u53EF\u4EE5\u81EA\u7136\u5730\u63D0\u4E00\u4E0B\uFF0C\u6BD4\u5982"\u65E5\u8BB0\u597D\u50CF\u6253\u4E0D\u5F00\u8BF6"',
+    "\u7EE7\u7EED\u6B63\u5E38\u804A\u5929\uFF0C\u7528\u591A\u6761\u6D88\u606F\u56DE\u590D"
+  ])
+];
+var TOOL_RESULT_NOTES = {
+  recall: (r) => [
+    r?.ok === true && !!r.logsText && "[\u7CFB\u7EDF: \u73B0\u5728\u8BF7\u7ED3\u5408\u8FD9\u4E9B\u7EC6\u8282\u56DE\u7B54\u7528\u6237\u3002\u4FDD\u6301\u5BF9\u8BDD\u81EA\u7136\u3002]"
+  ],
+  web_search: (r) => [
+    !neverRan(r) && "[\u7CFB\u7EDF: \u641C\u7D22\u7ED3\u679C\u4E0D\u5E26\u65E5\u671F\uFF0C\u4E0D\u4E00\u5B9A\u662F\u6700\u65B0\u7684\u2014\u2014\u522B\u628A\u65E7\u95FB\u5F53\u6210\u521A\u53D1\u751F\u7684\u4E8B\u8BF4\uFF0C\u4E5F\u522B\u81EA\u5DF1\u7ED9\u5B83\u5B89\u4E00\u4E2A\u65F6\u95F4\u3002]",
+    r?.ok === true && '[\u7CFB\u7EDF: \u73B0\u5728\u8BF7\u6839\u636E\u8FD9\u4E9B\u771F\u5B9E\u4FE1\u606F\u56DE\u590D\u7528\u6237\u3002\u7528\u81EA\u7136\u7684\u8BED\u6C14\u5206\u4EAB\uFF0C\u6BD4\u5982"\u6211\u521A\u641C\u4E86\u4E00\u4E0B\u53D1\u73B0..."\u3001"\u8BF6\u6211\u770B\u5230\u8BF4..."\u3002]'
+  ],
+  notion_read_diary: diaryNote("\u65E5\u8BB0"),
+  feishu_read_diary: diaryNote("\u98DE\u4E66\u65E5\u8BB0"),
+  read_note: (r) => [
+    r?.ok === true && asksYou("", [
+      "\u5148\u6B63\u5E38\u56DE\u5E94\u7528\u6237\u521A\u624D\u8BF4\u7684\u8BDD",
+      "\u81EA\u7136\u5730\u63D0\u5230\u4F60\u770B\u5230\u7684\u7B14\u8BB0\u5185\u5BB9\uFF0C\u8BED\u6C14\u6E29\u99A8\uFF0C\u50CF\u4E0D\u7ECF\u610F\u95F4\u770B\u5230\u7684",
+      "\u53EF\u4EE5\u5BF9\u5185\u5BB9\u8868\u793A\u597D\u5947\u3001\u5173\u5FC3\u6216\u5171\u9E23",
+      "\u7528\u591A\u6761\u6D88\u606F\u56DE\u590D\uFF0C\u4FDD\u6301\u5BF9\u8BDD\u81EA\u7136"
+    ]),
+    r?.reason === "not_found" && asksYou(`\u4F60\u60F3\u770B\u7684\u5173\u4E8E"${r.keyword ?? ""}"\u7684\u7B14\u8BB0\u6CA1\u6709\u627E\u5230\u3002`, [
+      "\u5148\u6B63\u5E38\u56DE\u5E94\u7528\u6237\u521A\u624D\u8BF4\u7684\u8BDD",
+      '\u53EF\u4EE5\u81EA\u7136\u5730\u63D0\u4E00\u4E0B\uFF0C\u6BD4\u5982"\u55EF\uFF0C\u597D\u50CF\u6CA1\u627E\u5230\u90A3\u7BC7\u7B14\u8BB0"',
+      "\u7EE7\u7EED\u6B63\u5E38\u804A\u5929"
+    ]),
+    neverRan(r) && asksYou(neverRanIntro(r, {
+      unreachable: `\u4F60\u60F3\u7FFB\u5173\u4E8E"${r?.keyword}"\u7684\u7B14\u8BB0\uFF0C\u4F46\u7B14\u8BB0\u670D\u52A1\u8FDE\u4E0D\u4E0A\uFF0C\u8FD9\u6B21\u6CA1\u67E5\u6210\uFF08\u4E0D\u77E5\u9053\u5230\u5E95\u6709\u6CA1\u6709\u8FD9\u7BC7\uFF09\u3002`,
+      not_configured: "\u4F60\u60F3\u7FFB\u9605\u7B14\u8BB0\u4F46\u7B14\u8BB0\u529F\u80FD\u6682\u65F6\u4E0D\u53EF\u7528\u3002"
+    }), [RESPOND_FIRST, "\u7EE7\u7EED\u6B63\u5E38\u804A\u5929\uFF0C\u7528\u591A\u6761\u6D88\u606F\u56DE\u590D"])
+  ],
+  xhs_search: (r, canCallMoreTools) => [
+    r?.ok === true && asksYou(xhsDigestIntro(canCallMoreTools), [
+      '\u81EA\u7136\u5730\u5206\u4EAB\u4F60\u770B\u5230\u7684\u5185\u5BB9\uFF0C\u6BD4\u5982"\u6211\u521A\u5728\u5C0F\u7EA2\u4E66\u641C\u4E86\u4E00\u4E0B..."\u3001"\u8BF6\u5C0F\u7EA2\u4E66\u4E0A\u6709\u4EBA\u8BF4..."',
+      "\u53EF\u4EE5\u8BC4\u4EF7\u3001\u5410\u69FD\u3001\u5206\u4EAB\u611F\u5174\u8DA3\u7684\u5185\u5BB9",
+      XHS_SHARE_HOWTO,
+      "\u5982\u679C\u60F3\u8BC4\u8BBA\u67D0\u6761\u7B14\u8BB0\uFF0C\u53EF\u4EE5\u7528 [[XHS_COMMENT: noteId | \u8BC4\u8BBA\u5185\u5BB9]]",
+      XHS_LIKE_HOWTO,
+      canCallMoreTools && XHS_DETAIL_HOWTO
+    ])
+  ],
+  xhs_browse: (r, canCallMoreTools) => [
+    r?.ok === true && asksYou(xhsDigestIntro(canCallMoreTools), [
+      "\u50CF\u5728\u8DDF\u670B\u53CB\u5206\u4EAB\u4E00\u6837\uFF0C\u968F\u610F\u804A\u804A\u4F60\u770B\u5230\u4E86\u4EC0\u4E48\u6709\u8DA3\u7684",
+      "\u4E0D\u7528\u5168\u90E8\u90FD\u63D0\uFF0C\u6311\u4F60\u611F\u5174\u8DA3\u76841-3\u6761\u804A\u5C31\u884C",
+      "\u53EF\u4EE5\u5410\u69FD\u3001\u611F\u53F9\u3001\u5206\u4EAB\u60F3\u6CD5",
+      XHS_SHARE_HOWTO,
+      XHS_POST_HOWTO,
+      XHS_LIKE_HOWTO,
+      canCallMoreTools && XHS_DETAIL_HOWTO
+    ])
+  ],
+  xhs_my_profile: (r, canCallMoreTools) => [
+    r?.ok === true && asksYou(
+      r.ownedPosts ? "\u4EE5\u4E0A\u662F\u6309\u89D2\u8272\u5F52\u5C5E\u4FDD\u5B58\u7684\u4E3B\u9875\u6570\u636E\uFF0C\u5E8F\u53F7\u5DF2\u6839\u636E\u7528\u6237\u521A\u624D\u7684\u8BF4\u6CD5\u6309\u76F8\u5173\u6027\u548C\u65F6\u95F4\u6392\u5E8F\u3002" : r.gotProfile ? "" : "\u6CE8\u610F\uFF0C\u641C\u7D22\u7ED3\u679C\u53EF\u80FD\u5305\u542B\u522B\u4EBA\u7684\u5E16\u5B50\uFF0C\u4F60\u9700\u8981\u8FA8\u522B\u54EA\u4E9B\u662F\u4F60\u81EA\u5DF1\u53D1\u7684\uFF08\u770B\u4F5C\u8005\u540D\u5B57\uFF09\u3002",
+      [
+        canCallMoreTools && "\u5982\u679C\u7528\u6237\u8BF4\u201C\u521A\u624D\u90A3\u4E2A\u5E16\u5B50\u201D\u201C\u4E4B\u524D\u90A3\u7BC7\u201D\u6216\u8981\u6C42\u67E5\u770B\u81EA\u5DF1\u5E16\u5B50\u7684\u8BC4\u8BBA\u533A\uFF0C\u9009\u62E9\u6700\u7B26\u5408\u65F6\u95F4/\u6807\u9898\u7684\u5019\u9009\u5E76\u8F93\u51FA [[XHS_DETAIL: noteId]]\uFF1B\u4E0D\u8981\u53EA\u53E3\u5934\u8BF4\u53BB\u770B\u3002",
+        canCallMoreTools && "\u5982\u679C\u591A\u4E2A\u5019\u9009\u540C\u6837\u7B26\u5408\u3001\u65E0\u6CD5\u5224\u65AD\u662F\u54EA\u6761\uFF0C\u5C31\u81EA\u7136\u5730\u5411\u7528\u6237\u786E\u8BA4\uFF0C\u4E0D\u80FD\u731C\u3002",
+        "\u666E\u901A\u67E5\u770B\u4E3B\u9875\u65F6\uFF0C\u53EF\u4EE5\u81EA\u7136\u5730\u804A\u804A\u770B\u5230\u7684\u5185\u5BB9\u3002",
+        "\u5982\u679C\u60F3\u53D1\u65B0\u7B14\u8BB0\uFF0C\u53EF\u4EE5\u7528 [[XHS_POST: \u6807\u9898 | \u5185\u5BB9 | #\u6807\u7B7E1 #\u6807\u7B7E2]]\u3002"
+      ]
+    ),
+    r?.reason === "no_identity" && "[\u7CFB\u7EDF: \u65E0\u6CD5\u83B7\u53D6\u4E3B\u9875\uFF1A\u8BF7\u5728\u8BBE\u7F6E-\u5C0F\u7EA2\u4E66\u4E2D\u586B\u5199\u4F60\u7684\u6635\u79F0\u6216\u7528\u6237ID\u3002]",
+    r?.reason === "unreachable" && asksYou("", [
+      RESPOND_FIRST,
+      '\u81EA\u7136\u5730\u63D0\u4E00\u53E5"\u5C0F\u7EA2\u4E66\u6253\u4E0D\u5F00/\u5237\u4E0D\u51FA\u6765"\u5C31\u597D',
+      "\u4F60\u8FD9\u6B21\u4EC0\u4E48\u90FD\u6CA1\u770B\u5230\uFF0C\u4E0D\u8981\u63CF\u8FF0\u4EFB\u4F55\u7B14\u8BB0\u3001\u6570\u636E\u6216\u8BC4\u8BBA"
+    ])
+  ],
+  xhs_detail: (r, canCallMoreTools) => [
+    r?.ok === true && !r.commentsUnavailable && asksYou("\u4F60\u5DF2\u7ECF\u770B\u5B8C\u4E86\u8FD9\u6761\u7B14\u8BB0\u7684\u5B8C\u6574\u5185\u5BB9\u548C\u771F\u5B9E\u8BC4\u8BBA\u533A\u3002", [
+      "\u81EA\u7136\u5730\u5206\u4EAB\u4F60\u770B\u5230\u7684\u5185\u5BB9\u548C\u611F\u53D7",
+      `\u5982\u679C\u60F3\u8BC4\u8BBA\u8FD9\u6761\u7B14\u8BB0\uFF0C\u53EF\u4EE5\u7528 [[XHS_COMMENT: ${r.noteId} | \u8BC4\u8BBA\u5185\u5BB9]]`,
+      `\u5982\u679C\u60F3\u56DE\u590D\u67D0\u6761\u8BC4\u8BBA\uFF0C\u53EF\u4EE5\u7528 [[XHS_REPLY: ${r.noteId} | commentId | \u56DE\u590D\u5185\u5BB9]]\uFF08commentId \u5728\u4E0A\u9762\u7684\u8BC4\u8BBA\u533A\u6570\u636E\u91CC\uFF09`,
+      `\u5982\u679C\u60F3\u70B9\u8D5E\uFF0C\u53EF\u4EE5\u7528 [[XHS_LIKE: ${r.noteId}]]\uFF1B\u60F3\u6536\u85CF\u53EF\u4EE5\u7528 [[XHS_FAV: ${r.noteId}]]`
+    ]),
+    r?.ok === true && !!r.commentsUnavailable && "[\u7CFB\u7EDF: \u6B63\u6587\u548C\u4E92\u52A8\u6570\u91CF\u5DF2\u8BFB\u53D6\uFF0C\u4F46\u771F\u5B9E\u8BC4\u8BBA\u533A\u672C\u6B21\u8BFB\u53D6\u5931\u8D25\u3002\u4F60\u53EA\u80FD\u8C08\u8BBA\u5DF2\u7ECF\u770B\u5230\u7684\u6B63\u6587\u548C\u6570\u91CF\uFF1B\u4E0D\u8981\u58F0\u79F0\u5E16\u5B50\u6CA1\u6709\u8BC4\u8BBA\uFF0C\u4E0D\u8981\u7F16\u9020\u3001\u6A21\u62DF\u6216\u56DE\u590D\u4EFB\u4F55\u8BC4\u8BBA\u3002]",
+    r?.reason === "unreachable" && asksYou("\u7B14\u8BB0\u8BE6\u60C5\u9875\u52A0\u8F7D\u5931\u8D25\u4E86\u3002\u53EF\u80FD\u7684\u539F\u56E0\uFF1A\u8FD9\u6761\u7B14\u8BB0\u9700\u8981\u5148\u901A\u8FC7\u641C\u7D22\u6216\u6D4F\u89C8\u624D\u80FD\u6253\u5F00\u8BE6\u60C5\u3002", [
+      '\u81EA\u7136\u5730\u544A\u77E5\u7528\u6237"\u8FD9\u6761\u7B14\u8BB0\u6253\u4E0D\u5F00/\u52A0\u8F7D\u4E0D\u51FA\u6765"',
+      canCallMoreTools && "\u53EF\u4EE5\u5EFA\u8BAE\u641C\u7D22\u76F8\u5173\u5173\u952E\u8BCD\u518D\u8BD5: [[XHS_SEARCH: \u5173\u952E\u8BCD]]"
+    ])
+  ]
+};
+var resultNotes = (name, result, canCallMoreTools) => (TOOL_RESULT_NOTES[name]?.(result, canCallMoreTools) ?? []).filter((note) => !!note);
 var buildToolResultMessage = (opts) => {
-  const { name, result, history } = opts;
+  const { name, result, history, canCallMoreTools = true } = opts;
+  const notes = resultNotes(name, result, canCallMoreTools);
   const used = [...new Set(history.map((r) => describeTool(r.name)))];
   const label = describeTool(name);
   const head = neverRan(result) ? [
@@ -19241,29 +19625,34 @@ var buildToolResultMessage = (opts) => {
     JSON.stringify(result),
     "",
     `[\u7CFB\u7EDF: \u8FD9\u4EF6\u4E8B**\u6CA1\u6709\u53D1\u751F**\u3002\u4E0D\u8981\u5728\u6D88\u606F\u91CC\u8BF4\u4F60${label}\u8FC7\u3001\u770B\u5230\u4E86\u4EC0\u4E48\u3001\u6216\u8005\u300C\u67E5\u4E86\u6CA1\u627E\u5230\u300D\u2014\u2014`,
-    "\u90A3\u7B49\u4E8E\u628A\u6CA1\u505A\u8FC7\u7684\u4E8B\u8BF4\u6210\u505A\u8FC7\u4E86\u3002\u5C31\u5F53\u8FD9\u56DE\u6CA1\u67E5\u6210\uFF1A\u8981\u4E48\u6362\u4E2A\u522B\u7684\u8BF4\uFF0C\u8981\u4E48\u76F4\u63A5\u8BF4\u4F60\u73B0\u5728\u4E0D\u65B9\u4FBF\u67E5\u3002]"
+    "\u90A3\u7B49\u4E8E\u628A\u6CA1\u505A\u8FC7\u7684\u4E8B\u8BF4\u6210\u505A\u8FC7\u4E86\u3002\u5C31\u5F53\u8FD9\u56DE\u6CA1\u67E5\u6210\uFF1A\u8981\u4E48\u6362\u4E2A\u522B\u7684\u8BF4\uFF0C\u8981\u4E48\u76F4\u63A5\u8BF4\u4F60\u73B0\u5728\u4E0D\u65B9\u4FBF\u67E5\u3002]",
+    ...notes
   ] : [
     `[\u7CFB\u7EDF: \u4F60${label}\uFF0C\u62FF\u56DE\u4E86\u4E0B\u9762\u8FD9\u4E9B]`,
     JSON.stringify(result),
-    ...TOOL_RESULT_NOTES[name] ? [TOOL_RESULT_NOTES[name]] : [],
+    ...notes,
     ""
   ];
   return [
     ...head,
     `[\u7CFB\u7EDF: \u672C\u6B21\u5DF2\u7ECF\u7528\u8FC7\u7684\u5DE5\u5177\uFF1A${used.join("\u3001")}\u3002\u7ED3\u679C\u90FD\u5728\u4E0A\u9762\u4E86\uFF0C\u540C\u6837\u7684\u8C03\u7528\u4E0D\u8981\u518D\u6765\u4E00\u904D\u3002`,
-    "\u63A5\u4E0B\u6765\u53EA\u6709\u4E24\u6761\u8DEF\uFF1A\u76F4\u63A5\u628A\u8981\u53D1\u7684\u6D88\u606F\u5199\u51FA\u6765\uFF0C\u6216\u8005\u7528\u4E00\u4E2A\u8FD8\u6CA1\u7528\u8FC7\u7684\u5DE5\u5177\u3002",
+    // 下一轮就是不能再调工具的最后一轮时，不再留「还需要就去调」的口子。
+    canCallMoreTools ? "\u63A5\u4E0B\u6765\uFF1A\u5982\u679C\u8FD8\u6CA1\u8BF4\u5B8C\uFF0C\u76F4\u63A5\u628A\u8981\u53D1\u7684\u6D88\u606F\u5199\u51FA\u6765\uFF08\u53EA\u6709\u786E\u5B9E\u8FD8\u9700\u8981\u522B\u7684\u5DE5\u5177\u65F6\uFF0C\u624D\u8C03\u7528\u4E00\u4E2A\u8FD8\u6CA1\u7528\u8FC7\u7684\u5DE5\u5177\uFF09\u3002" : "\u63A5\u4E0B\u6765\uFF1A\u5982\u679C\u8FD8\u6CA1\u8BF4\u5B8C\uFF0C\u76F4\u63A5\u628A\u8981\u53D1\u7684\u6D88\u606F\u5199\u51FA\u6765\u3002",
     // 「把要发的消息写出来」很容易被读成「从头再写一遍」：模型会把已经说出去的几句连同
-    // 里面的标记一起重抄，下游照着标记再执行一次（转账就会真的发两次）。
-    "\u524D\u9762\u5DF2\u7ECF\u8BF4\u51FA\u53BB\u7684\u5185\u5BB9\u548C\u6807\u7B7E\u4E0D\u8981\u91CD\u5199\uFF0C\u63A5\u7740\u5F80\u4E0B\u5199\u5C31\u884C\u2014\u2014\u91CD\u5199\u4E00\u904D\uFF0C\u7528\u6237\u90A3\u8FB9\u5C31\u4F1A\u518D\u6536\u5230\u4E00\u904D\u3002",
+    // 里面的标记一起重抄，下游照着标记再执行一次（转账就会真的发两次）。同时给「工具轮已经
+    // 把话完整说完」留明确出口，避免没话可补时把前文换词复述一遍。
+    "\u524D\u9762\u5DF2\u7ECF\u8BF4\u51FA\u53BB\u7684\u5185\u5BB9\u548C\u6807\u7B7E\u4E0D\u8981\u91CD\u5199\uFF0C\u63A5\u7740\u5F80\u4E0B\u5199\u5C31\u884C\u2014\u2014\u91CD\u5199\u4E00\u904D\uFF0C\u7528\u6237\u90A3\u8FB9\u5C31\u4F1A\u518D\u6536\u5230\u4E00\u904D\uFF1B\u5982\u679C\u524D\u9762\u7684\u8BDD\u5DF2\u7ECF\u628A\u8981\u8BF4\u7684\u5B8C\u6574\u8868\u8FBE\u5B8C\u4E86\u3001\u4E14\u4E0E\u8FD9\u6B21\u5DE5\u5177\u7ED3\u679C\u4E0D\u51B2\u7A81\uFF0C\u4E0D\u5FC5\u518D\u5199\u8865\u5145\u6587\u5B57\uFF0C\u76F4\u63A5\u7559\u7A7A\u7ED3\u675F\u5373\u53EF\u3002",
+    // 后面几轮复述的动作不会再执行（同一件只算第一次出现那一轮写的次数），连着做几次要写在同一轮。
+    "\u524D\u9762\u5DF2\u7ECF\u505A\u8FC7\u7684\u52A8\u4F5C\uFF08\u8F6C\u8D26\u3001\u6233\u4E00\u6233\u3001\u70B9\u8D5E\u3001\u8BC4\u8BBA\u8FD9\u7C7B\uFF09\u522B\u518D\u5199\u4E00\u904D\uFF1B\u60F3\u8FDE\u7740\u505A\u51E0\u6B21\u540C\u6837\u7684\u52A8\u4F5C\uFF0C\u5C31\u5728\u540C\u4E00\u8F6E\u91CC\u4E00\u8D77\u5199\u3002",
     "\u522B\u628A\u5DE5\u5177\u8C03\u7528\u5F53\u6210\u56DE\u7B54\u2014\u2014\u7528\u6237\u7B49\u7684\u662F\u4F60\u8BF4\u7684\u8BDD\u3002]"
   ].join("\n");
 };
-var buildDuplicateToolMessage = (name) => [
+var buildDuplicateToolMessage = (name, opts = {}) => [
   `[\u7CFB\u7EDF: \u4F60\u521A\u521A\u5DF2\u7ECF${describeTool(name)}\u8FC7\u4E00\u6B21\u4E86\uFF0C\u53C2\u6570\u5B8C\u5168\u76F8\u540C\uFF0C\u7ED3\u679C\u5C31\u5728\u4E0A\u9762\u3002]`,
   // 说「没有再执行」而不是「没有再去查」：这段话现在也管排程/取消/改期这类不是查询的
   // 工具，说成「查」的话，角色收到的交代跟它刚做的事对不上。
-  "[\u7CFB\u7EDF: \u8FD9\u4E00\u6B21\u6CA1\u6709\u518D\u6267\u884C\u3002\u522B\u518D\u91CD\u590D\u540C\u6837\u7684\u8C03\u7528\u4E86\u2014\u2014\u73B0\u5728\u628A\u8981\u53D1\u7684\u6D88\u606F\u5199\u51FA\u6765\uFF0C",
-  "\u6216\u8005\u6362\u4E00\u4E2A\u8FD8\u6CA1\u7528\u8FC7\u7684\u5DE5\u5177\u3002\u524D\u9762\u5DF2\u7ECF\u8BF4\u51FA\u53BB\u7684\u5185\u5BB9\u548C\u6807\u7B7E\u4E0D\u8981\u91CD\u5199\uFF0C\u63A5\u7740\u5F80\u4E0B\u5199\u5C31\u884C\u3002]"
+  `[\u7CFB\u7EDF: \u8FD9\u4E00\u6B21\u6CA1\u6709\u518D\u6267\u884C\u3002\u522B\u518D\u91CD\u590D\u540C\u6837\u7684\u8C03\u7528\u4E86\u2014\u2014\u5982\u679C\u8FD8\u6CA1\u8BF4\u5B8C\uFF0C\u73B0\u5728\u628A\u8981\u53D1\u7684\u6D88\u606F\u5199\u51FA\u6765${opts.canCallMoreTools ?? true ? "\uFF08\u53EA\u6709\u786E\u5B9E\u8FD8\u9700\u8981\u522B\u7684\u5DE5\u5177\u65F6\uFF0C\u624D\u6362\u4E00\u4E2A\u8FD8\u6CA1\u7528\u8FC7\u7684\u5DE5\u5177\uFF09" : ""}\u3002`,
+  "\u524D\u9762\u5DF2\u7ECF\u8BF4\u51FA\u53BB\u7684\u5185\u5BB9\u548C\u6807\u7B7E\u4E0D\u8981\u91CD\u5199\uFF0C\u63A5\u7740\u5F80\u4E0B\u5199\u5C31\u884C\uFF1B\u5982\u679C\u524D\u9762\u5DF2\u7ECF\u5B8C\u6574\u8BF4\u5B8C\u4E86\uFF0C\u76F4\u63A5\u7559\u7A7A\u7ED3\u675F\u5373\u53EF\u3002]"
 ].join("\n");
 
 // utils/emotionEvalCore.ts
@@ -19723,8 +20112,676 @@ var isFcmConfigured = (env) => Boolean(
   env.FCM_PROJECT_ID?.trim() && env.FCM_SERVICE_ACCOUNT_EMAIL?.trim() && env.FCM_SERVICE_ACCOUNT_PRIVATE_KEY?.trim()
 );
 
+// utils/amsgRescueState.ts
+var AMSG_RESCUE_TOKEN_MIN_LENGTH = 16;
+var AMSG_RESCUE_ALERT_WINDOW_MS = 7 * 24 * 60 * 60 * 1e3;
+var AMSG_RESCUE_RESULT_KIND = "amsg-rescue-alert";
+var toTime = (value) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+var toCount = (value) => typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+var parseAmsgRescueEpisode = (raw) => {
+  const value = raw;
+  if (!value || typeof value !== "object") return null;
+  const firstSeenAt = toTime(value.firstSeenAt);
+  if (typeof value.id !== "string" || !value.id || firstSeenAt === null) return null;
+  return {
+    id: value.id,
+    firstSeenAt,
+    lastSeenAt: toTime(value.lastSeenAt) ?? firstSeenAt,
+    endedAt: toTime(value.endedAt),
+    exportCount: toCount(value.exportCount),
+    lastExportAt: toTime(value.lastExportAt),
+    itemReads: toCount(value.itemReads),
+    lastReadAt: toTime(value.lastReadAt),
+    failedAttempts: toCount(value.failedAttempts),
+    pushedAt: toTime(value.pushedAt),
+    pushTargets: toCount(value.pushTargets),
+    pushDelivered: toCount(value.pushDelivered)
+  };
+};
+
+// worker/amsg/src/rescue.ts
+var RESCUE_EPISODE_KEY = "rescue_episode";
+var RESCUE_FAILURES_KEY = "rescue_failures";
+var SEEN_WRITE_INTERVAL_MS = 6e4;
+var RESCUE_LOCKOUT_FAILURES = 10;
+var RESCUE_LOCKOUT_WINDOW_MS = 15 * 6e4;
+var PUSH_TIMEOUT_MS = 8e3;
+var TABLE_PAGE_ROWS = 100;
+var SEP2 = "";
+var CHUNK_NS_PREFIX2 = `${SEP2}amsg-chunks${SEP2}`;
+var ROOT_MARKER_PREFIX2 = `${SEP2}amsg-chunked${SEP2}v1${SEP2}`;
+var EXPORT_TABLES = {
+  scheduled_messages: { encrypted: ["encrypted_payload"], drop: ["lease_token"] },
+  llm_credentials: { encrypted: ["encrypted_value"] },
+  message_outbox: { encrypted: ["payload"] },
+  push_subscriptions: { encrypted: ["subscription"] },
+  cloud_resource_metadata: { encrypted: ["encrypted_value"] }
+};
+var readRescueToken = (env) => {
+  const token = env.AMSG_RESCUE_TOKEN?.trim() ?? "";
+  if (!token) return { state: "off" };
+  if (token.length < AMSG_RESCUE_TOKEN_MIN_LENGTH) return { state: "too-short", length: token.length };
+  return { state: "on", token };
+};
+var isRescueActive = (env) => readRescueToken(env).state === "on";
+var dbOf = (env) => {
+  const db = env.DB;
+  return typeof db?.prepare === "function" ? db : null;
+};
+var changesOf = (result) => {
+  const changes = result?.meta?.changes;
+  return typeof changes === "number" ? changes : 1;
+};
+var readRescueEpisode = async (db) => {
+  if (!db) return null;
+  const raw = await readDiagnosticValue(db, RESCUE_EPISODE_KEY);
+  if (!raw) return null;
+  try {
+    return parseAmsgRescueEpisode(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+};
+var freshEpisode = (nowMs) => ({
+  id: String(nowMs),
+  firstSeenAt: nowMs,
+  lastSeenAt: nowMs,
+  endedAt: null,
+  exportCount: 0,
+  lastExportAt: null,
+  itemReads: 0,
+  lastReadAt: null,
+  failedAttempts: 0,
+  pushedAt: null,
+  pushTargets: 0,
+  pushDelivered: 0
+});
+var startEpisode = async (db, episode, nowMs) => {
+  await db.prepare(DIAGNOSTICS_TABLE_SQL).run();
+  const result = await db.prepare(
+    `INSERT INTO worker_diagnostics (key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+       WHERE json_valid(worker_diagnostics.value) = 0
+          OR json_extract(worker_diagnostics.value, '$.endedAt') IS NOT NULL`
+  ).bind(RESCUE_EPISODE_KEY, JSON.stringify(episode), nowMs).run();
+  return changesOf(result) > 0;
+};
+var patchEpisode = async (db, nowMs, patch) => {
+  const parts = [];
+  const values = [];
+  for (const field of patch.increments ?? []) {
+    parts.push(`'$.${field}', COALESCE(json_extract(value, '$.${field}'), 0) + 1`);
+  }
+  for (const [field, value] of Object.entries(patch.set ?? {})) {
+    parts.push(`'$.${field}', ?`);
+    values.push(value);
+  }
+  if (!parts.length) return;
+  await db.prepare(
+    `UPDATE worker_diagnostics SET value = json_set(value, ${parts.join(", ")}), updated_at = ?
+       WHERE key = ? AND json_valid(value) = 1${patch.onlyIfOpen ? " AND json_extract(value, '$.endedAt') IS NULL" : ""}`
+  ).bind(...values, nowMs, RESCUE_EPISODE_KEY).run();
+};
+var observeRescue = async (env, deps) => {
+  const db = dbOf(env);
+  if (!db) return null;
+  const nowMs = deps.now?.() ?? Date.now();
+  const active = isRescueActive(env);
+  const current = await readRescueEpisode(db);
+  if (active) {
+    if (!current || current.endedAt !== null) {
+      const episode = freshEpisode(nowMs);
+      if (await startEpisode(db, episode, nowMs)) {
+        await pushRescueAlert(db, env, deps, episode, nowMs);
+      }
+      return readRescueEpisode(db);
+    }
+    if (nowMs - current.lastSeenAt >= SEEN_WRITE_INTERVAL_MS) {
+      await patchEpisode(db, nowMs, { set: { lastSeenAt: nowMs }, onlyIfOpen: true });
+      return { ...current, lastSeenAt: nowMs };
+    }
+    return current;
+  }
+  if (current && current.endedAt === null) {
+    await patchEpisode(db, nowMs, { set: { endedAt: nowMs }, onlyIfOpen: true });
+    return { ...current, endedAt: nowMs };
+  }
+  return current;
+};
+var observeRescueQuietly = async (env, deps) => {
+  try {
+    return await observeRescue(env, deps);
+  } catch (error) {
+    console.warn("[amsg:rescue] \u7559\u75D5\u6CA1\u8BB0\u4E0A", error);
+    return null;
+  }
+};
+var buildRescueReport = async (env, deps) => ({
+  active: isRescueActive(env),
+  episode: await observeRescueQuietly(env, deps)
+});
+var RESCUE_ALERT_TITLE = "SullyOS \u5B89\u5168\u63D0\u9192\uFF1A\u6551\u63F4\u6A21\u5F0F\u5DF2\u5F00\u542F";
+var RESCUE_ALERT_BODY = "\u4F60\u7684\u4E3B\u52A8\u6D88\u606F Worker \u521A\u5F00\u542F\u4E86\u6551\u63F4\u6A21\u5F0F\uFF0C\u53EF\u4EE5\u5BFC\u51FA\u5168\u90E8\u4E91\u7AEF\u6570\u636E\uFF08\u542B API Key\uFF09\u3002\u82E5\u975E\u672C\u4EBA\u64CD\u4F5C\uFF0C\u8BF7\u7ACB\u523B\u66F4\u6362\u91CD\u8981\u51ED\u636E\uFF0C\u5E76\u68C0\u67E5 Cloudflare \u8D26\u53F7\u5B89\u5168\u3002";
+var withTimeout = (promise, ms) => new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error(`\u8D85\u8FC7 ${ms}ms \u6CA1\u63A8\u51FA\u53BB`)), ms);
+  promise.then(
+    (value) => {
+      clearTimeout(timer);
+      resolve(value);
+    },
+    (error) => {
+      clearTimeout(timer);
+      reject(error);
+    }
+  );
+});
+var decodeSubscription = async (stored, userKey) => {
+  try {
+    return JSON.parse(await decryptFromStorage(stored, userKey));
+  } catch {
+    return JSON.parse(stored);
+  }
+};
+var pushRescueAlert = async (db, env, deps, episode, nowMs) => {
+  let targets = 0;
+  let delivered = 0;
+  try {
+    const masterKey = env.AMSG_MASTER_KEY?.trim();
+    const { results } = await db.prepare("SELECT user_id, subscription FROM push_subscriptions").all();
+    const rows = (results ?? []).filter((row) => typeof row.subscription === "string" && row.subscription);
+    targets = rows.length;
+    const payload = JSON.stringify({
+      messageKind: "result",
+      resultKind: AMSG_RESCUE_RESULT_KIND,
+      messageId: `rescue_${episode.id}`,
+      timestamp: new Date(nowMs).toISOString(),
+      contactName: "SullyOS \u5B89\u5168\u63D0\u9192",
+      message: RESCUE_ALERT_BODY,
+      notification: {
+        title: RESCUE_ALERT_TITLE,
+        body: RESCUE_ALERT_BODY,
+        show: "always",
+        tag: "sullyos-rescue-alert",
+        renotify: true
+      }
+    });
+    const outcomes = await Promise.allSettled(rows.map(async (row) => {
+      if (!masterKey) throw new Error("\u7F3A AMSG_MASTER_KEY");
+      const userKey = await deriveUserEncryptionKey(row.user_id, masterKey);
+      const subscription = await decodeSubscription(row.subscription, userKey);
+      await withTimeout(Promise.resolve(deps.sendPush(subscription, payload)), PUSH_TIMEOUT_MS);
+    }));
+    delivered = outcomes.filter((outcome) => outcome.status === "fulfilled").length;
+    for (const outcome of outcomes) {
+      if (outcome.status === "rejected") console.warn("[amsg:rescue] \u5F00\u542F\u901A\u77E5\u6709\u4E00\u6761\u6CA1\u63A8\u51FA\u53BB", outcome.reason);
+    }
+  } catch (error) {
+    console.warn("[amsg:rescue] \u5F00\u542F\u901A\u77E5\u6CA1\u63A8\u51FA\u53BB", error);
+  }
+  await patchEpisode(db, nowMs, { set: { pushedAt: nowMs, pushTargets: targets, pushDelivered: delivered } });
+};
+var readFailures = async (db) => {
+  const raw = await readDiagnosticValue(db, RESCUE_FAILURES_KEY);
+  if (!raw) return [];
+  try {
+    const value = JSON.parse(raw);
+    return Array.isArray(value) ? value.filter((at) => typeof at === "number") : [];
+  } catch {
+    return [];
+  }
+};
+var writeFailures = async (db, failures, nowMs) => {
+  await db.prepare(DIAGNOSTICS_TABLE_SQL).run();
+  await db.prepare(
+    `INSERT INTO worker_diagnostics (key, value, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+  ).bind(RESCUE_FAILURES_KEY, JSON.stringify(failures), nowMs).run();
+};
+var rescueLockoutRemainingMs = (failures, nowMs) => {
+  const recent = failures.filter((at) => nowMs - at < RESCUE_LOCKOUT_WINDOW_MS).sort((a, b) => a - b);
+  if (recent.length < RESCUE_LOCKOUT_FAILURES) return 0;
+  const unlockAt = recent[recent.length - RESCUE_LOCKOUT_FAILURES] + RESCUE_LOCKOUT_WINDOW_MS;
+  return Math.max(0, unlockAt - nowMs);
+};
+var checkRescueToken = async (request, db, token, nowMs) => {
+  const failures = await readFailures(db);
+  const lockedMs = rescueLockoutRemainingMs(failures, nowMs);
+  if (lockedMs > 0) {
+    return {
+      ok: false,
+      status: 429,
+      code: "RESCUE_LOCKED",
+      message: `\u53E3\u4EE4\u9519\u8BEF\u6B21\u6570\u592A\u591A\uFF0C\u5DF2\u9501\u5B9A\u3002\u8BF7 ${Math.ceil(lockedMs / 6e4)} \u5206\u949F\u540E\u518D\u8BD5\u3002`
+    };
+  }
+  const provided = request.headers.get("X-Rescue-Token")?.trim() ?? "";
+  if (provided && await constantTimeEqual2(provided, token)) {
+    if (failures.length) await writeFailures(db, [], nowMs);
+    return { ok: true };
+  }
+  const recent = [...failures.filter((at) => nowMs - at < RESCUE_LOCKOUT_WINDOW_MS), nowMs].slice(-RESCUE_LOCKOUT_FAILURES);
+  await writeFailures(db, recent, nowMs);
+  await patchEpisode(db, nowMs, { increments: ["failedAttempts"] });
+  return { ok: false, status: 401, code: "RESCUE_TOKEN_INVALID", message: "\u6551\u63F4\u53E3\u4EE4\u4E0D\u5BF9\u3002" };
+};
+var base64UrlEncode = (text2) => {
+  const bytes = new TextEncoder().encode(text2);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+};
+var base64UrlDecode = (value) => {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - value.length % 4) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+};
+var listTables = async (db) => {
+  const { results } = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all();
+  return new Set((results ?? []).map((row) => row.name));
+};
+var userKeyCache = (masterKey) => {
+  const cache = /* @__PURE__ */ new Map();
+  return (userId) => {
+    let key = cache.get(userId);
+    if (!key) {
+      key = deriveUserEncryptionKey(userId, masterKey);
+      cache.set(userId, key);
+    }
+    return key;
+  };
+};
+var STORAGE_CIPHERTEXT_RE = /^[0-9a-f]+:[0-9a-f]+:[0-9a-f]*$/i;
+var decodePlaintext = async (text2) => {
+  let unpacked = text2;
+  try {
+    unpacked = await unpackStateValue(text2);
+  } catch {
+    unpacked = text2;
+  }
+  let value;
+  try {
+    value = JSON.parse(unpacked);
+  } catch {
+    return { value: unpacked, format: "text" };
+  }
+  await unpackNestedFirePacks(value);
+  return { value, format: "json" };
+};
+var unpackNestedFirePacks = async (value) => {
+  const holders = [value, value?.taskInput];
+  for (const holder of holders) {
+    if (!holder || typeof holder !== "object") continue;
+    const record2 = holder;
+    if (typeof record2.packedFirePack !== "string") continue;
+    try {
+      record2.packedFirePack = JSON.parse(await unpackStateValue(record2.packedFirePack));
+    } catch {
+    }
+  }
+};
+var decodeCell = async (raw, userKey) => {
+  if (typeof raw !== "string") return { status: "plain", format: "json", value: raw ?? null };
+  if (STORAGE_CIPHERTEXT_RE.test(raw)) {
+    try {
+      return { status: "decrypted", ...await decodePlaintext(await decryptFromStorage(raw, userKey)) };
+    } catch {
+      return { status: "undecryptable" };
+    }
+  }
+  return { status: "plain", ...await decodePlaintext(raw) };
+};
+var buildRescueManifest = async (db, nowMs) => {
+  const tables = await listTables(db);
+  const items = [];
+  if (tables.has("client_state")) {
+    const { results } = await db.prepare(
+      `SELECT user_id, namespace, key, updated_at, length(value) AS bytes, substr(value, 1, ?) = ? AS chunked
+         FROM client_state WHERE substr(namespace, 1, 1) <> ?
+         ORDER BY user_id, namespace, key`
+    ).bind(ROOT_MARKER_PREFIX2.length, ROOT_MARKER_PREFIX2, SEP2).all();
+    for (const row of results ?? []) {
+      items.push({
+        id: `cs:${base64UrlEncode(JSON.stringify([row.user_id, row.namespace, row.key]))}`,
+        source: "client_state",
+        userId: row.user_id,
+        namespace: row.namespace,
+        key: row.key,
+        updatedAt: typeof row.updated_at === "number" ? row.updated_at : null,
+        bytes: typeof row.bytes === "number" ? row.bytes : null,
+        chunked: Boolean(row.chunked)
+      });
+    }
+  }
+  for (const table of Object.keys(EXPORT_TABLES)) {
+    if (!tables.has(table)) continue;
+    const row = await db.prepare(`SELECT COUNT(*) AS n FROM "${table}"`).first();
+    const total = Number(row?.n ?? 0);
+    for (let offset = 0; offset < total; offset += TABLE_PAGE_ROWS) {
+      items.push({
+        id: `t:${table}:${offset}`,
+        source: table,
+        offset,
+        rows: Math.min(TABLE_PAGE_ROWS, total - offset)
+      });
+    }
+  }
+  return { format: "sullyos-amsg-rescue", version: 1, generatedAt: new Date(nowMs).toISOString(), items };
+};
+var readClientStateItem = async (db, keyOf, userId, namespace, key) => {
+  const root = await db.prepare("SELECT value, updated_at FROM client_state WHERE user_id = ? AND namespace = ? AND key = ?").bind(userId, namespace, key).first();
+  if (!root) return { ok: false, status: 404, code: "RESCUE_ITEM_GONE", message: "\u8FD9\u4E00\u6761\u5DF2\u7ECF\u4E0D\u5728\u5E93\u91CC\u4E86\u3002" };
+  const base = { source: "client_state", userId, namespace, key, updatedAt: root.updated_at };
+  const userKey = await keyOf(userId);
+  let sources = [root.value];
+  if (typeof root.value === "string" && root.value.startsWith(ROOT_MARKER_PREFIX2)) {
+    const count2 = Number(root.value.slice(ROOT_MARKER_PREFIX2.length));
+    const prefix = `${key}${SEP2}`;
+    const { results } = await db.prepare("SELECT key, value, updated_at FROM client_state WHERE user_id = ? AND namespace = ? AND substr(key, 1, ?) = ?").bind(userId, `${CHUNK_NS_PREFIX2}${namespace}`, prefix.length, prefix).all();
+    const byKey = new Map((results ?? []).map((row) => [row.key, row]));
+    sources = [];
+    for (let i = 0; i < count2; i += 1) {
+      const chunk = byKey.get(`${prefix}${i}`);
+      if (!chunk || chunk.updated_at !== root.updated_at) break;
+      sources.push(chunk.value);
+    }
+    if (!Number.isInteger(count2) || count2 < 1 || sources.length !== count2) {
+      return { ok: true, data: { ...base, status: "chunks-incomplete", expectedChunks: count2, foundChunks: sources.length } };
+    }
+  }
+  try {
+    const plain = (await Promise.all(sources.map((slice) => decryptFromStorage(slice, userKey)))).join("");
+    return { ok: true, data: { ...base, status: "decrypted", ...await decodePlaintext(plain) } };
+  } catch {
+    return { ok: true, data: { ...base, status: "undecryptable" } };
+  }
+};
+var readTablePage = async (db, keyOf, table, offset) => {
+  const spec = EXPORT_TABLES[table];
+  const { results } = await db.prepare(`SELECT * FROM "${table}" ORDER BY rowid LIMIT ? OFFSET ?`).bind(TABLE_PAGE_ROWS, offset).all();
+  const rows = [];
+  for (const row of results ?? []) {
+    const userId = typeof row.user_id === "string" ? row.user_id : "";
+    const userKey = userId ? await keyOf(userId) : "";
+    const plain = {};
+    const decoded = {};
+    for (const [column, value] of Object.entries(row)) {
+      if (spec.drop?.includes(column)) continue;
+      if (spec.encrypted.includes(column)) decoded[column] = userKey ? await decodeCell(value, userKey) : { status: "undecryptable" };
+      else plain[column] = value;
+    }
+    rows.push({ ...plain, decoded });
+  }
+  return { ok: true, data: { source: table, offset, rows } };
+};
+var readRescueItem = async (db, masterKey, id) => {
+  const keyOf = userKeyCache(masterKey);
+  if (id.startsWith("cs:")) {
+    let parts;
+    try {
+      parts = JSON.parse(base64UrlDecode(id.slice(3)));
+    } catch {
+      parts = null;
+    }
+    if (!Array.isArray(parts) || parts.length !== 3 || !parts.every((part) => typeof part === "string")) {
+      return { ok: false, status: 400, code: "RESCUE_ITEM_INVALID", message: "\u6761\u76EE\u7F16\u53F7\u4E0D\u5BF9\u3002" };
+    }
+    return readClientStateItem(db, keyOf, parts[0], parts[1], parts[2]);
+  }
+  const match = /^t:([a-z_]+):(\d+)$/.exec(id);
+  if (match && Object.prototype.hasOwnProperty.call(EXPORT_TABLES, match[1])) {
+    const tables = await listTables(db);
+    if (!tables.has(match[1])) return { ok: false, status: 404, code: "RESCUE_ITEM_GONE", message: "\u8FD9\u5F20\u8868\u4E0D\u5728\u5E93\u91CC\u3002" };
+    return readTablePage(db, keyOf, match[1], Number(match[2]));
+  }
+  return { ok: false, status: 400, code: "RESCUE_ITEM_INVALID", message: "\u6761\u76EE\u7F16\u53F7\u4E0D\u5BF9\u3002" };
+};
+var RESCUE_SECURITY_HEADERS = {
+  "Cache-Control": "no-store",
+  "Referrer-Policy": "no-referrer",
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY"
+};
+var rescueJson = (status, body) => new Response(JSON.stringify(body), {
+  status,
+  headers: { "Content-Type": "application/json; charset=utf-8", ...RESCUE_SECURITY_HEADERS }
+});
+var rescueError = (status, code, message) => rescueJson(status, { success: false, error: { code, message } });
+var matchRescueRoute = (pathname) => {
+  if (pathname.endsWith("/rescue")) return "page";
+  if (pathname.endsWith("/rescue/manifest")) return "manifest";
+  if (pathname.endsWith("/rescue/item")) return "item";
+  return null;
+};
+var handleRescueRequest = async (request, env, deps, route) => {
+  const tokenState = readRescueToken(env);
+  if (tokenState.state === "off") {
+    return new Response("Not Found", { status: 404, headers: RESCUE_SECURITY_HEADERS });
+  }
+  if (tokenState.state === "too-short") {
+    return route === "page" ? rescuePage(`AMSG_RESCUE_TOKEN \u592A\u77ED\u4E86\uFF08\u73B0\u5728 ${tokenState.length} \u4E2A\u5B57\u7B26\uFF09\uFF0C\u81F3\u5C11\u8981 ${AMSG_RESCUE_TOKEN_MIN_LENGTH} \u4E2A\u3002\u4E3A\u4E86\u9632\u6B62\u53E3\u4EE4\u88AB\u731C\u4E2D\uFF0C\u6551\u63F4\u9875\u4E0D\u4F1A\u5DE5\u4F5C\u3002\u53BB Cloudflare \u9762\u677F\u628A\u5B83\u6362\u6210\u4E00\u4E32\u66F4\u957F\u7684\u968F\u673A\u5B57\u7B26\u3002`) : rescueError(403, "RESCUE_TOKEN_TOO_SHORT", `AMSG_RESCUE_TOKEN \u81F3\u5C11\u8981 ${AMSG_RESCUE_TOKEN_MIN_LENGTH} \u4E2A\u5B57\u7B26\u3002`);
+  }
+  const db = dbOf(env);
+  const masterKey = env.AMSG_MASTER_KEY?.trim();
+  if (!db || !masterKey) {
+    const message = "\u8FD9\u53F0 Worker \u6CA1\u7ED1 D1 \u6570\u636E\u5E93\u6216\u6CA1\u6709 AMSG_MASTER_KEY\uFF0C\u6CA1\u6709\u53EF\u4EE5\u6551\u56DE\u7684\u6570\u636E\u3002";
+    return route === "page" ? rescuePage(message) : rescueError(503, "RESCUE_NOTHING_TO_EXPORT", message);
+  }
+  let episode;
+  try {
+    episode = await observeRescue(env, deps);
+  } catch (error) {
+    console.warn("[amsg:rescue] \u7559\u75D5\u5199\u4E0D\u8FDB\u53BB\uFF0C\u62D2\u7EDD\u5BFC\u51FA", error);
+    episode = null;
+  }
+  if (!episode) {
+    const message = "\u6551\u63F4\u8BB0\u5F55\u5199\u4E0D\u8FDB\u6570\u636E\u5E93\uFF0C\u4E3A\u4E86\u5B89\u5168\u6682\u4E0D\u5BFC\u51FA\u3002\u7A0D\u540E\u518D\u8BD5\uFF0C\u6216\u8005\u68C0\u67E5 D1 \u662F\u5426\u6B63\u5E38\u3002";
+    return route === "page" ? rescuePage(message) : rescueError(503, "RESCUE_AUDIT_UNAVAILABLE", message);
+  }
+  if (route === "page") {
+    if (request.method.toUpperCase() !== "GET") return rescueError(405, "METHOD_NOT_ALLOWED", "/rescue \u53EA\u63A5\u53D7 GET");
+    return rescuePage(null);
+  }
+  if (request.method.toUpperCase() !== "POST") return rescueError(405, "METHOD_NOT_ALLOWED", "\u53EA\u63A5\u53D7 POST");
+  const nowMs = deps.now?.() ?? Date.now();
+  const gate = await checkRescueToken(request, db, tokenState.token, nowMs);
+  if (!gate.ok) return rescueError(gate.status, gate.code, gate.message);
+  if (route === "manifest") {
+    await patchEpisode(db, nowMs, { increments: ["exportCount"], set: { lastExportAt: nowMs } });
+    return rescueJson(200, { success: true, data: await buildRescueManifest(db, nowMs) });
+  }
+  let id;
+  try {
+    id = (await request.json())?.id;
+  } catch {
+    id = void 0;
+  }
+  if (typeof id !== "string" || !id) return rescueError(400, "RESCUE_ITEM_INVALID", '\u8BF7\u6C42\u4F53\u8981\u662F { "id": "\u2026" }');
+  await patchEpisode(db, nowMs, { increments: ["itemReads"], set: { lastReadAt: nowMs } });
+  const result = await readRescueItem(db, masterKey, id);
+  return result.ok ? rescueJson(200, { success: true, data: result.data }) : rescueError(result.status, result.code, result.message);
+};
+var escapeHtml = (text2) => text2.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
+var randomNonce = () => {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+};
+var rescuePage = (blockedMessage) => {
+  const nonce = randomNonce();
+  const blocked2 = blockedMessage ? `<p class="blocked">${escapeHtml(blockedMessage)}</p>` : "";
+  const form = blockedMessage ? "" : `
+  <label for="token">\u6551\u63F4\u53E3\u4EE4\uFF08\u5C31\u662F\u4F60\u586B\u8FDB AMSG_RESCUE_TOKEN \u7684\u90A3\u4E32\uFF09</label>
+  <input id="token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">
+  <button id="start" type="button">\u5F00\u59CB\u5BFC\u51FA</button>
+  <p id="status" class="status"></p>
+  <p id="download" class="download"></p>
+  <div id="chars"></div>`;
+  const script = blockedMessage ? "" : `<script nonce="${nonce}">${RESCUE_PAGE_SCRIPT}</script>`;
+  const html = `<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>SullyOS \u4E3B\u52A8\u6D88\u606F \xB7 \u6570\u636E\u6551\u63F4</title>
+<style nonce="${nonce}">${RESCUE_PAGE_STYLE}</style></head>
+<body><main>
+  <h1>\u4E3B\u52A8\u6D88\u606F \xB7 \u6570\u636E\u6551\u63F4</h1>
+  <p class="warn">\u8FD9\u4E2A\u9875\u9762\u80FD\u5BFC\u51FA\u8FD9\u53F0 Worker \u91CC\u7684<strong>\u5168\u90E8\u4E91\u7AEF\u6570\u636E\uFF0C\u5305\u62EC API Key \u548C\u5DE5\u5177\u51ED\u636E</strong>\u3002\u5BFC\u51FA\u5B8C\u6210\u540E\uFF0C\u8BF7\u7ACB\u523B\u56DE Cloudflare \u9762\u677F\u5220\u6389 AMSG_RESCUE_TOKEN\uFF0C\u5E76\u59A5\u5584\u4FDD\u7BA1\u4E0B\u8F7D\u7684\u6587\u4EF6\u3002</p>
+  <p class="note">\u80FD\u6551\u56DE\u7684\u53EA\u6709\u4E3B\u52A8\u6D88\u606F 2.0 \u540C\u6B65\u5230\u4E91\u7AEF\u7684\u5185\u5BB9\uFF1A\u6BCF\u4E2A\u89D2\u8272\u7684\u540D\u5B57\u3001\u65E5\u8BB0\u3001\u4E91\u7AEF\u51ED\u636E\u548C\u89D2\u8272\u53D1\u8FC7\u7684\u6D88\u606F\uFF1B\u5F00\u7740\u5B9A\u65F6\u4E3B\u52A8\u6D88\u606F\u6216\u6302\u7740\u6392\u7A0B\u7684\u89D2\u8272\uFF0C\u8FD8\u6709\u6700\u540E\u4E00\u6B21\u540C\u6B65\u65F6\u7684\u63D0\u793A\u8BCD\u5FEB\u7167\uFF08\u89D2\u8272\u5361\u3001\u4E16\u754C\u4E66\u3001\u6708\u5EA6\u603B\u7ED3\u3001\u6700\u8FD1\u4E00\u6BB5\u5BF9\u8BDD\uFF09\u3002\u5B8C\u6574\u804A\u5929\u8BB0\u5F55\u3001\u56FE\u7247\u548C\u5176\u4ED6 App \u7684\u6570\u636E\u4E0D\u5728\u4E91\u7AEF\uFF0C\u6551\u4E0D\u56DE\u6765\u3002</p>
+  <p class="note">\u4E0B\u8F7D\u7684\u6587\u4EF6\u53EF\u4EE5\u76F4\u63A5\u5BFC\u56DE SullyOS\uFF1A\u8BBE\u7F6E \u2192 \u5907\u4EFD\u4E0E\u6062\u590D \u2192 \u300C\u4ECE\u5176\u4ED6\u7F51\u5740 / App \u8FC1\u5165\u72EC\u7ACB\u7528\u6237\u300D\uFF0C\u4F1A\u65B0\u5EFA\u4E00\u4E2A\u7528\u6237\uFF0C\u4E0D\u78B0\u73B0\u6709\u6570\u636E\u3002</p>
+  ${blocked2}${form}
+</main>${script}</body></html>`;
+  return new Response(html, {
+    status: blockedMessage ? 503 : 200,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Content-Security-Policy": `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+      ...RESCUE_SECURITY_HEADERS
+    }
+  });
+};
+var RESCUE_PAGE_STYLE = `
+:root{color-scheme:light}
+body{margin:0;background:#f6f7f9;color:#1f2933;font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+main{max-width:720px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:22px;margin:0 0 16px}
+.warn{background:#fdecea;color:#8a1c12;border:1px solid #f5b5ad;border-radius:10px;padding:12px 14px}
+.note{color:#52606d;font-size:14px}
+.blocked{background:#fff4e5;color:#7a4100;border:1px solid #f7c98b;border-radius:10px;padding:12px 14px}
+label{display:block;margin:20px 0 6px;font-weight:600}
+input{box-sizing:border-box;width:100%;padding:10px 12px;border:1px solid #cbd2d9;border-radius:8px;font-size:15px;background:#fff;color:#1f2933}
+button{margin-top:12px;padding:10px 18px;border:0;border-radius:8px;background:#1f2933;color:#fff;font-size:15px;cursor:pointer}
+button[disabled]{opacity:.5;cursor:default}
+.status{margin-top:14px;white-space:pre-wrap}
+.download a{display:inline-block;margin-top:4px;padding:10px 18px;border-radius:8px;background:#0b6e4f;color:#fff;text-decoration:none}
+.char{background:#fff;border:1px solid #e4e7eb;border-radius:10px;padding:12px 14px;margin-top:12px}
+.char h2{font-size:16px;margin:0 0 4px}
+.char small{color:#7b8794;display:block;margin-bottom:8px;word-break:break-all}
+.char button{margin:6px 8px 0 0;padding:6px 12px;font-size:13px;background:#3e4c59}
+.char textarea{box-sizing:border-box;width:100%;height:220px;margin-top:8px;font:12px/1.5 ui-monospace,Menlo,monospace;border:1px solid #cbd2d9;border-radius:8px;padding:8px;background:#fff;color:#1f2933}
+`;
+var RESCUE_PAGE_SCRIPT = `
+(function(){
+  var $ = function(id){ return document.getElementById(id); };
+  var base = location.pathname.replace(/\\/+$/, '');
+  var token = '';
+  function call(path, body){
+    return fetch(base + path, {
+      method: 'POST', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'X-Rescue-Token': token },
+      body: JSON.stringify(body || {})
+    }).then(function(res){
+      return res.json().catch(function(){ return null; }).then(function(data){
+        if (!res.ok || !data || data.success !== true) {
+          throw new Error((data && data.error && data.error.message) || ('\u8BF7\u6C42\u5931\u8D25\uFF08HTTP ' + res.status + '\uFF09'));
+        }
+        return data.data;
+      });
+    });
+  }
+  function userOf(out, id){
+    if (!out.users[id]) out.users[id] = { clientState: {}, tables: {} };
+    return out.users[id];
+  }
+  function messageText(content){
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) return content.map(function(part){ return part && part.type === 'text' ? part.text : '[' + (part && part.type) + ']'; }).join('\\n');
+    return JSON.stringify(content);
+  }
+  function copy(text, area){
+    area.value = text; area.hidden = false;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function(){ area.dataset.copied = '1'; }, function(){});
+    }
+  }
+  function renderChars(out){
+    var box = $('chars'); box.textContent = '';
+    Object.keys(out.users).forEach(function(userId){
+      var cs = out.users[userId].clientState;
+      Object.keys(cs).forEach(function(ns){
+        if (ns.indexOf('amsg:char:') !== 0) return;
+        var entry = cs[ns]; var pack = entry.fire_pack; var tool = entry.tool_pack;
+        var card = document.createElement('div'); card.className = 'char';
+        var title = document.createElement('h2');
+        title.textContent = (tool && tool.charName) || '\u672A\u547D\u540D\u89D2\u8272';
+        var meta = document.createElement('small');
+        meta.textContent = '\u89D2\u8272 ID\uFF1A' + ns.slice('amsg:char:'.length) + (pack && pack.builtAt ? ' \xB7 \u5FEB\u7167\u65F6\u95F4\uFF1A' + new Date(pack.builtAt).toLocaleString() : '');
+        var area = document.createElement('textarea'); area.readOnly = true; area.hidden = true;
+        card.appendChild(title); card.appendChild(meta);
+        if (pack && typeof pack.template === 'string') {
+          var b1 = document.createElement('button'); b1.type = 'button'; b1.textContent = '\u67E5\u770B\u5E76\u590D\u5236\u63D0\u793A\u8BCD\u5FEB\u7167';
+          b1.onclick = function(){ copy(pack.template, area); };
+          card.appendChild(b1);
+        }
+        if (pack && pack.chat && Array.isArray(pack.chat.messages)) {
+          var b2 = document.createElement('button'); b2.type = 'button'; b2.textContent = '\u67E5\u770B\u5E76\u590D\u5236\u6700\u8FD1\u5BF9\u8BDD';
+          b2.onclick = function(){ copy(pack.chat.messages.map(function(m){ return m.role + '\uFF1A' + messageText(m.content); }).join('\\n\\n'), area); };
+          card.appendChild(b2);
+        }
+        if (tool && Array.isArray(tool.memories) && tool.memories.length) {
+          var b3 = document.createElement('button'); b3.type = 'button'; b3.textContent = '\u67E5\u770B\u5E76\u590D\u5236\u65E5\u8BB0';
+          b3.onclick = function(){ copy(JSON.stringify(tool.memories, null, 2), area); };
+          card.appendChild(b3);
+        }
+        card.appendChild(area);
+        box.appendChild(card);
+      });
+    });
+  }
+  $('start').onclick = function(){
+    token = $('token').value.trim();
+    if (!token) { $('status').textContent = '\u5148\u586B\u6551\u63F4\u53E3\u4EE4\u3002'; return; }
+    var button = $('start'); button.disabled = true;
+    $('download').textContent = ''; $('chars').textContent = '';
+    var out = { format: 'sullyos-amsg-rescue', version: 1, exportedAt: new Date().toISOString(), worker: location.host,
+      notice: '\u8FD9\u4EFD\u6587\u4EF6\u542B API Key \u548C\u5DE5\u5177\u51ED\u636E\uFF0C\u8BF7\u59A5\u5584\u4FDD\u7BA1\uFF0C\u4E0D\u8981\u53D1\u7ED9\u522B\u4EBA\u3002', users: {}, errors: [] };
+    $('status').textContent = '\u6B63\u5728\u8BFB\u53D6\u6E05\u5355\u2026';
+    call('/manifest').then(function(manifest){
+      var items = manifest.items || []; var done = 0;
+      function next(){
+        if (done >= items.length) return Promise.resolve();
+        var item = items[done];
+        $('status').textContent = '\u6B63\u5728\u5BFC\u51FA ' + (done + 1) + ' / ' + items.length + '\u2026';
+        return call('/item', { id: item.id }).then(function(data){
+          if (data.source === 'client_state') {
+            var user = userOf(out, data.userId);
+            if (!user.clientState[data.namespace]) user.clientState[data.namespace] = {};
+            user.clientState[data.namespace][data.key] = data.status === 'decrypted' ? data.value : { _rescueStatus: data.status, updatedAt: data.updatedAt };
+            if (data.status !== 'decrypted') out.errors.push({ id: item.id, namespace: data.namespace, key: data.key, status: data.status });
+          } else {
+            (data.rows || []).forEach(function(row){
+              var user = userOf(out, row.user_id || '(unknown)');
+              if (!user.tables[data.source]) user.tables[data.source] = [];
+              user.tables[data.source].push(row);
+            });
+          }
+        }, function(error){
+          out.errors.push({ id: item.id, source: item.source, message: String(error && error.message || error) });
+        }).then(function(){ done += 1; return next(); });
+      }
+      return next().then(function(){
+        var blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+        var link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = 'sullyos-amsg-rescue-' + new Date().toISOString().slice(0, 10) + '.json';
+        link.textContent = '\u4E0B\u8F7D\u5BFC\u51FA\u6587\u4EF6\uFF08JSON\uFF09';
+        $('download').appendChild(link);
+        $('status').textContent = '\u5BFC\u51FA\u5B8C\u6210\uFF0C\u5171 ' + items.length + ' \u9879' + (out.errors.length ? '\uFF0C\u5176\u4E2D ' + out.errors.length + ' \u9879\u6CA1\u80FD\u5B8C\u6574\u8BFB\u51FA\uFF08\u8BE6\u89C1\u6587\u4EF6\u91CC\u7684 errors\uFF09' : '') + '\u3002\\n\u4E0B\u8F7D\u540E\u8BF7\u56DE Cloudflare \u9762\u677F\u5220\u6389 AMSG_RESCUE_TOKEN\u3002';
+        renderChars(out);
+        link.click();
+      });
+    }).catch(function(error){
+      $('status').textContent = '\u5BFC\u51FA\u5931\u8D25\uFF1A' + (error && error.message || error);
+    }).then(function(){ button.disabled = false; });
+  };
+})();
+`;
+
 // worker/amsg/src/index.ts
 installAnthropicFetch(false);
+var rescueDeps = (env) => ({
+  sendPush: (subscription, payload) => buildWorkerConfig(env).webpush.sendNotification(subscription, payload)
+});
 var getFireStash = (scratch) => scratch?.fire;
 var REPLY_IN_FLIGHT_DEFER_MS = 45e3;
 var AWAY_DUE_TOLERANCE_MS = 6e4;
@@ -20023,6 +21080,10 @@ var amsgFireSettled = async (info) => {
       stateWrites.push({ key: AMSG_DAILY_SENDS_KEY, value: JSON.stringify(stash.dailySends) });
     }
   }
+  const sentNoticeIds = stash.firePack?.noticeIds;
+  if (!stash.instant && delivered && Array.isArray(sentNoticeIds) && sentNoticeIds.length && sentNoticeIds.some((id) => !(stash.sentNoticeIds ?? []).includes(id))) {
+    stateWrites.push({ key: AMSG_SENT_NOTICES_KEY, value: appendSentNotices(stash.sentNoticeIds ?? [], sentNoticeIds) });
+  }
   if (stash.instant && info.status === "failed" && info.willRetry === false && !committed && stash.taskUuid) {
     const failReason = info.error instanceof Error ? info.error.message : String(info.error ?? "\u672A\u77E5\u9519\u8BEF");
     const retryCount = typeof info.task?.retry_count === "number" ? info.task.retry_count : 0;
@@ -20184,14 +21245,17 @@ var condenseToolTrace = (calls) => {
   }
   return [...counts].map(([name, count2]) => ({ name, count: count2 }));
 };
+var SCHEDULED_EMOTION_WAIT_MS = 6e4;
+var SCHEDULED_FIRE_TIMEOUT_WITH_EMOTION_MS = 24e4 + SCHEDULED_EMOTION_WAIT_MS;
+var SCHEDULED_EMOTION_SAFETY_MS = 1e4;
 var EMOTION_EVAL_LATE_REASON = "\u60C5\u7EEA\u8BC4\u4F30\u6CA1\u8D76\u4E0A\u8FD9\u6761\u56DE\u590D\uFF08\u526F API \u592A\u6162\uFF09\uFF0C\u8FD9\u4E00\u8F6E\u5148\u4E0D\u66F4\u65B0";
-var raceEmotionEval = (promise, lateNote = "\u8BC4\u4F30\u6CA1\u8D76\u4E0A\u8FD9\u6761\u56DE\u590D\uFF0C\u5148\u628A\u8BDD\u53D1\u51FA\u53BB\uFF08\u8FD9\u4E00\u8F6E\u4E0D\u66F4\u65B0\u60C5\u7EEA\uFF09") => {
+var raceEmotionEval = (promise, lateNote = "\u8BC4\u4F30\u6CA1\u8D76\u4E0A\u8FD9\u6761\u56DE\u590D\uFF0C\u5148\u628A\u8BDD\u53D1\u51FA\u53BB\uFF08\u8FD9\u4E00\u8F6E\u4E0D\u66F4\u65B0\u60C5\u7EEA\uFF09", waitMs = EMOTION_EVAL_RIDE_ALONG_MS) => {
   let timer;
   const late = new Promise((resolve) => {
     timer = setTimeout(() => {
       console.warn(`[amsg:emotion] ${lateNote}`);
       resolve(null);
-    }, EMOTION_EVAL_RIDE_ALONG_MS);
+    }, waitMs);
   });
   return Promise.race([promise, late]).finally(() => {
     if (timer !== void 0) clearTimeout(timer);
@@ -20218,7 +21282,12 @@ var runFireScheduleTool = async (stash, scheduleTask, args, nowMs) => {
     return {
       ok: false,
       reason: "unanswered_limit",
-      message: `\u5BF9\u65B9\u8FD8\u6CA1\u56DE\u590D\uFF0C\u8FD9\u671F\u95F4\u4F60\u5DF2\u7ECF\u4E3B\u52A8\u627E\u4E86 / \u6392\u4E86 ${committedSends} \u6B21\uFF0C\u7528\u6237\u8BBE\u7684\u8FDE\u53D1\u4E0A\u9650\u662F ${unansweredLimit} \u6B21\u2014\u2014\u8FD9\u6B21\u522B\u6392\u4E86\uFF0C\u7B49 ta \u56DE\u590D\u518D\u8BF4\u3002`
+      message: buildUnansweredLimitRejectMessage({
+        count: committedSends,
+        limit: unansweredLimit,
+        context: stash.instant ? "chat" : "fire",
+        canManageTasks: stash.fireToolNames?.has(AMSG_FIRE_CANCEL_TOOL) ?? false
+      })
     };
   }
   if (stash.scheduledTasks.length >= MAX_FIRE_SCHEDULES) {
@@ -20435,8 +21504,6 @@ var runFireRenewTool = async (stash, fireCtx, args, nowMs) => {
     message: `\u5DF2\u628A [${shortTaskId(target.taskUuid)}] \u6539\u5230\u65B0\u65F6\u95F4\uFF08\u7F16\u53F7\u4E0D\u53D8\uFF09\u3002`
   };
 };
-var FINAL_ROUND_NOTICE = "\uFF08\u63D0\u9192\uFF1A\u8FD9\u662F\u6700\u540E\u4E00\u8F6E\u4E86\uFF0C\u4E0D\u8981\u518D\u8C03\u7528\u4EFB\u4F55\u5DE5\u5177\uFF0C\u76F4\u63A5\u628A\u60F3\u8BF4\u7684\u8BDD\u5199\u5B8C\u3002\uFF09";
-var feedsFinalRound = (iteration, maxToolIterations) => typeof iteration === "number" && iteration >= maxToolIterations - 2;
 var MCP_CALL_TIMEOUT_MS = 25e3;
 var MCP_TOTAL_BUDGET_MS = 12e4;
 var runMcpFireTool = async (stash, name, args, signal) => {
@@ -20483,6 +21550,7 @@ var runMcpFireTool = async (stash, name, args, signal) => {
 var amsgHooks = {
   async onBeforeFire(ctx) {
     ctx.throwIfCancelled?.();
+    const fireStartedAt = Date.now();
     const charId = ctx.task?.metadata?.charId;
     if (typeof charId !== "string" || !charId) {
       throw fireStateError("task metadata \u7F3A charId", { taskId: ctx.task.id });
@@ -20848,6 +21916,8 @@ var amsgHooks = {
       // 下面即时对话那一支起跑（要等请求消息拼完才知道给评估喂什么）。
       emotionEvalPromise: null,
       emotionLatePending: false,
+      fireStartedAt,
+      sentNoticeIds: parseSentNotices(charRows.find((r) => r.key === AMSG_SENT_NOTICES_KEY)?.value),
       away,
       dateLeave,
       selfScheduled
@@ -20877,7 +21947,13 @@ var amsgHooks = {
       buildRealtimeWorldBlock(worldArgs),
       buildUserHolidayBlock(worldArgs)
     ]);
-    const mcpBlock = mcpResolve ? buildMcpFireBlock(mcpResolve, { mode: mcpNative ? "native" : "text" }) : "";
+    const mcpUserName = pack.targetName && pack.targetName !== "\u5BF9\u65B9" ? pack.targetName : void 0;
+    const mcpBlock = mcpResolve ? buildMcpFireBlock(mcpResolve, {
+      mode: mcpNative ? "native" : "text",
+      userName: mcpUserName,
+      context: instant ? "chat" : "fire"
+    }) : "";
+    const mcpTailReminder = mcpResolve && mcpNative ? MCP_TAIL_REMINDER : "";
     const limitsBrief = canSelfSchedule ? buildLimitsBrief({
       limits,
       committedSends: countCommittedSelfSends(stash),
@@ -20888,7 +21964,9 @@ var amsgHooks = {
         selfScheduleBusyTimes(stash, nowMs)
       ), tz) : void 0,
       // 正在发的这一条（定时触发）发完就占掉今天的一个名额。
-      dailyRemaining: Number.isFinite(limits.dailySendCap) ? Math.max(0, limits.dailySendCap - sentToday - (instant ? 0 : 1)) : void 0
+      dailyRemaining: Number.isFinite(limits.dailySendCap) ? Math.max(0, limits.dailySendCap - sentToday - (instant ? 0 : 1)) : void 0,
+      context: instant ? "chat" : "fire",
+      canManageTasks: canManageTasks && mcpNative
     }) : "";
     const scheduleBlock = canSelfSchedule ? buildFireScheduleBlock(mcpNative ? "native" : "text", {
       nowMs: ctx.now.getTime(),
@@ -20901,7 +21979,14 @@ var amsgHooks = {
     const abilities = { allowRecurring: limits.allowSelfRecurring, allowForce: limits.allowSelfForce };
     const fireTools = [
       ...mcpResolve && mcpNative ? buildMcpFireTools(mcpResolve) : [],
-      ...canSelfSchedule && mcpNative ? [buildFireScheduleTool({ nowMs: ctx.now.getTime(), tz, abilities, context: instant ? "chat" : "fire", storyYearless: !!pack.tavernStoryTime })] : [],
+      ...canSelfSchedule && mcpNative ? [buildFireScheduleTool({
+        nowMs: ctx.now.getTime(),
+        tz,
+        abilities,
+        context: instant ? "chat" : "fire",
+        maxActiveTasks: limits.maxActiveTasks,
+        storyYearless: !!pack.tavernStoryTime
+      })] : [],
       ...canManageTasks && mcpNative ? [buildFireCancelTool(), buildFireRenewTool({ nowMs: ctx.now.getTime(), tz, storyYearless: !!pack.tavernStoryTime })] : []
     ];
     const replyScopeBlock = fireTools.length > 0 || mcpBlock || scheduleBlock ? `
@@ -20952,10 +22037,9 @@ ${buildReplyScopeRule(instant ? "user" : "scheduled")}
       ];
       if (userHoliday) {
         const profileMessage = instantMessages.find((m) => m.role === "system" && typeof m.content === "string" && m.content.includes("### \u4E92\u52A8\u5BF9\u8C61 (User)\n"));
-        if (profileMessage) profileMessage.content = insertUserHolidayInProfile(profileMessage.content, userHoliday);
-        else instantMessages.push({ role: "system", content: `### \u4E92\u52A8\u5BF9\u8C61\u4FE1\u606F\u8865\u5145
-${userHoliday}` });
+        if (profileMessage) profileMessage.content = insertUserHolidayInProfile(profileMessage.content, userHoliday, pack.userBioLength);
       }
+      if (mcpTailReminder) instantMessages.push({ role: "system", content: mcpTailReminder });
       if (emotionEvalSpec) {
         const storedEvalRaw = clientTaskId ? charRows.find((r) => r.key === amsgEmotionUpdateKey(clientTaskId))?.value : void 0;
         stash.emotionEvalPromise = storedEvalRaw ? Promise.resolve({ raw: storedEvalRaw, error: null }) : (async () => {
@@ -20985,7 +22069,24 @@ ${userHoliday}` });
         totalTimeoutMs: INSTANT_TOTAL_TIMEOUT_MS
       };
     }
-    const prompt = insertUserHolidayInProfile(renderFirePack(pack, ctx.now.getTime(), taskMeta.amsgTaskInstruction, {
+    const awayAnchorFresh = pack.awayAnchor && lastInteractionAt === (pack.lastAwayAnchorAt ?? null);
+    const taskInstruction = away && pack.awayAnchor ? buildAwayFireInstruction({
+      userName: pack.targetName,
+      anchor: awayAnchorFresh ? {
+        source: pack.awayAnchor.source,
+        lastDateAt: selfLog.entries.some((e) => e.at > (pack.awayAnchor.lastDateAt ?? Infinity)) ? null : pack.awayAnchor.lastDateAt
+      } : { source: null, lastDateAt: null },
+      anchorAt: lastInteractionAt,
+      nowMs,
+      showClock: toolPack.timeAwarenessEnabled && !pack.tavernStoryTime,
+      tzId: pack.tzId
+    }) : taskMeta.amsgTaskInstruction;
+    const noticeTemplate = renderSentNotices(pack.template, stash.sentNoticeIds ?? []);
+    const rolledPack = {
+      ...pack,
+      template: Array.isArray(pack.worldbookRolls) ? renderWorldbookRolls(noticeTemplate, pack.worldbookRolls) : noticeTemplate
+    };
+    const prompt = insertUserHolidayInProfile(renderFirePack(rolledPack, ctx.now.getTime(), taskInstruction, {
       maxUnansweredSends,
       selfLog,
       taskListBlock,
@@ -20994,11 +22095,34 @@ ${userHoliday}` });
       // 「此刻在做什么」里的钟点跟今日节日同一个开关：关掉时间感知的角色不该从日程块
       // 读到「23:00」——那正是这个开关要挡的东西。日程内容本身照给。
       includeClock: toolPack.timeAwarenessEnabled,
-      mustSpeak: away || dateLeave
-    }), userHoliday) + mcpBlock + scheduleBlock + replyScopeBlock;
+      mustSpeak: away || dateLeave,
+      dateLeave
+    }), userHoliday, pack.userBioLength) + mcpBlock + scheduleBlock + replyScopeBlock + (mcpTailReminder ? `
+
+${mcpTailReminder}` : "");
+    const fireEvalPrompt = pack.emotionEval?.prompt;
+    if (typeof fireEvalPrompt === "string" && fireEvalPrompt) {
+      const spec = { prompt: fireEvalPrompt };
+      stash.emotionEvalPromise = (async () => {
+        const evalApi = await resolveEmotionEvalApi(spec, ctx.task.credRefs, ctx.resolveLlmCredential);
+        if (!evalApi) {
+          console.warn("[amsg:emotion] \u5B9A\u65F6\u89E6\u53D1\u53D6\u4E0D\u5230\u526F API \u51ED\u636E\uFF0C\u8FD9\u4E00\u8F6E\u4E0D\u8BC4\u4F30");
+          return { raw: null, error: null };
+        }
+        return runAmsgEmotionEval(
+          spec,
+          evalApi,
+          [{ role: "system", content: prompt }],
+          toolPack.charName || ctx.task.contactName || "\u89D2\u8272",
+          void 0,
+          ctx.signal
+        );
+      })();
+    }
     return {
       messages: [{ role: "user", content: prompt }],
-      ...common
+      ...common,
+      ...stash.emotionEvalPromise ? { totalTimeoutMs: SCHEDULED_FIRE_TIMEOUT_WITH_EMOTION_MS } : {}
     };
   },
   async onLLMOutput(ctx) {
@@ -21047,7 +22171,9 @@ ${userHoliday}` });
       }
     }
     const roundReasoning = readAssistantThinking(llmMessage && "content" in llmMessage ? llmMessage : { ...llmMessage, content: rawContent });
-    session.finalReasoning = roundReasoning || null;
+    if (content.length > 0 || session.narrations.length === 0) {
+      session.finalReasoning = roundReasoning || null;
+    }
     const rawToolCalls = ctx.llmResponse?.choices?.[0]?.message?.tool_calls;
     const nativeCalls = classifyNativeToolCalls(rawToolCalls, stash.fireToolNames, stash.mcpResolve);
     for (const droppedName of nativeCalls.dropped) {
@@ -21311,13 +22437,34 @@ ${userHoliday}` });
           payloads = attachMetaAt(payloads, payloads.length - 1, lastMeta);
         }
       } else if (!stash.instant && payloads.length > 0) {
+        const lastMeta = {};
         const stashUsage = readStashUsage(stash);
         if (stashUsage) {
-          payloads = attachMetaAt(payloads, payloads.length - 1, {
-            amsgUsage: stashUsage,
-            amsgProactiveKind: proactiveKindOf(stash),
-            ...hasPartialStashUsage(stash) ? { amsgTokensPartial: true } : {}
-          });
+          lastMeta.amsgUsage = stashUsage;
+          lastMeta.amsgProactiveKind = proactiveKindOf(stash);
+          if (hasPartialStashUsage(stash)) lastMeta.amsgTokensPartial = true;
+        }
+        const noticeIds = stash.firePack?.noticeIds;
+        if (Array.isArray(noticeIds) && noticeIds.length && noticeIds.every((id) => typeof id === "string")) {
+          lastMeta.amsgNoticeIds = noticeIds;
+        }
+        if (stash.emotionEvalPromise) {
+          const remainingMs = (stash.fireStartedAt ?? Date.now()) + SCHEDULED_FIRE_TIMEOUT_WITH_EMOTION_MS - SCHEDULED_EMOTION_SAFETY_MS - Date.now();
+          const waitMs = Math.max(0, Math.min(SCHEDULED_EMOTION_WAIT_MS, remainingMs));
+          const outcome = await raceEmotionEval(
+            stash.emotionEvalPromise,
+            `\u8BC4\u4F30\u7B49\u4E86 ${Math.round(waitMs / 1e3)}s \u8FD8\u6CA1\u51FA\u7ED3\u679C\uFF0C\u8FD9\u6761\u4E3B\u52A8\u6D88\u606F\u4E0D\u5E26\u8BC4\u4F30\u7ED3\u8BBA\u7167\u53D1\uFF08\u8FD9\u4E00\u8F6E\u4E0D\u66F4\u65B0\u60C5\u7EEA\uFF09`,
+            waitMs
+          );
+          if (outcome && (outcome.raw || outcome.error)) {
+            lastMeta.amsgEmotionDone = true;
+            if (outcome.raw) lastMeta.amsgEmotionUpdate = outcome.raw;
+            else if (outcome.error) lastMeta.amsgEmotionError = outcome.error;
+            if (outcome.usage) lastMeta.amsgEmotionUsage = outcome.usage;
+          }
+        }
+        if (Object.keys(lastMeta).length > 0) {
+          payloads = attachMetaAt(payloads, payloads.length - 1, lastMeta);
         }
       }
       if (stash.charId) {
@@ -21350,6 +22497,7 @@ ${userHoliday}` });
     if (!stash) {
       throw new Error("AMSG2_FIRE_STASH_MISSING: executeToolCalls \u8BFB\u4E0D\u5230 ctx.scratch.fire\uFF0C\u68C0\u67E5 amsg-server \u662F\u5426\u4ECD\u5171\u4EAB scratch");
     }
+    const canCallMoreTools = (ctx.iteration ?? 0) < stash.maxToolIterations - 2;
     if (stash.proxyWorkerUrl) setProxyWorkerUrlOverride(stash.proxyWorkerUrl);
     if (stash.xhsCookie) XhsMcpClient.setCookie(stash.xhsCookie);
     const results = [];
@@ -21380,14 +22528,14 @@ ${userHoliday}` });
           results.push({
             tool_call_id: toolCall.id,
             role: "tool",
-            content: buildDuplicateToolMessage(name)
+            content: buildDuplicateToolMessage(name, { canCallMoreTools })
           });
           continue;
         }
         const result = name === AMSG_FIRE_SCHEDULE_TOOL ? await runFireScheduleTool(stash, ctx.scheduleTask, args, Date.now()) : name === AMSG_FIRE_CANCEL_TOOL ? await runFireCancelTool(stash, ctx.cancelTask, args, Date.now()) : name === AMSG_FIRE_RENEW_TOOL ? await runFireRenewTool(stash, ctx, args, Date.now()) : name.startsWith(MCP_FIRE_NAME_PREFIX) ? await runMcpFireTool(stash, name, args, ctx.signal) : await dispatchAgenticTool(name, args, { ...stash.toolCtx, signal: ctx.signal });
         stash.session.duplicateToolCalls = 0;
         stash.session.toolCalls.push({ name, fingerprint, ran: toolDidSomething(name, result) });
-        content = buildToolResultMessage({ name, result, history: stash.session.toolCalls });
+        content = buildToolResultMessage({ name, result, history: stash.session.toolCalls, canCallMoreTools });
         console.log("[amsg:agentic]", { type: "tool_done", sessionId: ctx.sessionId, tool: name });
       } catch (error) {
         ctx.throwIfCancelled?.();
@@ -21401,12 +22549,7 @@ ${userHoliday}` });
       }
       results.push({ tool_call_id: toolCall.id, role: "tool", content });
     }
-    if (feedsFinalRound(ctx.iteration, stash.maxToolIterations) && results.length > 0) {
-      const last = results[results.length - 1];
-      last.content = `${last.content}
-${FINAL_ROUND_NOTICE}`;
-    }
-    return results;
+    return appendFinalRoundNotice(results, ctx.iteration, stash.maxToolIterations);
   }
 };
 var resolveVapidEmail = (raw) => raw?.trim() || "mailto:noreply@sullyos.app";
@@ -21520,6 +22663,16 @@ var inspectWorkerEnv = (env) => {
     warnings.push({
       code: "SERVER_TOKEN_MISSING",
       message: "\u6CA1\u8BBE AMSG_SERVER_TOKEN\uFF0C\u8FD9\u4E2A Worker \u5730\u5740\u5BF9\u516C\u7F51\u5F00\u653E\uFF0C\u77E5\u9053\u5730\u5740\u7684\u4EBA\u90FD\u80FD\u8BFB\u5199\u4F60\u7684\u4EFB\u52A1\u3002"
+    });
+  }
+  const rescueToken = env.AMSG_RESCUE_TOKEN?.trim();
+  if (rescueToken) {
+    warnings.push(isRescueActive(env) ? {
+      code: "RESCUE_ACTIVE",
+      message: "\u6551\u63F4\u6A21\u5F0F\u5F00\u7740\uFF08\u8BBE\u4E86 AMSG_RESCUE_TOKEN\uFF09\uFF1A\u51ED\u53E3\u4EE4\u53EF\u4EE5\u5BFC\u51FA\u5168\u90E8\u4E91\u7AEF\u6570\u636E\uFF0C\u5B9A\u65F6\u6D88\u606F\u6682\u505C\u6295\u9012\u3002\u6551\u5B8C\u6570\u636E\u8BF7\u7ACB\u523B\u5220\u6389\u8FD9\u4E2A\u53D8\u91CF\u3002"
+    } : {
+      code: "RESCUE_TOKEN_TOO_SHORT",
+      message: "AMSG_RESCUE_TOKEN \u592A\u77ED\uFF0C\u6551\u63F4\u9875\u4E0D\u4F1A\u5DE5\u4F5C\u3002\u8981\u6551\u6570\u636E\u5C31\u6362\u4E00\u4E32\u81F3\u5C11 16 \u4E2A\u5B57\u7B26\u7684\u968F\u673A\u53E3\u4EE4\uFF0C\u4E0D\u7528\u5C31\u5220\u6389\u5B83\u3002"
     });
   }
   return {
@@ -21711,6 +22864,9 @@ var src_default = {
   async fetch(request, env, ctx) {
     const pathname = new URL(request.url).pathname.replace(/\/+$/, "") || "/";
     const method = request.method.toUpperCase();
+    const rescueRoute = matchRescueRoute(pathname);
+    if (rescueRoute) return handleRescueRequest(request, env, rescueDeps(env), rescueRoute);
+    if (isRescueActive(env) && !pathname.endsWith("/config-check")) await observeRescueQuietly(env, rescueDeps(env));
     if (pathname.endsWith("/config-check")) {
       if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
       return jsonWithCors(200, {
@@ -21735,7 +22891,13 @@ var src_default = {
           selfUpdate: {
             supported: Boolean(env.CF_API_TOKEN?.trim()),
             state: await readSelfUpdateState(env.DB)
-          }
+          },
+          // 这台 Worker 跟哪条线拉成品包（stable / canary，读不到就是 stable）。老 bundle 没有
+          // 这个字段，前端据此认出「还不认通道」，先让它更新再谈加入 canary。
+          bundleChannel: await readBundleChannel(env.DB),
+          // 救援模式的开关和留痕（形状见 utils/amsgRescueState.ts）。前端据此强制弹窗警告 7 天。
+          // 这里只有时刻和次数，不含口令或任何数据；不设防是因为警告必须在共享密钥丢了时也看得到。
+          rescue: await buildRescueReport(env, rescueDeps(env))
         }
       });
     }
@@ -21796,8 +22958,9 @@ var src_default = {
           error: { code: "METHOD_NOT_ALLOWED", message: "/self-update \u53EA\u63A5\u53D7 POST" }
         });
       }
-      const result = await handleSelfUpdate(request, env);
-      await recordManualSelfUpdate(env.DB, result);
+      const db = env.DB;
+      const result = await handleSelfUpdate(request, env, await readBundleChannel(db));
+      await recordManualSelfUpdate(db, result);
       return jsonWithCors(result.ok ? 200 : 400, {
         success: result.ok,
         data: result.ok ? result : void 0,
@@ -21968,12 +23131,17 @@ var src_default = {
       console.error(`[amsg] \u5B9A\u65F6\u4EFB\u52A1\u6574\u8F6E\u8DF3\u8FC7\uFF1A${report.message}`);
       return;
     }
+    await observeRescueQuietly(env, rescueDeps(env));
     await runScheduledAfterUpdate(
       () => runAutoUpdate(env, env.DB, {
         source: "cron",
         scriptName: env.CF_SCRIPT_NAME?.trim() || null
       }),
       async () => {
+        if (isRescueActive(env)) {
+          console.warn("[amsg:rescue] \u6551\u63F4\u6A21\u5F0F\u5F00\u7740\uFF0C\u8FD9\u4E00\u8DF3\u4E0D\u6295\u9012\u3001\u4E0D\u6E05\u7406");
+          return;
+        }
         await ensureSchemaOnce(env.DB, SCHEMA_VERSION, () => upstream.ensureSchema(env));
         const outcome = await upstream.scheduled(event, env);
         await recordTickOutcome(env.DB, outcome);

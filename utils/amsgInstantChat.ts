@@ -39,7 +39,7 @@ import { announceEmotionDone } from './chatGenEvents';
 import { dispatchAmsgResult } from './amsgResults';
 import { DB } from './db';
 import type { AmsgEmotionEvalSpec } from '../worker/amsg/src/emotionEval';
-import { AMSG_BUNDLE_VERSION, compareBundleVersions } from './amsgBundleVersion';
+import { AMSG_INSTANT_CHAT_MIN_BUNDLE_VERSION, compareBundleVersions } from './amsgBundleVersion';
 import type { AmsgSarModuleSnapshot } from './vrWorld/sarEnvelopeCore';
 
 const HEADER = '[AmsgInstantChat]';
@@ -300,7 +300,7 @@ export interface InstantChatReadiness {
   reason?: InstantChatReadinessReason;
   /**
    * 那台 Worker 贴的 bundle 是否不旧于本 App 认的这一版（存量 workerBundleVersion 等于或
-   * 新于 AMSG_BUNDLE_VERSION；App 还是缓存的旧构建时 Worker 会更新，那也认得新协议）。只在 ready 时给：true / false 是探到过的结论，
+   * 新于 AMSG_INSTANT_CHAT_MIN_BUNDLE_VERSION；App 还是缓存的旧构建时 Worker 会更新，那也认得新协议）。只在 ready 时给：true / false 是探到过的结论，
    * undefined = 不知道。不传 ensureBundleVersion 时它就是「还没探过」；传了的话
    * 存量为空会当场现探一次，那时 undefined 意味着「现探也没问到」。
    *
@@ -317,7 +317,7 @@ const resolveWorkerBundleCurrent = (
   const deployed = config.workerBundleVersion;
   if (deployed === undefined) return undefined;
   if (deployed === null) return false;
-  return deployed === AMSG_BUNDLE_VERSION || (compareBundleVersions(deployed, AMSG_BUNDLE_VERSION) ?? -1) > 0;
+  return (compareBundleVersions(deployed, AMSG_INSTANT_CHAT_MIN_BUNDLE_VERSION) ?? -1) >= 0;
 };
 
 /** ready 的那一档带上 bundle 结论；不知道就不带这个键。 */
@@ -406,7 +406,7 @@ const probeBundleCurrentNow = async (): Promise<boolean | undefined> => {
   const task = (async () => {
     try {
       // 问到答案时 probeWorkerVersion 会顺手把版本存进 workerBundleVersion。
-      const { state } = await ActiveMsgClient.probeWorkerVersion({ timeoutMs: INSTANT_CHAT_REPROBE_TIMEOUT_MS });
+      const { state } = await ActiveMsgClient.probeWorkerVersion({ timeoutMs: INSTANT_CHAT_REPROBE_TIMEOUT_MS, expectedVersion: AMSG_INSTANT_CHAT_MIN_BUNDLE_VERSION });
       return state === 'current' || state === 'ahead' ? true : state === 'outdated' ? false : undefined;
     } catch {
       return undefined;

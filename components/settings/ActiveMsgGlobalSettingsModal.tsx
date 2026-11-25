@@ -48,7 +48,6 @@ import {
   type ProvisionProgress,
 } from '../../utils/cfProvision';
 import { isAmsgServerVersionAtLeast } from '../../utils/amsgWorkerVersion';
-import { AMSG_WORKER_RELEASE_VERSION } from '../../utils/amsgBundleVersion';
 import { trackEvent } from '../../utils/analytics';
 import {
   canRelayWorkerUrl, fetchRelayUsage, getRelayDeploymentSource, isRelayTokenWellFormed, resolveWorkerFetchBase, type RelayUsageResult,
@@ -590,7 +589,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     const workerActive = isAmsg2WorkerActive(nextConfig);
     if (workerActive) {
       void probeWorkerCaps(true);
-      void ActiveMsgClient.probeWorkerVersion({ expectedVersion: AMSG_WORKER_RELEASE_VERSION }).then(setWorkerVersion);
+      void ActiveMsgClient.probeWorkerVersion().then(setWorkerVersion);
       void runDiagnostics();
       // 已连接才问定时触发开没开：没连上的时候这事还轮不到操心。
       if (nextConfig.initializedAt) void ActiveMsgClient.getCronTriggerState().then(applyCronTriggerState);

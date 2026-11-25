@@ -28,6 +28,10 @@
 
 Worker 初始化的统一 fetch 转换器同时支持 Gemini。/config-check 返回 geminiNative: true；前台按探测过的 Worker 地址保存能力位。旧 Worker 未确认支持时阻止提交 Gemini 任务或凭据，并限时复查能力。能力位不从备份恢复，不跨 Worker 地址复用。发布前同步生成 worker/amsg/worker.bundle.js 和 public/amsg-worker.bundle.js；用户 Worker 更新到对应版本后后台原生请求才可用。
 
+### 二改站成品包
+
+二改站的 `2026-11-25` Worker 以生成上游稳定包 `2026-11-24` 的源码 `6e49fde` 为基线，保留 Gemini 原生和酒馆剧情年份。上游与本站分别发布。已连接的 Worker 可以把 `AMSG_BUNDLE_URL` 指向 `https://0k46oe.github.io/SullyOS/amsg-worker.bundle.js`，然后使用「重新检查并更新 Worker」切换。更新后在 `/config-check` 查看 `workerVersion` 和 `geminiNative`。
+
 ## 验证与资料
 
 协议和集成测试覆盖端点归一化、配置/预设/角色保存、图文、原位置提醒、工具签名续答、JSON、分页模型列表、分片流式、末尾缓存用量、截断/错误/取消、真实 amsg SDK。使用模拟服务响应，无真实账户生成或账单命中验证。

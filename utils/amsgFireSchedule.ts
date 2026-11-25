@@ -46,8 +46,8 @@ export const EXPIRE_POLICY_DESCRIPTION = [
   '这类兑现的是一个具体承诺，用户中途回来聊过天也不影响它该响。',
 ].join('\n');
 
-/** 即时对话是在回复用户，不能沿用「正在发主动消息」的语境。 */
-const buildScheduleToolDescription = (context: 'chat' | 'fire') => [
+/** 即时对话与本地聊天都是在回复用户，与定时触发「正在发主动消息」分开措辞。 */
+const buildScheduleToolDescription = (context: 'chat' | 'fire', maxActiveTasks?: number) => [
   ...(context === 'chat'
     ? [
       '创建定时主动消息：到指定时间后，你会根据最新聊天上下文生成并推送消息给用户。',
@@ -59,7 +59,11 @@ const buildScheduleToolDescription = (context: 'chat' | 'fire') => [
     ]),
   '排下的这条到点时会知道你这次说了什么，能接得上，不用在参数里复述。',
   'send_at 是开始生成的时间，不是送达时间（生成有十几秒延迟），且必须至少比现在晚 1 分钟。',
-  `一次最多排 ${MAX_FIRE_SCHEDULES} 条；每个角色同时挂的任务也有上限，排不下时会告诉你。`,
+  `一次最多排 ${MAX_FIRE_SCHEDULES} 条；${
+    typeof maxActiveTasks === 'number' && Number.isFinite(maxActiveTasks)
+      ? `每个角色最多同时挂 ${maxActiveTasks} 个任务`
+      : '每个角色同时挂的任务也有上限'
+  }，排不下时会告诉你。`,
   context === 'chat'
     ? '未来那个时刻真的想联系就排，尊重用户的生活和「别打扰」，不要为了排而排。'
     : '没有「接着说」的必要就别排——为了排而排出来的后续，用户读起来就是没话找话。',
@@ -136,12 +140,16 @@ const buildParameters = (example: string, abilities: SelfScheduleAbilities, stor
 });
 
 export const buildFireScheduleTool = (
-  opts: FireScheduleTimeOpts & { abilities: SelfScheduleAbilities; context?: 'chat' | 'fire' },
+  opts: FireScheduleTimeOpts & {
+    abilities: SelfScheduleAbilities;
+    context?: 'chat' | 'fire';
+    maxActiveTasks?: number;
+  },
 ): FireScheduleToolDef => ({
   type: 'function',
   function: {
     name: AMSG_FIRE_SCHEDULE_TOOL,
-    description: buildScheduleToolDescription(opts.context ?? 'fire'),
+    description: buildScheduleToolDescription(opts.context ?? 'fire', opts.maxActiveTasks),
     parameters: buildParameters(
       buildSendAtExample(opts.nowMs, opts.tz, opts.storyYearless),
       opts.abilities,
@@ -151,8 +159,7 @@ export const buildFireScheduleTool = (
 });
 
 /**
- * fire 侧的取消 / 改期工具声明。参数语义与前台同名工具一致（task_id 短 id、
- * send_at 裸墙钟），描述按 fire 语境（「你正在发消息」）微调。
+ * 取消 / 改期工具声明，前台聊天与后台 fire 共用同一套参数与描述。
  */
 export const buildFireCancelTool = (): FireScheduleToolDef => ({
   type: 'function',
@@ -178,7 +185,7 @@ export const buildFireRenewTool = (opts: FireScheduleTimeOpts): FireScheduleTool
     name: AMSG_FIRE_RENEW_TOOL,
     description: [
       '给你挂着的一个任务改触发时间：只换时间，沿用原有模式与提示方向。',
-      '一次性任务 = 整条改到新时间（编号不变）；循环任务 = 只给这一次补发一条一次性任务，原来的每天/每周节奏不动。',
+      '一次性任务 = 整条改到新时间；循环任务 = 只给这一次补发一条一次性任务，原来的每天/每周节奏不动。',
       '想改的是循环任务本身的时间、或者想说的内容方向已经变了，改用 cancel_active_message + schedule_active_message 重新创建。',
       ...(opts.storyYearless ? ['剧情年份已开启：send_at 只写 MM-DDTHH:mm:ss，不要写年份；系统会按你所在地换算成最近的真实日期。'] : []),
       `send_at 至少比现在晚 1 分钟（写你本地的墙钟时间，如 ${buildSendAtExample(opts.nowMs, opts.tz, opts.storyYearless)}，不带时区后缀）。`,
@@ -212,6 +219,18 @@ export const buildAmsg2ChatScheduleBrief = (targetName?: string): string => {
 };
 
 /**
+ * 说明块里教「怎么发起」的那一句。native 只说走工具调用接口；text（中转拒 tools）教正文
+ * 那一行的写法。单独导出给本地正文协议模式复用，两边教的是同一句。
+ */
+export const buildFireScheduleHowTo = (mode: 'native' | 'text', opts: FireScheduleTimeOpts): string => (
+  mode === 'native'
+    ? `需要时通过系统的工具调用接口发起 ${AMSG_FIRE_SCHEDULE_TOOL}，不要把工具名和参数写进正文。`
+    : `需要时单独输出一行 ${AMSG_FIRE_SCHEDULE_TOOL}({"send_at":"${
+      buildSendAtExample(opts.nowMs, opts.tz, opts.storyYearless)
+    }","prompt_hint":"接着说"})（send_at 写你本地的墙钟时间${opts.storyYearless ? '，格式 MM-DDTHH:mm:ss，不写年份' : '，不带时区后缀'}），系统会代为安排并把结果告诉你。`
+);
+
+/**
  * 拼进 prompt 的说明块。
  *
  * native 模式只说「有这么个能力、什么时候用」——工具签名已随请求声明，再教一遍正文语法
@@ -228,11 +247,7 @@ export const buildFireScheduleBlock = (
     limitsBrief?: string;
   },
 ): string => {
-  const howTo = mode === 'native'
-    ? `需要时通过系统的工具调用接口发起 ${AMSG_FIRE_SCHEDULE_TOOL}，不要把工具名和参数写进正文。`
-    : `需要时单独输出一行 ${AMSG_FIRE_SCHEDULE_TOOL}({"send_at":"${
-      buildSendAtExample(opts.nowMs, opts.tz, opts.storyYearless)
-    }","prompt_hint":"接着说"})（send_at 写你本地的墙钟时间${opts.storyYearless ? '，格式 MM-DDTHH:mm:ss，不写年份' : '，不带时区后缀'}），系统会代为安排并把结果告诉你。`;
+  const howTo = buildFireScheduleHowTo(mode, opts);
   return [
     '',
     '---',
@@ -285,8 +300,14 @@ export const buildTaskInstruction = (mode: ActiveMsg2Mode, promptHint?: string):
 export const AMSG_AWAY_MESSAGE_META = 'amsgAwayMessage';
 export const AMSG_AWAY_DELAY_META = 'amsgAwayDelayMinutes';
 
-export const buildAwayTaskInstruction = (delayMinutes: number): string => [
-  `对方已经超过 ${delayMinutes} 分钟没跟你说话了，这次是你主动去找对方。`,
+/**
+ * 任务 metadata 里的兜底指令：fire_pack 没带 awayAnchor（旧包）时 worker 用它；新包到点按
+ * awayMessagePrompt.buildAwayFireInstruction 现算。关了时间感知时不报等了多久。
+ */
+export const buildAwayTaskInstruction = (delayMinutes: number, opts: { showTime?: boolean } = {}): string => [
+  opts.showTime === false
+    ? '对方有一阵子没跟你说话了，这次是你主动去找对方。'
+    : `对方已经超过 ${delayMinutes} 分钟没跟你说话了，这次是你主动去找对方。`,
   '这次一定要发出消息：结合你们最后聊到哪儿、对方离开了多久、你自己这会儿在做什么，像真人一样自然地发一到三句私聊。',
   '可以惦记对方去哪了、分享你刚经历的事，或者接上没聊完的话；不要像系统提醒，也不要提「多少分钟」这种计时。',
 ].join('\n');
@@ -296,7 +317,8 @@ export const buildAwayTaskInstruction = (delayMinutes: number): string => [
 // 任务在进入见面对话时就建好；人还在见面里（「见面中」租约在续）时 worker 把它推到「最后
 // 一次见到人 + 等待时长」，人一走开租约不再续，到点就发。走开那一刻客户端什么都不用做，
 // 切到后台后脚本被冻住也不影响。
-// 到点必发；不受连发和每日上限拦、这一轮不给排程工具：它一次离开只发一条，带不出后续。
+// 到点必发；提醒本身不受连发和每日上限拦（一次离开只发一条）。这一轮照样给排程工具，
+// 排出来的是不带豁免的普通自排任务，到点照常过连发和每日上限。
 
 /** 任务 metadata 上的标记与等待时长（分钟）。worker 认这两个键。 */
 export const AMSG_DATE_LEAVE_META = 'amsgDateLeave';
@@ -304,9 +326,9 @@ export const AMSG_DATE_LEAVE_DELAY_META = 'amsgDateLeaveDelayMinutes';
 
 /** 云端任务指令和本地提示共用这一段，两条路说的是同一件事。 */
 export const buildDateLeaveInstruction = (): string => [
-  '你们刚才正在线下见面，聊到一半对方忽然走开了，到现在还没回来。你拿起手机，主动给对方发私聊找人。',
+  '你们刚才正在线下见面，聊到一半对方忽然走开了，到现在还没回来。你拿起手机，主动给对方发私聊。',
   '这次一定要发出消息：接着刚才见面时的气氛和你们聊到的地方，像真人一样自然地发一到三句。',
-  '可以问对方去哪了、是不是临时有事，说你还在等、或者先去做点别的；按你的人设和你们的关系来，不要像系统提醒，也不要提「多少分钟」这种计时。',
+  '按你的人设和你们的关系决定怎么开口：可以直接追问对方去哪了、是不是临时有事；也可以装作不经意，先说说你自己这会儿在做什么、想到了什么。不要像系统提醒，也不要提「多少分钟」这种计时。',
 ].join('\n');
 
 // ─── send_at 的时间参照系 ───

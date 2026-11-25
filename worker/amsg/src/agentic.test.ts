@@ -516,7 +516,7 @@ describe('processLLMRound — 穿透收尾丢掉悬空的「我去查查」', ()
 // 上游在最后一轮遇到 tool-request 会直接抛 AGENTIC_LOOP_EXCEEDED：这次攒下的旁白全丢、
 // 任务不出清、下一分钟整条从头重跑再烧一遍 LLM，而用户一个字都收不到。
 describe('processLLMRound — 最后一轮不再放行工具请求', () => {
-  it('最后一轮还想调工具 → 拿之前几轮的内容收尾', () => {
+  it('最后一轮还想调工具 → 去掉工具语法，保留正文收尾', () => {
     const state = createFireSessionState();
     processLLMRound(state, '我想想六月发生了什么。\n[[RECALL: 2026-06]]', build, null, null, 0);
     processLLMRound(state, '顺便看看天气。\n[[SEARCH: 明天 天气]]', build, null, null, 1);
@@ -528,7 +528,7 @@ describe('processLLMRound — 最后一轮不再放行工具请求', () => {
     const text = decision.pushPayloads.map((p) => p.message).join('\n');
     expect(text).toContain('我想想六月发生了什么');
     expect(text).toContain('顺便看看天气');
-    expect(text).not.toContain('还得再查一次');
+    expect(text).toContain('还得再查一次');
     expect(text).not.toContain('RECALL');
   });
 

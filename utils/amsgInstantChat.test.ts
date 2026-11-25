@@ -95,7 +95,7 @@ import {
   stageInstantChatExpiredNotices,
 } from './amsgInstantChat';
 import { FIRE_PACK_VERSION, unpackStateValue } from './amsgFirePack';
-import { AMSG_BUNDLE_VERSION, AMSG_WORKER_RELEASE_VERSION } from './amsgBundleVersion';
+import { AMSG_BUNDLE_VERSION, AMSG_INSTANT_CHAT_MIN_BUNDLE_VERSION, AMSG_WORKER_RELEASE_VERSION } from './amsgBundleVersion';
 import { ActiveMsgStore } from './activeMsgStore';
 import type { AmsgSarModuleSnapshot } from './vrWorld/sarEnvelopeCore';
 import { ChatPrompts } from './chatPrompts';
@@ -920,7 +920,7 @@ describe('开关', () => {
         .toEqual({ ready: true, workerBundleCurrent: true });
       expect(probe).toHaveBeenCalledTimes(1);
       // 发消息路上的现探必须带超时，别把用户按在发送键上干等。
-      expect(probe).toHaveBeenCalledWith({ timeoutMs: INSTANT_CHAT_REPROBE_TIMEOUT_MS });
+      expect(probe).toHaveBeenCalledWith({ timeoutMs: INSTANT_CHAT_REPROBE_TIMEOUT_MS, expectedVersion: AMSG_INSTANT_CHAT_MIN_BUNDLE_VERSION });
     });
 
     it('没探过 + 不需要信封（普通 / 恢复期回合）→ 不探，照旧不给结论', async () => {
@@ -1449,21 +1449,22 @@ describe('探测顺手记下 bundle 版本（workerBundleVersion）', () => {
   it('probeInstantChatSupportDetailed：问到答案就记版本', async () => {
     configCheck(200, { instantTick: true, workerVersion: '2099-01-01', anthropicMessages: true });
     await ActiveMsgClient.probeInstantChatSupportDetailed();
-    expect(versionWrites()).toContainEqual({ workerBundleVersion: '2099-01-01', anthropicMessagesSupported: true, anthropicMessagesWorkerUrl: (await ActiveMsgStore.getGlobalConfig()).workerUrl });
+    expect(versionWrites()).toContainEqual(expect.objectContaining({ workerBundleVersion: '2099-01-01', anthropicMessagesSupported: true, anthropicMessagesWorkerUrl: (await ActiveMsgStore.getGlobalConfig()).workerUrl }));
   });
 
   it('probeWorkerVersion：老 bundle 不报版本 → 记 null（问到了，确实旧）', async () => {
     configCheck(200, { instantTick: true });
     await ActiveMsgClient.probeWorkerVersion();
-    expect(versionWrites()).toContainEqual({ workerBundleVersion: null, anthropicMessagesSupported: false, anthropicMessagesWorkerUrl: (await ActiveMsgStore.getGlobalConfig()).workerUrl });
+    expect(versionWrites()).toContainEqual(expect.objectContaining({ workerBundleVersion: null, anthropicMessagesSupported: false, anthropicMessagesWorkerUrl: (await ActiveMsgStore.getGlobalConfig()).workerUrl }));
   });
 
-  it('设置页对照后端发布版本，不改变默认的 bundle 版本检查', async () => {
-    configCheck(200, { workerVersion: '2026-11-24' });
-    await expect(ActiveMsgClient.probeWorkerVersion({ expectedVersion: AMSG_WORKER_RELEASE_VERSION }))
-      .resolves.toMatchObject({ state: 'current', deployed: '2026-11-24', expected: '2026-11-24' });
+  it('按上游稳定包和本站原生包各自的发布版本判断', async () => {
+    configCheck(200, { workerVersion: AMSG_WORKER_RELEASE_VERSION });
     await expect(ActiveMsgClient.probeWorkerVersion())
-      .resolves.toMatchObject({ expected: AMSG_BUNDLE_VERSION });
+      .resolves.toMatchObject({ state: 'current', expected: AMSG_WORKER_RELEASE_VERSION });
+    configCheck(200, { workerVersion: AMSG_BUNDLE_VERSION, geminiNative: true });
+    await expect(ActiveMsgClient.probeWorkerVersion())
+      .resolves.toMatchObject({ state: 'current', expected: AMSG_BUNDLE_VERSION });
   });
 
   it('没问到答案（5xx）→ 一个字都不写，存量保持原样', async () => {

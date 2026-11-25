@@ -225,7 +225,7 @@ describe('取消中的 instant hook', () => {
 /** onBeforeFire 生成路径的返回值：{ messages, tools? }（skip 那一支各测各的）。 */
 interface FiredResult {
   messages: Array<{ role: string; content: string }>;
-  tools?: Array<{ function: { name: string; parameters: unknown } }>;
+  tools?: Array<{ function: { name: string; description?: string; parameters: unknown } }>;
   maxToolIterations?: number;
 }
 
@@ -1616,13 +1616,13 @@ describe('executeToolCalls 的工具编排', () => {
 
   // 轮次快用完了还在请求工具，上游会抛 AGENTIC_LOOP_EXCEEDED：这次攒的旁白全丢、任务
   // 不出清、下一分钟整条从头重跑。先在回喂里说一声，模型自己收尾最省。
-  it('倒数第二轮的回喂末尾加一句「这是最后一轮」', async () => {
+  it('倒数第二轮的回喂末尾要求停止调用工具', async () => {
     const session = await readySession();
     const [out] = await amsgHooks.executeToolCalls(
       [toolCall('c1', 'recall', { year: '2026', month: '06' })],
       { ...session, iteration: DEFAULT_TOOL_ITERATIONS - 2 },
     );
-    expect(out.content).toContain('最后一轮');
+    expect(out.content).toContain('这一轮不能再调用任何工具');
   });
 
   it('还早的轮次不加那句话（别一上来就催着收尾）', async () => {
@@ -4714,7 +4714,7 @@ describe('onBeforeFire — 即时对话分支', () => {
     // ctx.scheduleTask 存在才教「给自己排下一条」
     (ctx as any).scheduleTask = async () => ({ created: true, id: 1, uuid: 'u', nextSendAt: 'x' });
     const result = fired(await amsgHooks.onBeforeFire(ctx));
-    const appended = result.messages[result.messages.length - 1].content;
+    const appended = result.messages.filter((message) => message.role === 'system').map((message) => message.content).join('\n');
     expect(appended).toContain('【外部工具');         // MCP 说明块
     expect(appended).toContain('search_memory');
     expect(appended).toContain('给自己排下一条');      // 排程说明块

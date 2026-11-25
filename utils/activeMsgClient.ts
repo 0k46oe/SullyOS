@@ -39,7 +39,8 @@ import {
 } from '../types';
 import { getLastRealUserMessageAt } from './amsg2ExpireGuard';
 import { getLastAwayAnchorAt } from './awayMessageCore';
-import { AMSG_BUNDLE_VERSION, compareBundleVersions } from './amsgBundleVersion';
+import { readAwayAnchorInfo } from './awayMessagePrompt';
+import { AMSG_BUNDLE_VERSION, AMSG_WORKER_RELEASE_VERSION, compareBundleVersions } from './amsgBundleVersion';
 import { describeD1LimitCode } from './amsgD1Limits';
 import { explainCfTokenRejection, parseAmsgSelfUpdateState, type AmsgSelfUpdateReport } from './amsgSelfUpdateState';
 import { AMSG_AWAY_DELAY_META, AMSG_AWAY_MESSAGE_META, AMSG_DATE_LEAVE_META, AMSG_DATE_LEAVE_DELAY_META, buildAwayTaskInstruction, buildDateLeaveInstruction, buildTaskInstruction, resolveSendAtMs } from './amsgFireSchedule';
@@ -758,6 +759,7 @@ const buildTimeGapHint = async (charId: string) => {
     // lastAwayAnchorAt 额外把线下见面与实时通话记录算进在场起点（见 awayMessageCore）。
     lastUserMessageAt: getLastRealUserMessageAt(recentMessages),
     lastAwayAnchorAt: getLastAwayAnchorAt(recentMessages),
+    awayAnchor: readAwayAnchorInfo(recentMessages),
     recentMessages,
   };
 };
@@ -819,7 +821,7 @@ export const buildFirePack = async (
   // 请求内副本：召回与门牌只认这次现算（或本轮私聊刚算）的，角色对象上挂着的可能是
   // 别的 App、甚至很久以前的召回，一律不用。
   char = { ...char, memoryPalaceInjection: '', roomPlatesInjection: '' };
-  const [{ lastUserMessageAt, lastAwayAnchorAt }, recentMessages, library, schedule] = await Promise.all([
+  const [{ lastUserMessageAt, lastAwayAnchorAt, awayAnchor }, recentMessages, library, schedule] = await Promise.all([
     buildTimeGapHint(char.id),
     templateStub ? Promise.resolve([]) : loadCharacterContextMessages(char),
     // 表情库只喂系统提示词/近史渲染：占位模板路径整库都不用读（表情记录带图片数据，
@@ -1010,6 +1012,7 @@ export const buildFirePack = async (
     thinkingChainEnabled: outputStyle.thinkingActive,
     lastUserMessageAt,
     lastAwayAnchorAt,
+    awayAnchor,
     // 角色的时间参照系（见上面的 tzId / userTzId）：前者是角色自己的钟，后者是用户那边的，
     // worker 渲染时两者各管各的一行，绝不混用。
     tzId,
@@ -3858,8 +3861,8 @@ export const ActiveMsgClient = {
   /**
    * 用户那台 Worker 上跑的后端代码是不是最新的。
    *
-   * 比的是 `GET /config-check` 报的 workerVersion 和期望版本。默认对照本仓库的
-   * bundle 版本；设置页可传入独立发布的版本，不改变发消息或自动更新的判定。
+   * 对照 `GET /config-check` 报的 workerVersion 和对应发布版本。当前本站包带
+   * Gemini 原生能力；即时对话可传入自己的最低兼容版本。
    *
    * 三种拿不到结论的情况分开表态，因为界面上该说的话不一样：
    *   - Worker 报的版本比 App 认的还新 → ahead（App 是缓存的旧构建，该刷新页面，不该动 Worker）；
@@ -3867,7 +3870,7 @@ export const ActiveMsgClient = {
    *   - 网络不通 / 还没连上 → unknown（别在用户断网时催他更新）。
    */
   async probeWorkerVersion(options?: { timeoutMs?: number; expectedVersion?: string }): Promise<AmsgWorkerVersionProbe> {
-    const expected = options?.expectedVersion ?? AMSG_BUNDLE_VERSION;
+    let expected = options?.expectedVersion ?? AMSG_WORKER_RELEASE_VERSION;
     // timeoutMs：发消息路上现探时用的护栏（见 resolveInstantChatReadiness 的 ensureBundleVersion），
     // 超时按 unknown 处理。设置页那次不传。
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -3884,6 +3887,7 @@ export const ActiveMsgClient = {
       if (status !== 200 || body?.success !== true) return { state: 'unknown', deployed: null, expected, autoUpdate: null };
       await rememberWorkerBundleVersion(body, config.workerUrl);
       const deployed = typeof body?.data?.workerVersion === 'string' ? body.data.workerVersion : null;
+      if (!options?.expectedVersion && body?.data?.geminiNative === true) expected = AMSG_BUNDLE_VERSION;
       const autoUpdate = parseSelfUpdateReport(body?.data?.selfUpdate);
       if (!deployed) return { state: 'outdated', deployed: null, expected, autoUpdate };
       if (deployed === expected) return { state: 'current', deployed, expected, autoUpdate };
