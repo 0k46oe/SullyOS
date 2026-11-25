@@ -2648,13 +2648,19 @@ const Settings: React.FC = () => {
             </p>
         </SettingsSection>
         )}
-中转；GitHub 默认直连，网络受限时        {/* API 设置：聊天 / 识图 / 生图 */}
+中转；GitHub 默认直连，网络受限时可自行开启中转。
+            </p>
+        </SettingsSection>
+
+        {/* AI 连接设置区域 */}
+                {/* API 设置页签 */}
         <div className="rounded-2xl border border-slate-200 bg-white p-1.5 flex gap-1">
             <button type="button" onClick={() => setApiSettingsTab('chat')} className={apiSettingsTab === 'chat' ? 'flex-1 rounded-xl px-2 py-2 text-xs font-bold bg-primary text-white shadow-sm' : 'flex-1 rounded-xl px-2 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50'}>聊天 API</button>
             <button type="button" onClick={() => setApiSettingsTab('vision')} className={apiSettingsTab === 'vision' ? 'flex-1 rounded-xl px-2 py-2 text-xs font-bold bg-primary text-white shadow-sm' : 'flex-1 rounded-xl px-2 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50'}>识图 API</button>
             <button type="button" onClick={() => setApiSettingsTab('image')} className={apiSettingsTab === 'image' ? 'flex-1 rounded-xl px-2 py-2 text-xs font-bold bg-primary text-white shadow-sm' : 'flex-1 rounded-xl px-2 py-2 text-xs font-bold text-slate-500 hover:bg-slate-50'}>聊天生图</button>
         </div>
-        {apiSettingsTab === 'chat' && (<SettingsSection
+        {apiSettingsTab === 'chat' && (
+<SettingsSection
             title="API 配置"
             sectionProps={{ 'data-guide': 'api' }}
             icon={
@@ -2774,10 +2780,10 @@ const Settings: React.FC = () => {
                 )}
             </div>
         </SettingsSection>
-        )}                   </div>
-                )}
-            </div>
-        </        {apiSettingsTab === 'vision' && (
+        )}
+
+        {/* 独立识图 API：给不支持 image_url 的主模型补视觉能力；可手动从通用模型预设载入。 */}
+                {apiSettingsTab === 'vision' && (
 <SettingsSection
             title="识图 API"
             badge={
@@ -2934,10 +2940,7 @@ const Settings: React.FC = () => {
                 )}
             </div>
         </SettingsSection>
-        )}                   </div>
-                )}
-            </div>
-        </SettingsSection>
+        )}
 
         {/* API 调用记录入口 — 点开看最近 5 天各 App / 角色 / 用途的调用明细 */}
         <button
@@ -2956,9 +2959,13 @@ const Settings: React.FC = () => {
             </div>
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-slate-300 shrink-0">
                 <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z" clipRule="evenodd" />
-                  {apiSettingsTab === 'image' && (
+            </svg>
+        </button>
+
+        {/* 其他 API 区域 — 非 LLM 类（语音、写歌等），不会跟随预设切换 */}
+                {apiSettingsTab === 'image' && (
 <SettingsSection icon={<span aria-hidden="true">🖼️</span>} title="聊天生图"><ImageGenerationSettings value={localImageGeneration} onChange={setLocalImageGeneration} /><button type="button" onClick={handleSaveOtherApis} className="mt-3 w-full rounded-xl bg-primary p-3 text-white text-sm">{otherStatusMsg || '保存生图与其他 API'}</button></SettingsSection>
-        )}-primary p-3 text-white text-sm">{otherStatusMsg || '保存生图与其他 API'}</button></SettingsSection>
+        )}
         <SettingsSection
             title="语音与写歌"
             icon={
