@@ -4110,9 +4110,19 @@ export const ActiveMsgClient = {
           updated += 1;
         } else if (code !== 'TASK_NOT_FOUND' && code !== 'TASK_ALREADY_COMPLETED') {
           failed.push(uuid);
+          console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 更新待执行任务凭据失败`, {
+            taskUuid: uuid,
+            errorCode: code ?? response?.error?.cause?.code,
+            errorMessage: response?.error?.message ?? response?.error?.cause?.message ?? response?.error,
+            httpStatus: response?.status ?? response?.error?.status,
+          });
         }
-      } catch {
+      } catch (error) {
         failed.push(uuid);
+        console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 更新待执行任务凭据请求异常`, {
+          taskUuid: uuid,
+          error,
+        });
       }
     }
     return { updated, failed };
