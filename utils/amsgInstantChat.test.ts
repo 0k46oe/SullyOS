@@ -95,7 +95,7 @@ import {
   stageInstantChatExpiredNotices,
 } from './amsgInstantChat';
 import { FIRE_PACK_VERSION, unpackStateValue } from './amsgFirePack';
-import { AMSG_BUNDLE_VERSION } from './amsgBundleVersion';
+import { AMSG_BUNDLE_VERSION, AMSG_WORKER_RELEASE_VERSION } from './amsgBundleVersion';
 import { ActiveMsgStore } from './activeMsgStore';
 import type { AmsgSarModuleSnapshot } from './vrWorld/sarEnvelopeCore';
 import { ChatPrompts } from './chatPrompts';
@@ -1456,6 +1456,14 @@ describe('探测顺手记下 bundle 版本（workerBundleVersion）', () => {
     configCheck(200, { instantTick: true });
     await ActiveMsgClient.probeWorkerVersion();
     expect(versionWrites()).toContainEqual({ workerBundleVersion: null, anthropicMessagesSupported: false, anthropicMessagesWorkerUrl: (await ActiveMsgStore.getGlobalConfig()).workerUrl });
+  });
+
+  it('设置页对照后端发布版本，不改变默认的 bundle 版本检查', async () => {
+    configCheck(200, { workerVersion: '2026-11-24' });
+    await expect(ActiveMsgClient.probeWorkerVersion({ expectedVersion: AMSG_WORKER_RELEASE_VERSION }))
+      .resolves.toMatchObject({ state: 'current', deployed: '2026-11-24', expected: '2026-11-24' });
+    await expect(ActiveMsgClient.probeWorkerVersion())
+      .resolves.toMatchObject({ expected: AMSG_BUNDLE_VERSION });
   });
 
   it('没问到答案（5xx）→ 一个字都不写，存量保持原样', async () => {

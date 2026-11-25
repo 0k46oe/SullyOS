@@ -3858,17 +3858,16 @@ export const ActiveMsgClient = {
   /**
    * 用户那台 Worker 上跑的后端代码是不是最新的。
    *
-   * 比的是 `GET /config-check` 报的 workerVersion 和本 App 编译进来的
-   * AMSG_WORKER_VERSION——两者同源（都出自 utils/amsgWorkerVersion.ts），所以只要不相等
-   * 就是「那台 Worker 贴的是旧 bundle」。
+   * 比的是 `GET /config-check` 报的 workerVersion 和期望版本。默认对照本仓库的
+   * bundle 版本；设置页可传入独立发布的版本，不改变发消息或自动更新的判定。
    *
    * 三种拿不到结论的情况分开表态，因为界面上该说的话不一样：
    *   - Worker 报的版本比 App 认的还新 → ahead（App 是缓存的旧构建，该刷新页面，不该动 Worker）；
    *   - 老 bundle 根本不报这个字段 → outdated（它确实旧，只是旧到还不会自报家门）；
    *   - 网络不通 / 还没连上 → unknown（别在用户断网时催他更新）。
    */
-  async probeWorkerVersion(options?: { timeoutMs?: number }): Promise<AmsgWorkerVersionProbe> {
-    const expected = AMSG_BUNDLE_VERSION;
+  async probeWorkerVersion(options?: { timeoutMs?: number; expectedVersion?: string }): Promise<AmsgWorkerVersionProbe> {
+    const expected = options?.expectedVersion ?? AMSG_BUNDLE_VERSION;
     // timeoutMs：发消息路上现探时用的护栏（见 resolveInstantChatReadiness 的 ensureBundleVersion），
     // 超时按 unknown 处理。设置页那次不传。
     let timer: ReturnType<typeof setTimeout> | undefined;

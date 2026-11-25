@@ -1,8 +1,7 @@
 // 主动消息 2.0 后端 bundle（worker/amsg）代码版本的唯一出处。
 //
 // worker bundle（worker/amsg/src/index.ts → GET /config-check 的 workerVersion）和
-// SullyOS 前端（设置页判断「有没有新版可更」）都从这里 import，所以用户那台 Worker 报回来的
-// 版本和 App 里认的版本不会各说各话——除非那台 Worker 贴的是旧 bundle，而那正是要认出来的事。
+// SullyOS 前端的默认兼容性检查都从这里 import。设置页可以单独对照已发布的 Worker 版本。
 //
 // 什么时候改：worker/amsg/src/* 有了「用户不更新就用不上 / 会出错」的改动时。
 // 纯注释、纯重构不用动。格式 YYYY-MM-DD，同一天发第二版就加 .2/.3 后缀；
@@ -14,6 +13,9 @@
 //   - utils/buildInfo.ts 的 APP_VERSION 是整个 SullyOS App 的版本。
 //   这里管的只有一样：用户自己那台 Worker 上跑的这份 bundle 是哪天的。
 export const AMSG_BUNDLE_VERSION = '2026-11-08';
+
+// 设置页显示的发布版本，不改变本仓库的 bundle 或兼容性门槛。
+export const AMSG_WORKER_RELEASE_VERSION = '2026-11-24';
 
 const BUNDLE_VERSION_PATTERN = /^(\d{4}-\d{2}-\d{2})(?:\.(\d+))?$/;
 
